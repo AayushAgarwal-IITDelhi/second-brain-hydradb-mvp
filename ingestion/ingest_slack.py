@@ -1,18 +1,35 @@
 """
 CLI script: ingest Slack channels into HydraDB.
 
-Run from project root:
+Run from the `backend/` directory:
     python -m ingestion.ingest_slack
+
+Or directly:
+    python backend/ingestion/ingest_slack.py
+
+For each Slack channel listed in SLACK_CHANNEL_IDS:
+    1. Pull messages via conversations.history (paginated).
+    2. For any thread parent, pull replies via conversations.replies.
+    3. Build one .md file per standalone message and per thread, with a
+       source metadata block at the top.
+    4. Skip anything already recorded in data/ingestion_state.json.
+    5. Upload remaining .md files to HydraDB as multipart/form-data.
+    6. Record each successful upload in ingestion_state.json so the next
+       run doesn't re-upload the same documents.
+
+Set FORCE_REINGEST=true in the environment to ignore existing state and
+re-upload everything (state is still updated after a successful upload).
 """
 
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
+# Allow running this file directly: put backend/ on sys.path so the
+# top-level hydradb_client import works either way.
 _THIS_DIR = Path(__file__).resolve().parent
 _BACKEND_DIR = _THIS_DIR.parent
-
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
@@ -20,83 +37,113 @@ from dotenv import load_dotenv  # noqa: E402
 from slack_sdk.errors import SlackApiError  # noqa: E402
 
 from ingestion.slack_client import SlackClientWrapper  # noqa: E402
-from ingestion.normalize import is_noise, is_thread_parent, is_thread_reply  # noqa: E402
+from ingestion.normalize import (  # noqa: E402
+    is_noise,
+    is_thread_parent,
+    is_thread_reply,
+)
+from ingestion.ingestion_state import (  # noqa: E402
+    IngestionState,
+    stable_key_for_message,
+    stable_key_for_thread,
+)
 from hydradb_client import HydraDBClient, summarize_upload_response  # noqa: E402
 
 
+# Tuning knobs (overridable via env)
 MESSAGES_PER_CHANNEL = int(os.getenv("SLACK_LIMIT_PER_CHANNEL", "500"))
 UPLOAD_BATCH_SIZE = int(os.getenv("HYDRADB_BATCH_SIZE", "50"))
 
+# Where the local dedupe-state JSON file lives.
+STATE_PATH = _BACKEND_DIR / "data" / "ingestion_state.json"
 
+
+# ---------------------------------------------------------------------- #
+# Helpers
+# ---------------------------------------------------------------------- #
 def parse_channel_ids() -> List[str]:
     raw = os.getenv("SLACK_CHANNEL_IDS", "")
     return [cid.strip() for cid in raw.split(",") if cid.strip()]
 
 
+def force_reingest_enabled() -> bool:
+    return os.getenv("FORCE_REINGEST", "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
 def fetch_channel_name(slack: SlackClientWrapper, channel_id: str) -> str:
+    """
+    Look up the human-readable channel name once per channel.
+    Falls back to the channel_id if the lookup fails (e.g. for DMs).
+    """
     try:
         resp = slack.client.conversations_info(channel=channel_id)
         channel = resp.get("channel") or {}
         name = channel.get("name") or channel.get("name_normalized")
-
         if name:
             return name
-
     except SlackApiError as e:
         err = e.response.get("error", str(e)) if getattr(e, "response", None) else str(e)
         print(f"[ingest] conversations_info failed for {channel_id}: {err}")
-
     return channel_id
 
 
 def _safe_filename_part(name: str) -> str:
+    """Make a string safe to drop into a filename."""
     cleaned = []
-
     for ch in name:
         if ch.isalnum() or ch in ("-", "_"):
             cleaned.append(ch)
         else:
             cleaned.append("_")
-
     return "".join(cleaned) or "unknown"
 
 
 def _ts_for_filename(ts: str) -> str:
+    """Strip the fractional part of a Slack ts for use in a filename."""
     if not ts:
         return "unknown"
-
     return ts.split(".")[0]
 
 
+# ---------------------------------------------------------------------- #
+# Document builders -> {"filename", "content", "stable_key", ...metadata}
+# ---------------------------------------------------------------------- #
 def build_message_file(
     message: Dict[str, Any],
     channel_id: str,
     channel_name: str,
-) -> Dict[str, str]:
+) -> Dict[str, Any]:
+    """Build a single .md file for a standalone Slack message."""
     ts = message.get("ts", "")
     user = message.get("user") or message.get("bot_id") or "unknown"
     text = (message.get("text") or "").strip()
+    stable_key = stable_key_for_message(channel_id, ts)
 
-    content = "\n".join(
-        [
-            "# Slack Message",
-            f"Channel: {channel_name}",
-            f"Channel ID: {channel_id}",
-            f"Timestamp: {ts}",
-            f"User: {user}",
-            "",
-            text,
-        ]
-    )
+    content = "\n".join([
+        "# Slack Message",
+        f"Source Key: {stable_key}",
+        f"Channel: {channel_name}",
+        f"Channel ID: {channel_id}",
+        f"Timestamp: {ts}",
+        f"User: {user}",
+        "",
+        text,
+    ])
 
     filename = (
         f"slack_{_safe_filename_part(channel_name)}_"
         f"{_ts_for_filename(ts)}.md"
     )
-
     return {
         "filename": filename,
         "content": content,
+        "stable_key": stable_key,
+        "channel_id": channel_id,
+        "channel_name": channel_name,
+        "ts": ts,
+        "thread_ts": None,
     }
 
 
@@ -105,30 +152,34 @@ def build_thread_file(
     replies: List[Dict[str, Any]],
     channel_id: str,
     channel_name: str,
-) -> Dict[str, str]:
+) -> Dict[str, Any]:
+    """Build a single .md file combining a thread parent and its replies."""
     thread_ts = parent_message.get("ts", "")
-    parent_user = parent_message.get("user") or parent_message.get("bot_id") or "unknown"
+    parent_user = (
+        parent_message.get("user") or parent_message.get("bot_id") or "unknown"
+    )
     parent_text = (parent_message.get("text") or "").strip()
+    stable_key = stable_key_for_thread(channel_id, thread_ts)
 
+    # Slack returns the parent as the first reply; drop it + any noise.
     real_replies = [
-        m for m in replies
-        if m.get("ts") != thread_ts and not is_noise(m)
+        m for m in replies if m.get("ts") != thread_ts and not is_noise(m)
     ]
 
     lines = [
         "# Slack Thread",
+        f"Source Key: {stable_key}",
         f"Channel: {channel_name}",
         f"Channel ID: {channel_id}",
         f"Thread: {thread_ts}",
+        f"Parent User: {parent_user}",
         "",
         "Parent:",
         f"[{thread_ts}] {parent_user}: {parent_text}",
     ]
-
     if real_replies:
         lines.append("")
         lines.append("Replies:")
-
         for reply in real_replies:
             r_ts = reply.get("ts", "")
             r_user = reply.get("user") or reply.get("bot_id") or "unknown"
@@ -136,37 +187,48 @@ def build_thread_file(
             lines.append(f"[{r_ts}] {r_user}: {r_text}")
 
     content = "\n".join(lines)
-
     filename = (
         f"slack_{_safe_filename_part(channel_name)}_"
         f"{_ts_for_filename(thread_ts)}.md"
     )
-
     return {
         "filename": filename,
         "content": content,
+        "stable_key": stable_key,
+        "channel_id": channel_id,
+        "channel_name": channel_name,
+        "ts": None,
+        "thread_ts": thread_ts,
     }
 
 
+# ---------------------------------------------------------------------- #
+# Channel processing
+# ---------------------------------------------------------------------- #
 def process_channel(
     slack: SlackClientWrapper,
     channel_id: str,
+    state: IngestionState,
+    force: bool,
 ) -> Dict[str, Any]:
+    """
+    Pull messages + threads for one channel, then split into:
+      - files_to_upload: brand-new (or force-mode) docs
+      - skipped_count:   docs already present in state (only when not force)
+    """
     channel_name = fetch_channel_name(slack, channel_id)
-
     print(
-        f"\n[ingest] Channel {channel_id} -> "
-        f"'{channel_name}'; fetching messages ..."
+        f"\n[ingest] Channel {channel_id} -> '{channel_name}'; fetching messages ..."
     )
 
     raw_messages = slack.fetch_channel_messages(
         channel_id=channel_id,
         limit_per_channel=MESSAGES_PER_CHANNEL,
     )
-
     print(f"[ingest] Got {len(raw_messages)} raw messages from {channel_id}.")
 
-    files: List[Dict[str, str]] = []
+    files_to_upload: List[Dict[str, Any]] = []
+    skipped_count = 0
     threads_fetched = 0
 
     for message in raw_messages:
@@ -174,36 +236,38 @@ def process_channel(
             continue
 
         if is_thread_parent(message):
-            thread_ts = message.get("ts")
-            print(f"[ingest]   -> fetching thread {thread_ts}")
+            thread_ts = message.get("ts", "")
+            stable_key = stable_key_for_thread(channel_id, thread_ts)
+            if not force and state.has(stable_key):
+                print(f"[ingest] skipping already uploaded: {stable_key}")
+                skipped_count += 1
+                continue
 
+            print(f"[ingest]   -> fetching thread {thread_ts}")
             replies = slack.fetch_thread_replies(
                 channel_id=channel_id,
                 thread_ts=thread_ts,
             )
-
             threads_fetched += 1
-
-            files.append(
-                build_thread_file(
-                    parent_message=message,
-                    replies=replies,
-                    channel_id=channel_id,
-                    channel_name=channel_name,
-                )
+            files_to_upload.append(
+                build_thread_file(message, replies, channel_id, channel_name)
             )
-
             continue
 
+        # Skip thread replies surfaced in conversations.history; their
+        # content lives in the thread document.
         if is_thread_reply(message):
             continue
 
-        files.append(
-            build_message_file(
-                message=message,
-                channel_id=channel_id,
-                channel_name=channel_name,
-            )
+        ts = message.get("ts", "")
+        stable_key = stable_key_for_message(channel_id, ts)
+        if not force and state.has(stable_key):
+            print(f"[ingest] skipping already uploaded: {stable_key}")
+            skipped_count += 1
+            continue
+
+        files_to_upload.append(
+            build_message_file(message, channel_id, channel_name)
         )
 
     return {
@@ -211,84 +275,187 @@ def process_channel(
         "channel_name": channel_name,
         "raw_count": len(raw_messages),
         "thread_count": threads_fetched,
-        "files": files,
+        "skipped_count": skipped_count,
+        "files": files_to_upload,
     }
+
+
+# ---------------------------------------------------------------------- #
+# Upload + state update
+# ---------------------------------------------------------------------- #
+def _result_is_success(result: Dict[str, Any]) -> bool:
+    """Mirror summarize_upload_response's per-item rule."""
+    status = (result.get("status") or "").lower()
+    if status in ("failed", "error"):
+        return False
+    if result.get("error"):
+        return False
+    return True
+
+
+def _record_successful_uploads(
+    state: IngestionState,
+    batch: List[Dict[str, Any]],
+    response: Dict[str, Any],
+) -> int:
+    """
+    Map HydraDB's per-file results back to the prepared files by filename
+    and write successes into the state object. Returns how many docs we
+    recorded.
+
+    Falls back gracefully:
+      - If `results` array exists, match by filename and use each result's
+        own status / source_id.
+      - If `results` is missing but the overall response says success
+        (success_count > 0 or HTTP 2xx body with no per-item failures),
+        record every file in the batch.
+    """
+    files_by_name = {f["filename"]: f for f in batch}
+    recorded = 0
+
+    results = response.get("results") if isinstance(response, dict) else None
+
+    if isinstance(results, list) and results:
+        for r in results:
+            if not _result_is_success(r):
+                continue
+            filename = r.get("filename") or r.get("name")
+            if not filename or filename not in files_by_name:
+                continue
+            f = files_by_name[filename]
+            source_id = r.get("source_id") or r.get("id") or r.get("doc_id")
+            state.mark_uploaded(
+                stable_key=f["stable_key"],
+                filename=f["filename"],
+                channel_id=f["channel_id"],
+                channel_name=f["channel_name"],
+                ts=f.get("ts"),
+                thread_ts=f.get("thread_ts"),
+                source_id=source_id,
+            )
+            recorded += 1
+        return recorded
+
+    # No per-file results -> fall back to summarize_upload_response's view.
+    ok, _ = summarize_upload_response(response or {}, batch_size=len(batch))
+    if ok > 0:
+        # Best we can do without per-file feedback: record all files with
+        # source_id=None. The next run will then skip them.
+        for f in batch:
+            state.mark_uploaded(
+                stable_key=f["stable_key"],
+                filename=f["filename"],
+                channel_id=f["channel_id"],
+                channel_name=f["channel_name"],
+                ts=f.get("ts"),
+                thread_ts=f.get("thread_ts"),
+                source_id=None,
+            )
+            recorded += 1
+
+    return recorded
 
 
 def upload_in_batches(
     hydra: HydraDBClient,
-    files: List[Dict[str, str]],
+    files: List[Dict[str, Any]],
+    state: IngestionState,
 ) -> Dict[str, int]:
+    """
+    Upload `files` to HydraDB in batches, tally success/failure, and
+    persist state after each batch so an interrupted run doesn't lose
+    progress.
+    """
     successes = 0
     failures = 0
 
     for start in range(0, len(files), UPLOAD_BATCH_SIZE):
         batch = files[start:start + UPLOAD_BATCH_SIZE]
-
         print(
             f"\n[ingest] Uploading batch {start}-{start + len(batch)} "
             f"({len(batch)} files) ..."
         )
 
+        # The HydraDB client expects {filename, content} dicts; our prepared
+        # files carry extra metadata fields too — those are harmless extras.
         response = hydra.upload_knowledge(batch)
-
         ok, bad = summarize_upload_response(
             response if isinstance(response, dict) else {},
             batch_size=len(batch),
         )
-
         successes += ok
         failures += bad
 
-    return {
-        "successes": successes,
-        "failures": failures,
-    }
+        _record_successful_uploads(
+            state,
+            batch,
+            response if isinstance(response, dict) else {},
+        )
+        # Save after every batch so a crash mid-run still keeps partial progress.
+        state.save()
+
+    return {"successes": successes, "failures": failures}
 
 
+# ---------------------------------------------------------------------- #
+# Main
+# ---------------------------------------------------------------------- #
 def main() -> None:
     load_dotenv()
 
     channel_ids = parse_channel_ids()
-
     if not channel_ids:
         print("[ingest] No SLACK_CHANNEL_IDS configured. Set it in .env and try again.")
         sys.exit(1)
 
+    force = force_reingest_enabled()
+    if force:
+        print("[ingest] FORCE_REINGEST=true -> ignoring existing state for dedupe.")
+
     slack = SlackClientWrapper()
     hydra = HydraDBClient()
+    state = IngestionState(STATE_PATH)
+    print(
+        f"[ingest] Loaded ingestion state from {STATE_PATH} "
+        f"({len(state.entries)} entries known)."
+    )
 
     total_raw_messages = 0
     total_threads = 0
-    all_files: List[Dict[str, str]] = []
+    total_skipped = 0
+    all_files: List[Dict[str, Any]] = []
 
     for channel_id in channel_ids:
         try:
-            result = process_channel(slack, channel_id)
-        except Exception as e:
+            result = process_channel(slack, channel_id, state, force=force)
+        except Exception as e:  # noqa: BLE001 -- keep going on bad channels
             print(f"[ingest] Unexpected error processing channel {channel_id}: {e}")
             continue
 
         total_raw_messages += result["raw_count"]
         total_threads += result["thread_count"]
+        total_skipped += result["skipped_count"]
         all_files.extend(result["files"])
 
     print("\n[ingest] ============================================")
-    print(f"[ingest] Channels processed:    {len(channel_ids)}")
-    print(f"[ingest] Raw messages fetched:  {total_raw_messages}")
-    print(f"[ingest] Threads fetched:       {total_threads}")
-    print(f"[ingest] Knowledge files ready: {len(all_files)}")
+    print(f"[ingest] Channels processed:       {len(channel_ids)}")
+    print(f"[ingest] Raw messages fetched:     {total_raw_messages}")
+    print(f"[ingest] Threads fetched:          {total_threads}")
+    print(f"[ingest] Files prepared:           {len(all_files)}")
+    print(f"[ingest] Skipped (already in state):{total_skipped}")
     print("[ingest] ============================================")
 
     if not all_files:
-        print("[ingest] Nothing to upload. Exiting.")
+        print("[ingest] Nothing new to upload. Exiting.")
         return
 
-    stats = upload_in_batches(hydra, all_files)
+    stats = upload_in_batches(hydra, all_files, state)
 
     print("\n[ingest] ============================================")
     print(f"[ingest] Upload successes: {stats['successes']}")
     print(f"[ingest] Upload failures:  {stats['failures']}")
+    print(f"[ingest] State entries now: {len(state.entries)} "
+          f"(saved to {STATE_PATH})")
     print("[ingest] ============================================")
 
 
