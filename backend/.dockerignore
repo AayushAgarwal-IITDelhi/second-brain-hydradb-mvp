@@ -1,0 +1,13 @@
+**/__pycache__
+**/*.pyc
+**/.venv
+**/venv
+**/.env
+**/.env.local
+**/data/ingestion_state.json
+**/data/ingestion_state.json.tmp
+.git
+.gitignore
+.vscode
+.idea
+*.md

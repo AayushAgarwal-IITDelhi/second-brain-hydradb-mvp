@@ -22,7 +22,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from hydradb_client import HydraDBClient
-from llm import INSUFFICIENT_CONTEXT_ANSWER, generate_grounded_answer
+from llm import generate_grounded_answer
+from prompts import INSUFFICIENT_CONTEXT_ANSWER
 from ingestion.ingestion_state import IngestionState
 
 
@@ -509,12 +510,58 @@ def _strip_invalid_citations(answer: str, allowed_indexes: Set[int]) -> str:
     return _CITATION_PATTERN.sub(_replace, answer)
 
 
+def _source_passes_filters(
+    source_card: Dict[str, Any],
+    channel: Optional[str],
+    user: Optional[str],
+    document_type: Optional[str],
+) -> bool:
+    """
+    Return True if this source card should be kept given the filters.
+
+    Filters only apply when the source card carries the corresponding
+    metadata. If a card was built from a chunk that didn't join to state
+    (no `channel` / `user` / `document_type` fields), we let it through —
+    better to over-include than to silently drop legitimate matches.
+    Comparisons are case-insensitive for channel/user.
+    """
+    if channel:
+        card_channel = source_card.get("channel")
+        if isinstance(card_channel, str) and card_channel.lower() != channel.lower():
+            return False
+    if user:
+        card_user = source_card.get("user")
+        if isinstance(card_user, str) and card_user.lower() != user.lower():
+            return False
+    if document_type:
+        card_type = source_card.get("document_type")
+        if isinstance(card_type, str) and card_type != document_type:
+            return False
+    return True
+
+
 # ---------------------------------------------------------------------- #
 # Public entry point
 # ---------------------------------------------------------------------- #
-def answer_question(question: str, top_k: int = 5) -> Dict[str, Any]:
+def answer_question(
+    question: str,
+    top_k: int = 5,
+    mode: str = "default",
+    channel: Optional[str] = None,
+    user: Optional[str] = None,
+    document_type: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     End-to-end recall + grounded answer.
+
+    Args:
+        question:       the natural-language question.
+        top_k:          how many chunks to ask HydraDB for.
+        mode:           "default" | "summary" | "decisions" | "action_items"
+                        | "who_said" — selects the system prompt.
+        channel:        optional channel-name filter (e.g. "general").
+        user:           optional user-name filter (e.g. "Praveer Nema").
+        document_type:  optional "message" or "thread".
 
     Returns:
         {
@@ -555,12 +602,22 @@ def answer_question(question: str, top_k: int = 5) -> Dict[str, Any]:
     # Build numbered context block + parallel source list.
     context_blocks: List[str] = []
     sources: List[Dict[str, Any]] = []
+    filtered_out = 0
     for i, chunk in enumerate(chunks, start=1):
         text = _chunk_text(chunk).strip()
         if not text:
             continue
         score = _chunk_score(chunk)
         source_card = _build_source_card(chunk, i, score, state)
+
+        # Drop chunks that don't match optional filters. We use the same
+        # index numbering across the LLM context AND the cleaned sources,
+        # so when a chunk is filtered out we skip BOTH — the LLM never
+        # sees it and there's no dangling source card.
+        if not _source_passes_filters(source_card, channel, user, document_type):
+            filtered_out += 1
+            continue
+
         # The label we put into the LLM context next to [i] — prefer the
         # channel name when we have it, otherwise the minimal source id.
         context_label = source_card.get("channel") or source_card.get("source")
@@ -593,7 +650,11 @@ def answer_question(question: str, top_k: int = 5) -> Dict[str, Any]:
         }
 
     context_text = "\n\n".join(context_blocks)
-    answer = generate_grounded_answer(question=question, context=context_text)
+    answer = generate_grounded_answer(
+        question=question,
+        context=context_text,
+        mode=mode,
+    )
 
     # Clean the sources array for the UI WITHOUT touching the LLM context
     # above. The LLM still saw every numbered chunk and its [N] citations
@@ -615,8 +676,10 @@ def answer_question(question: str, top_k: int = 5) -> Dict[str, Any]:
         "debug": {
             "chunks_returned": len(chunks),
             "chunks_used": len(context_blocks),
+            "chunks_filtered_out": filtered_out,
             "sources_before_clean": len(sources),
             "sources_after_clean": len(cleaned_sources),
+            "mode": mode,
             "top_k": top_k,
         },
     }

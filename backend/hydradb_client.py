@@ -23,6 +23,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from errors import HydraDBError, UpstreamTimeoutError
+
 
 # ---------------------------------------------------------------------- #
 # If your HydraDB deployment uses "max_results" instead of "top_k" for the
@@ -237,14 +239,19 @@ class HydraDBClient:
         """
         Call POST /recall/full_recall and return the parsed JSON response.
 
-        On any failure (network error, non-2xx, non-JSON body) returns {}
-        and prints the full HydraDB response so the cause is obvious. If
-        the server complains about `top_k`, the printed hint points at
-        RECALL_TOP_K_FIELD at the top of this module.
+        Raises:
+            HydraDBError          on non-2xx, empty query, or bad JSON.
+            UpstreamTimeoutError  when the request times out.
+
+        Operators can still see the full HydraDB error body in stdout
+        via the log line we print here; the exception only carries a
+        friendly summary back to the caller.
         """
         if not query or not query.strip():
-            print("[hydradb] full_recall called with an empty query.")
-            return {}
+            raise HydraDBError(
+                detail="Query was empty.",
+                log_context="full_recall called with empty query",
+            )
 
         url = f"{self.base_url}/recall/full_recall"
         payload = {
@@ -260,13 +267,20 @@ class HydraDBClient:
 
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=60)
+        except requests.Timeout as e:
+            raise UpstreamTimeoutError(
+                log_context=f"HydraDB full_recall timed out: {e}",
+            )
         except requests.RequestException as e:
-            print(f"[hydradb] Network error during full_recall: {e}")
-            return {}
+            raise HydraDBError(
+                log_context=f"network error during full_recall: {e}",
+            )
 
         print(f"[hydradb] POST {url} -> HTTP {response.status_code}")
 
         if response.status_code >= 400:
+            # Print operator-facing detail to stdout but don't echo it to
+            # the user — that body can include long stack traces.
             print(f"[hydradb] Response body: {response.text}")
             print(
                 f"[hydradb] HINT: HydraDB rejected the request. If the error "
@@ -274,10 +288,14 @@ class HydraDBClient:
                 f"RECALL_TOP_K_FIELD at the top of hydradb_client.py "
                 f"(e.g. to 'max_results')."
             )
-            return {}
+            raise HydraDBError(
+                detail=f"Knowledge backend returned HTTP {response.status_code}.",
+                log_context=f"full_recall HTTP {response.status_code} body={response.text[:400]}",
+            )
 
         try:
             return response.json()
         except ValueError:
-            print(f"[hydradb] Recall response was not JSON: {response.text[:500]}")
-            return {}
+            raise HydraDBError(
+                log_context=f"non-JSON recall response: {response.text[:500]}",
+            )

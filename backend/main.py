@@ -4,29 +4,17 @@ FastAPI app for the Second Brain MVP.
 Endpoints:
     GET  /            -> service info card             (public)
     GET  /api/health  -> {"status": "ok", ...}         (public)
-    POST /api/query   -> {"answer", "sources", ...}    (requires X-API-Key)
+    POST /api/query   -> {"answer", "sources", ...}    (X-API-Key + rate limited)
 
-CORS: configured for separate frontend dev servers. The browser sends an
-OPTIONS preflight before the real request; CORSMiddleware answers it. The
-frontend then makes the actual POST. Note for frontend devs: every call
-to /api/query must include the header:
-
-    X-API-Key: <APP_API_KEY>
-
-(no cookies / no Authorization header — just this one custom header).
+The frontend MUST send `X-API-Key: <APP_API_KEY>` on every protected call.
 
 Run with:
     uvicorn main:app --reload --port 8000
-
-Then:
-    curl -X POST http://127.0.0.1:8000/api/query \\
-        -H "Content-Type: application/json" \\
-        -H "X-API-Key: change-me-dev-key" \\
-        -d '{"question": "What is the memory layer for the MVP?", "top_k": 5}'
 """
 
 import os
-from typing import Any, Dict, List
+from contextlib import asynccontextmanager
+from typing import Any, Dict, List, Literal, Optional
 
 from dotenv import load_dotenv
 
@@ -38,13 +26,14 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from pydantic import BaseModel, ConfigDict, Field  # noqa: E402
 
 from auth import require_api_key  # noqa: E402
+from errors import AppError, app_error_handler  # noqa: E402
+from rate_limit import rate_limit_dependency  # noqa: E402
 from recall import answer_question  # noqa: E402
+from scheduler import start_scheduler, stop_scheduler  # noqa: E402
+from startup import validate_required_env  # noqa: E402
 
 
 # ---------- CORS configuration ---------- #
-# Comma-separated list of allowed browser origins. Empty / unset -> sensible
-# local dev defaults. We deliberately never default to "*" — that would
-# disable browser origin checks entirely for the protected /api/query route.
 DEFAULT_CORS_ORIGINS = "http://localhost:3000,http://localhost:5173"
 
 
@@ -57,14 +46,30 @@ ALLOWED_ORIGINS = _parse_cors_origins()
 print(f"[main] CORS allowed origins: {ALLOWED_ORIGINS}")
 
 
-app = FastAPI(title="Second Brain (Slack MVP)")
+# ---------- Lifespan: startup checks + scheduler ---------- #
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Validate required env vars and start the optional ingestion scheduler.
+    If config is missing, validate_required_env raises and uvicorn aborts
+    with a clear, multi-line message.
+    """
+    validate_required_env()
+    start_scheduler()
+    try:
+        yield
+    finally:
+        stop_scheduler()
 
-# CORSMiddleware sits at the front of the request pipeline. It handles the
-# browser's preflight OPTIONS request and tags real responses with the
-# right Access-Control-* headers. The frontend must:
-#   - send Content-Type: application/json
-#   - send X-API-Key: <APP_API_KEY>    (custom header -> triggers preflight)
-#   - NOT include credentials (cookies); we set allow_credentials=False.
+
+app = FastAPI(title="Second Brain (Slack MVP)", lifespan=lifespan)
+
+
+# Translate every typed AppError into a normalized JSON 4xx/5xx response.
+app.add_exception_handler(AppError, app_error_handler)
+
+
+# ---------- CORS ---------- #
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -75,16 +80,12 @@ app.add_middleware(
 
 
 # ---------- Request validation ---------- #
-# Validation rules (any violation -> FastAPI's standard 422 response):
-#   question: required string, 3-2000 chars AFTER whitespace strip.
-#             "  " or "" or "ab" -> 422.
-#   top_k:    optional int, 1..10, defaults to 5.
-#
-# `str_strip_whitespace=True` makes Pydantic strip every string field on
-# this model BEFORE its length/regex checks run, so whitespace-only input
-# becomes "" and fails min_length=3 with a single, clear error. The
-# stripped value is what lands in `req.question`, so downstream code never
-# sees padding.
+# Modes supported by the LLM prompt layer; Pydantic Literal enforces the set
+# so anything else -> 422 automatically.
+QueryMode = Literal["default", "summary", "decisions", "action_items", "who_said"]
+DocumentType = Literal["message", "thread"]
+
+
 class QueryRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -100,6 +101,24 @@ class QueryRequest(BaseModel):
         ge=1,
         le=10,
         description="How many context chunks to retrieve from HydraDB (1–10).",
+    )
+    mode: QueryMode = Field(
+        "default",
+        description="Answer style. 'default' is a concise grounded answer.",
+    )
+    channel: Optional[str] = Field(
+        None,
+        max_length=200,
+        description="Optional channel-name filter (e.g. 'all-second-brain').",
+    )
+    user: Optional[str] = Field(
+        None,
+        max_length=200,
+        description="Optional user-name filter (e.g. 'Praveer Nema').",
+    )
+    document_type: Optional[DocumentType] = Field(
+        None,
+        description="Optional filter: 'message' or 'thread'.",
     )
 
 
@@ -117,18 +136,17 @@ def root() -> Dict[str, str]:
 
 @app.get("/api/health")
 def health() -> Dict[str, str]:
-    """
-    Public health check so external probes (uptime monitors, load
-    balancers) don't need the API key. To require auth here too, just
-    add `dependencies=[Depends(require_api_key)]` to the decorator above.
-    """
+    """Public health check so external probes don't need the API key."""
     return {"status": "ok", "service": "second-brain-api"}
 
 
 # ---------- Protected routes ---------- #
 # Frontend must send:  X-API-Key: <APP_API_KEY>
-# (Defined in auth.py; configured via APP_API_KEY in .env.)
-@app.post("/api/query", dependencies=[Depends(require_api_key)])
+# Rate limited per X-API-Key (or per IP if header absent).
+@app.post(
+    "/api/query",
+    dependencies=[Depends(require_api_key), Depends(rate_limit_dependency)],
+)
 def query(req: QueryRequest) -> Dict[str, Any]:
     """
     Retrieve Slack context from HydraDB, ask the cloud LLM for a grounded
@@ -136,4 +154,11 @@ def query(req: QueryRequest) -> Dict[str, Any]:
 
     Requires header:  X-API-Key: <APP_API_KEY>
     """
-    return answer_question(question=req.question, top_k=req.top_k)
+    return answer_question(
+        question=req.question,
+        top_k=req.top_k,
+        mode=req.mode,
+        channel=req.channel,
+        user=req.user,
+        document_type=req.document_type,
+    )

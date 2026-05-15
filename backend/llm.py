@@ -3,7 +3,7 @@ Cloud LLM wrapper for the Second Brain MVP.
 
 Uses the OpenAI Python SDK. OPENAI_BASE_URL is optional, so the same code
 works against OpenAI itself or any OpenAI-compatible endpoint
-(Azure-compatible gateways, Together, Groq, Anyscale, etc.).
+(OpenRouter, Together, Groq, Azure-compatible gateways, etc.).
 
 No Ollama / no local LLM.
 """
@@ -11,37 +11,17 @@ No Ollama / no local LLM.
 import os
 from typing import Optional
 
-from openai import OpenAI
+from openai import APITimeoutError, OpenAI
 
-
-# The exact fallback string we want the LLM to use when the context can't
-# answer the question. Mirrored both in the system prompt (so the model
-# emits it) and as a defensive return value (so we emit it even if the
-# LLM call short-circuits).
-INSUFFICIENT_CONTEXT_ANSWER = "I do not have enough Slack context to answer that."
-
-
-SYSTEM_PROMPT = f"""You are the Second Brain assistant. You answer questions about
-the user's Slack workspace using ONLY the numbered context snippets provided
-below the user's question.
-
-Rules:
-- Answer ONLY from the provided context. Do not use outside knowledge.
-- If the context is insufficient or unrelated, reply EXACTLY with:
-  {INSUFFICIENT_CONTEXT_ANSWER}
-- Cite sources inline using bracketed numbers like [1], [2] that correspond
-  to the numbered snippets you used. Cite every claim that comes from the
-  context.
-- Do not invent people, user IDs, dates, channels, decisions, or quotes
-  that are not in the context.
-- Be concise. Prefer short, direct answers over restating the context.
-"""
+from errors import LLMError, UpstreamTimeoutError
+from prompts import INSUFFICIENT_CONTEXT_ANSWER, system_prompt_for_mode
 
 
 def _build_client() -> OpenAI:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise ValueError("OPENAI_API_KEY is not set.")
+        # Startup validation should have caught this, but be defensive.
+        raise LLMError(log_context="OPENAI_API_KEY missing at call time")
 
     # Treat an empty OPENAI_BASE_URL the same as "not set" so we fall back
     # to the SDK default (https://api.openai.com/v1).
@@ -54,12 +34,19 @@ def _build_client() -> OpenAI:
 def generate_grounded_answer(
     question: str,
     context: str,
+    mode: str = "default",
     model: Optional[str] = None,
 ) -> str:
     """
     Send the question + numbered context snippets to the cloud LLM and
-    return the answer string. The system prompt enforces the grounding
-    rules; this function adds a defensive short-circuit for empty context.
+    return the answer string.
+
+    Raises:
+        UpstreamTimeoutError  on SDK-reported timeout.
+        LLMError              on any other SDK / network failure.
+
+    The system prompt enforces the grounding rules; this function adds a
+    defensive short-circuit for empty context that avoids burning a call.
     """
     model = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
@@ -80,23 +67,27 @@ def generate_grounded_answer(
         f"Cite sources as [1], [2], etc."
     )
 
+    system_prompt = system_prompt_for_mode(mode)
+
     try:
         client = _build_client()
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
             ],
             temperature=0.1,
             max_tokens=max_tokens,
         )
+    except APITimeoutError as e:
+        raise UpstreamTimeoutError(
+            log_context=f"LLM timeout: {type(e).__name__}"
+        )
     except Exception as e:  # noqa: BLE001 -- surface any SDK error to the API
-        # Log only the exception class name and a short message — we
-        # intentionally do NOT print the API key, full prompt, or context
-        # snippets even on failure.
-        print(f"[llm] LLM call failed: {type(e).__name__}")
-        return "LLM error: upstream call failed."
+        # Log only the exception class name — never the API key, prompt,
+        # or context. The user-facing detail is generic by design.
+        raise LLMError(log_context=f"LLM call failed: {type(e).__name__}")
 
     choices = response.choices
     if not choices:

@@ -1,0 +1,84 @@
+"""
+Mode-specific system prompt overrides for the Second Brain MVP.
+
+Each mode tweaks the assistant's instructions to suit a different
+question style. All modes share the same hard rules:
+  - Answer ONLY from the provided context.
+  - Cite sources as [1], [2], ...
+  - If the context is insufficient, return the exact fallback string.
+
+Backward compatible: "default" reproduces the original prompt.
+"""
+
+# The canonical fallback string is mirrored here so prompts.py doesn't
+# need to import from llm.py.
+INSUFFICIENT_CONTEXT_ANSWER = "I do not have enough Slack context to answer that."
+
+
+SUPPORTED_MODES = ("default", "summary", "decisions", "action_items", "who_said")
+
+
+_HARD_RULES = f"""Rules:
+- Answer ONLY from the provided context. Do not use outside knowledge.
+- If the context is insufficient or unrelated, reply EXACTLY with:
+  {INSUFFICIENT_CONTEXT_ANSWER}
+- Cite sources inline using bracketed numbers like [1], [2] that correspond
+  to the numbered snippets you used. Cite every claim that comes from the
+  context.
+- Do not invent people, user IDs, dates, channels, decisions, or quotes
+  that are not in the context.
+"""
+
+
+_BASE_PROMPT = (
+    "You are the Second Brain assistant. You answer questions about the "
+    "user's Slack workspace using ONLY the numbered context snippets "
+    "provided below the user's question.\n\n"
+)
+
+
+# Per-mode "goal" paragraph. Hard rules are appended to all of them.
+_MODE_BODIES = {
+    "default": (
+        "Be concise. Prefer short, direct answers over restating the context."
+    ),
+    "summary": (
+        "Summarize the relevant Slack context into a short briefing.\n"
+        "- 3 to 6 bullet points.\n"
+        "- Each bullet is one sentence, in the user's words where possible.\n"
+        "- Cite the source for every bullet.\n"
+        "- Do not include greetings, sign-offs, or filler."
+    ),
+    "decisions": (
+        "Extract only DECISIONS that were made in the Slack context.\n"
+        "- A decision is an explicit choice, conclusion, or commitment.\n"
+        "- List each decision as a single line, prefixed with '- '.\n"
+        "- Cite the source for each decision.\n"
+        "- If no decisions are present, reply exactly with the fallback string."
+    ),
+    "action_items": (
+        "Extract ACTION ITEMS only.\n"
+        "- An action item is a concrete task someone is doing, will do, or "
+        "has been asked to do.\n"
+        "- Format each line as: '- [owner if known] task description [N]'.\n"
+        "- Cite the source for each item.\n"
+        "- If no action items are present, reply exactly with the fallback string."
+    ),
+    "who_said": (
+        "Identify WHO SAID WHAT relevant to the question.\n"
+        "- Format each quote as: '- <user name>: \"<verbatim quote>\" [N]'.\n"
+        "- Use only quotes that are present in the context — do not paraphrase.\n"
+        "- Cite the source for each quote.\n"
+        "- If no relevant quotes exist, reply exactly with the fallback string."
+    ),
+}
+
+
+def system_prompt_for_mode(mode: str) -> str:
+    """
+    Return the system prompt for a mode. Unknown modes fall back to
+    'default' silently so a client typo doesn't fail the request — the
+    Pydantic Literal in main.py is what actually enforces the allowed set.
+    """
+    body = _MODE_BODIES.get(mode, _MODE_BODIES["default"])
+    return f"{_BASE_PROMPT}{body}\n\n{_HARD_RULES}"

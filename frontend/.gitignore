@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.vite/
+
+# Local env overrides
+.env
+.env.local
+.env.*.local
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.log

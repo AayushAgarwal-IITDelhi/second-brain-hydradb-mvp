@@ -1,0 +1,31 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: second-brain-api:latest
+    container_name: second-brain-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - backend/.env
+    volumes:
+      # Persist ingestion state across container restarts. Without this,
+      # every container restart would re-ingest already-uploaded docs.
+      - ./backend/data:/app/data
+    restart: unless-stopped
+
+  # Optional one-shot ingestion job. Run with:
+  #   docker compose run --rm ingest
+  # It shares the same image and data volume as the api service.
+  ingest:
+    image: second-brain-api:latest
+    container_name: second-brain-ingest
+    profiles: ["ingest"]
+    env_file:
+      - backend/.env
+    volumes:
+      - ./backend/data:/app/data
+    command: ["python", "-m", "ingestion.ingest_slack"]
+    depends_on:
+      - api
