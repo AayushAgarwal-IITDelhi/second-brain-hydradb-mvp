@@ -107,6 +107,16 @@ def _ts_for_filename(ts: str) -> str:
     return ts.split(".")[0]
 
 
+def _make_snippet(text: str, limit: int = 200) -> str:
+    """First ~limit characters of a message/thread parent's text, single-line."""
+    if not text:
+        return ""
+    flat = " ".join(text.split())  # collapse newlines/whitespace
+    if len(flat) <= limit:
+        return flat
+    return flat[:limit].rstrip() + "..."
+
+
 # ---------------------------------------------------------------------- #
 # Document builders -> {"filename", "content", "stable_key", ...metadata}
 # ---------------------------------------------------------------------- #
@@ -114,23 +124,31 @@ def build_message_file(
     message: Dict[str, Any],
     channel_id: str,
     channel_name: str,
+    slack: SlackClientWrapper,
 ) -> Dict[str, Any]:
     """Build a single .md file for a standalone Slack message."""
     ts = message.get("ts", "")
-    user = message.get("user") or message.get("bot_id") or "unknown"
+    user_id = message.get("user") or message.get("bot_id") or "unknown"
     text = (message.get("text") or "").strip()
     stable_key = stable_key_for_message(channel_id, ts)
 
-    content = "\n".join([
+    # Resolve readable user name (falls back to the U... id) and permalink.
+    user_name = slack.resolve_user_name(message.get("user")) or user_id
+    permalink = slack.get_permalink(channel_id, ts) if ts else None
+    snippet = _make_snippet(text)
+
+    header_lines = [
         "# Slack Message",
         f"Source Key: {stable_key}",
         f"Channel: {channel_name}",
         f"Channel ID: {channel_id}",
         f"Timestamp: {ts}",
-        f"User: {user}",
-        "",
-        text,
-    ])
+        f"User: {user_name}",
+    ]
+    if permalink:
+        header_lines.append(f"Permalink: {permalink}")
+
+    content = "\n".join(header_lines + ["", text])
 
     filename = (
         f"slack_{_safe_filename_part(channel_name)}_"
@@ -144,6 +162,12 @@ def build_message_file(
         "channel_name": channel_name,
         "ts": ts,
         "thread_ts": None,
+        # Extra metadata for state.mark_uploaded:
+        "user_name": user_name,
+        "timestamp": ts,
+        "snippet": snippet,
+        "permalink": permalink,
+        "document_type": "message",
     }
 
 
@@ -152,39 +176,56 @@ def build_thread_file(
     replies: List[Dict[str, Any]],
     channel_id: str,
     channel_name: str,
+    slack: SlackClientWrapper,
 ) -> Dict[str, Any]:
     """Build a single .md file combining a thread parent and its replies."""
     thread_ts = parent_message.get("ts", "")
-    parent_user = (
+    parent_user_id = (
         parent_message.get("user") or parent_message.get("bot_id") or "unknown"
     )
     parent_text = (parent_message.get("text") or "").strip()
     stable_key = stable_key_for_thread(channel_id, thread_ts)
+
+    parent_user_name = (
+        slack.resolve_user_name(parent_message.get("user")) or parent_user_id
+    )
+    permalink = slack.get_permalink(channel_id, thread_ts) if thread_ts else None
+    snippet = _make_snippet(parent_text)
 
     # Slack returns the parent as the first reply; drop it + any noise.
     real_replies = [
         m for m in replies if m.get("ts") != thread_ts and not is_noise(m)
     ]
 
-    lines = [
+    header_lines = [
         "# Slack Thread",
         f"Source Key: {stable_key}",
         f"Channel: {channel_name}",
         f"Channel ID: {channel_id}",
         f"Thread: {thread_ts}",
-        f"Parent User: {parent_user}",
+        f"Parent User: {parent_user_name}",
+    ]
+    if permalink:
+        header_lines.append(f"Permalink: {permalink}")
+
+    lines = header_lines + [
         "",
         "Parent:",
-        f"[{thread_ts}] {parent_user}: {parent_text}",
+        f"[{thread_ts}] {parent_user_name}: {parent_text}",
     ]
     if real_replies:
         lines.append("")
         lines.append("Replies:")
         for reply in real_replies:
             r_ts = reply.get("ts", "")
-            r_user = reply.get("user") or reply.get("bot_id") or "unknown"
+            r_user_name = (
+                slack.resolve_user_name(reply.get("user"))
+                or reply.get("user")
+                or reply.get("bot_id")
+                or "unknown"
+            )
             r_text = (reply.get("text") or "").strip()
-            lines.append(f"[{r_ts}] {r_user}: {r_text}")
+            lines.append(f"[{r_ts}] {r_user_name}: {r_text}")
 
     content = "\n".join(lines)
     filename = (
@@ -199,6 +240,12 @@ def build_thread_file(
         "channel_name": channel_name,
         "ts": None,
         "thread_ts": thread_ts,
+        # Extra metadata for state.mark_uploaded:
+        "user_name": parent_user_name,
+        "timestamp": thread_ts,
+        "snippet": snippet,
+        "permalink": permalink,
+        "document_type": "thread",
     }
 
 
@@ -250,7 +297,7 @@ def process_channel(
             )
             threads_fetched += 1
             files_to_upload.append(
-                build_thread_file(message, replies, channel_id, channel_name)
+                build_thread_file(message, replies, channel_id, channel_name, slack)
             )
             continue
 
@@ -267,7 +314,7 @@ def process_channel(
             continue
 
         files_to_upload.append(
-            build_message_file(message, channel_id, channel_name)
+            build_message_file(message, channel_id, channel_name, slack)
         )
 
     return {
@@ -332,6 +379,11 @@ def _record_successful_uploads(
                 ts=f.get("ts"),
                 thread_ts=f.get("thread_ts"),
                 source_id=source_id,
+                user_name=f.get("user_name"),
+                timestamp=f.get("timestamp"),
+                snippet=f.get("snippet"),
+                permalink=f.get("permalink"),
+                document_type=f.get("document_type"),
             )
             recorded += 1
         return recorded
@@ -350,6 +402,11 @@ def _record_successful_uploads(
                 ts=f.get("ts"),
                 thread_ts=f.get("thread_ts"),
                 source_id=None,
+                user_name=f.get("user_name"),
+                timestamp=f.get("timestamp"),
+                snippet=f.get("snippet"),
+                permalink=f.get("permalink"),
+                document_type=f.get("document_type"),
             )
             recorded += 1
 

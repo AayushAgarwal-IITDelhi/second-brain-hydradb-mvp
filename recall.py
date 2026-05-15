@@ -16,10 +16,31 @@ recursive dict-walk if every documented path comes up empty.
 """
 
 import json
-from typing import Any, Dict, List, Optional
+import os
+import re
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set
 
 from hydradb_client import HydraDBClient
 from llm import INSUFFICIENT_CONTEXT_ANSWER, generate_grounded_answer
+from ingestion.ingestion_state import IngestionState
+
+
+# Path to the ingestion state file (written by ingest_slack.py). Loaded once
+# per request inside answer_question, never re-read between chunks.
+_BACKEND_DIR = Path(__file__).resolve().parent
+STATE_PATH = _BACKEND_DIR / "data" / "ingestion_state.json"
+
+
+def _debug_recall_enabled() -> bool:
+    """
+    Verbose recall debugging is OFF by default to keep demo logs clean and
+    avoid leaking Slack content through stdout. Flip DEBUG_RECALL=true in
+    the environment to see the raw HydraDB response and first-chunk preview.
+    """
+    return os.getenv("DEBUG_RECALL", "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
 
 
 # Where to look for the list of chunks at the top level of the recall response.
@@ -277,6 +298,218 @@ def _first_chunk_preview(chunk: Any, limit: int = 2000) -> str:
 
 
 # ---------------------------------------------------------------------- #
+# Linking recall chunks back to ingestion state
+# ---------------------------------------------------------------------- #
+# Fields on a chunk that might carry the HydraDB source_id, the stable_key
+# we wrote into the markdown, or the filename — any one of these is enough
+# to find the rich metadata row in ingestion_state.json.
+SOURCE_ID_KEYS = ("source_id", "doc_id", "document_id", "id")
+STABLE_KEY_KEYS = ("stable_key", "source_key")
+FILENAME_KEYS = ("filename", "file_name", "name")
+
+
+def _candidate_string(chunk: Dict[str, Any], keys) -> Optional[str]:
+    """First non-empty string value found at chunk[k] or chunk['metadata'][k]."""
+    for key in keys:
+        value = chunk.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    meta = chunk.get("metadata")
+    if isinstance(meta, dict):
+        for key in keys:
+            value = meta.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _build_source_card(
+    chunk: Any,
+    index: int,
+    score: Any,
+    state: Optional[IngestionState],
+) -> Dict[str, Any]:
+    """
+    Build the UI-friendly source object for one recall chunk.
+
+    Resolution order against ingestion state:
+      1. by source_id     (set by HydraDB on upload)
+      2. by stable_key    (written into the markdown header)
+      3. by filename      (the .md filename we sent)
+
+    If state lookup fails, fall back to the previous minimal shape:
+        {"index", "source", "score"}
+    """
+    minimal_source = _chunk_source(chunk, index)
+
+    candidate_source_id = (
+        _candidate_string(chunk, SOURCE_ID_KEYS) if isinstance(chunk, dict) else None
+    )
+    candidate_stable_key = (
+        _candidate_string(chunk, STABLE_KEY_KEYS) if isinstance(chunk, dict) else None
+    )
+    candidate_filename = (
+        _candidate_string(chunk, FILENAME_KEYS) if isinstance(chunk, dict) else None
+    )
+
+    entry: Optional[Dict[str, Any]] = None
+    if state is not None:
+        if candidate_source_id:
+            entry = state.find_by_source_id(candidate_source_id)
+        if entry is None and candidate_stable_key:
+            entry = state.get(candidate_stable_key)
+        if entry is None and candidate_filename:
+            entry = state.find_by_filename(candidate_filename)
+        # `minimal_source` might itself be the source_id (current behavior)
+        # or the filename. Try it as a last resort before giving up.
+        if entry is None and minimal_source:
+            entry = (
+                state.find_by_source_id(minimal_source)
+                or state.find_by_filename(minimal_source)
+            )
+
+    if entry is None:
+        # Graceful fallback: keep the old minimal shape so callers can still
+        # render something even if state is missing or doesn't know the doc.
+        return {
+            "index":  index,
+            "source": minimal_source,
+            "score":  score,
+        }
+
+    # Rich source card backed by ingestion state.
+    return {
+        "index":         index,
+        "source":        entry.get("channel_name") or minimal_source,
+        "channel":       entry.get("channel_name"),
+        "channel_id":    entry.get("channel_id"),
+        "user":          entry.get("user_name"),
+        "timestamp":     entry.get("timestamp"),
+        "snippet":       entry.get("snippet"),
+        "permalink":     entry.get("permalink"),
+        "stable_key":    entry.get("stable_key"),
+        "document_type": entry.get("document_type"),
+        "score":         score,
+    }
+
+
+def _load_state_safely() -> Optional[IngestionState]:
+    """Load ingestion state once per request. Return None on any failure."""
+    try:
+        return IngestionState(STATE_PATH)
+    except Exception as e:  # noqa: BLE001 -- we never want recall to crash on this
+        print(f"[recall] Could not load ingestion state: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------- #
+# Source-list cleaning for the UI
+# ---------------------------------------------------------------------- #
+# A "rich" source has at least one Slack-derived field. Anything else is a
+# minimal fallback (just an opaque HydraDB id / chunk_N placeholder).
+RICH_SOURCE_FIELDS = ("channel", "user", "snippet", "permalink", "stable_key")
+
+
+def _is_rich_source(source: Dict[str, Any]) -> bool:
+    """True if the source card carries any UI-useful Slack metadata."""
+    return any(source.get(field) for field in RICH_SOURCE_FIELDS)
+
+
+def _dedupe_key(source: Dict[str, Any]) -> Optional[str]:
+    """Identifier used to dedupe sources: stable_key -> permalink -> source."""
+    for field in ("stable_key", "permalink", "source"):
+        value = source.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _clean_sources_for_ui(
+    sources: List[Dict[str, Any]],
+    top_k: int,
+) -> List[Dict[str, Any]]:
+    """
+    Trim the sources array for the API response WITHOUT touching the LLM
+    context. Rules:
+      1. If at least one rich source exists, drop the minimal ones.
+      2. Dedupe by stable_key -> permalink -> source (first occurrence wins,
+         which keeps the earliest matching index so citations stay aligned).
+      3. Cap the result at top_k.
+      4. If there are no rich sources at all, fall back to deduped minimal.
+    """
+    if not sources:
+        return []
+
+    rich = [s for s in sources if _is_rich_source(s)]
+    pool = rich if rich else sources
+
+    seen: set = set()
+    deduped: List[Dict[str, Any]] = []
+    for source in pool:
+        key = _dedupe_key(source)
+        if key is not None:
+            if key in seen:
+                continue
+            seen.add(key)
+        # If we have no key to dedupe on, let the source through — we can't
+        # safely call it a duplicate of anything.
+        deduped.append(source)
+
+    return deduped[:top_k]
+
+
+# ---------------------------------------------------------------------- #
+# Citation hygiene
+# ---------------------------------------------------------------------- #
+# The LLM emits citation markers that look like:
+#     [1]
+#     【1】
+#     【1†source: slack_all-second-brain_1778775842.md】
+#
+# Cleaning the sources list can drop indexes (e.g. dedupe collapses [4] into
+# [1]). If the answer still references those gone indexes the UI shows
+# dangling citations. We strip exactly those markers — and only those.
+#
+# Pattern explanation:
+#   - ASCII form:  '[', optional spaces, digits, optional spaces, ']'
+#   - CJK form:    '【', optional spaces, digits, optional spaces,
+#                  optional '†<anything but the closing bracket>',
+#                  '】'
+# Two alternates, two capture groups; whichever matched holds the integer.
+_CITATION_PATTERN = re.compile(
+    r"\[\s*(\d+)\s*\]"
+    r"|"
+    r"【\s*(\d+)\s*(?:†[^】]*)?】"
+)
+
+
+def _strip_invalid_citations(answer: str, allowed_indexes: Set[int]) -> str:
+    """
+    Remove citation markers from `answer` whose index is NOT in
+    `allowed_indexes`. Valid citation markers are left exactly as they are.
+
+    Per spec, we do not touch any other character — surrounding whitespace
+    or punctuation around a removed marker is left untouched. Some UI
+    renderers may show a small extra space; that's fine.
+    """
+    if not answer or not allowed_indexes:
+        # No allowed indexes means everything is invalid -> strip them all.
+        # No answer -> nothing to do.
+        if not answer:
+            return answer
+
+    def _replace(match: re.Match) -> str:
+        idx_str = match.group(1) or match.group(2)
+        try:
+            idx = int(idx_str)
+        except (TypeError, ValueError):
+            return match.group(0)  # unparseable -> leave alone (safer)
+        return match.group(0) if idx in allowed_indexes else ""
+
+    return _CITATION_PATTERN.sub(_replace, answer)
+
+
+# ---------------------------------------------------------------------- #
 # Public entry point
 # ---------------------------------------------------------------------- #
 def answer_question(question: str, top_k: int = 5) -> Dict[str, Any]:
@@ -300,17 +533,24 @@ def answer_question(question: str, top_k: int = 5) -> Dict[str, Any]:
     hydra = HydraDBClient()
     raw_response = hydra.full_recall(query=question, top_k=top_k)
     chunks = _extract_chunks(raw_response)
+    debug_on = _debug_recall_enabled()
 
-    # ----- Temporary debug printing (handy while we tune extraction) ----- #
-    print("[recall] ===== raw HydraDB response (truncated to 8000 chars) =====")
-    print(_safe_json(raw_response, limit=8000))
-    if chunks:
-        print("[recall] ===== first chunk =====")
-        print(_safe_json(chunks[0], limit=4000))
-    else:
-        print("[recall] (no chunks returned)")
-    print("[recall] ===========================================================")
-    # --------------------------------------------------------------------- #
+    # Verbose stdout dump is gated behind DEBUG_RECALL=true so demo logs
+    # stay clean and Slack content doesn't leak into the terminal.
+    if debug_on:
+        print("[recall] ===== raw HydraDB response (truncated to 8000 chars) =====")
+        print(_safe_json(raw_response, limit=8000))
+        if chunks:
+            print("[recall] ===== first chunk =====")
+            print(_safe_json(chunks[0], limit=4000))
+        else:
+            print("[recall] (no chunks returned)")
+        print("[recall] ===========================================================")
+
+    # Load ingestion state once for the whole request, used to enrich each
+    # chunk's source card. If the file is missing or unreadable we fall back
+    # to the old minimal source shape per chunk.
+    state = _load_state_safely()
 
     # Build numbered context block + parallel source list.
     context_blocks: List[str] = []
@@ -319,14 +559,13 @@ def answer_question(question: str, top_k: int = 5) -> Dict[str, Any]:
         text = _chunk_text(chunk).strip()
         if not text:
             continue
-        source_id = _chunk_source(chunk, i)
         score = _chunk_score(chunk)
-        context_blocks.append(f"[{i}] (source: {source_id})\n{text}")
-        sources.append({
-            "index": i,
-            "source": source_id,
-            "score": score,
-        })
+        source_card = _build_source_card(chunk, i, score, state)
+        # The label we put into the LLM context next to [i] — prefer the
+        # channel name when we have it, otherwise the minimal source id.
+        context_label = source_card.get("channel") or source_card.get("source")
+        context_blocks.append(f"[{i}] (source: {context_label})\n{text}")
+        sources.append(source_card)
 
     if not context_blocks:
         # No usable text in any chunk -> surface enough detail to debug fast.
@@ -334,33 +573,50 @@ def answer_question(question: str, top_k: int = 5) -> Dict[str, Any]:
         first_chunk_keys = (
             list(first_chunk.keys()) if isinstance(first_chunk, dict) else None
         )
+        debug_payload: Dict[str, Any] = {
+            "reason": "no usable text found in HydraDB chunks",
+            "raw_response_keys": (
+                list(raw_response.keys())
+                if isinstance(raw_response, dict) else None
+            ),
+            "chunks_returned": len(chunks),
+            "first_chunk_keys": first_chunk_keys,
+            "top_k": top_k,
+        }
+        # first_chunk_preview can contain actual Slack content -> gated.
+        if debug_on and first_chunk is not None:
+            debug_payload["first_chunk_preview"] = _first_chunk_preview(first_chunk)
         return {
             "answer": INSUFFICIENT_CONTEXT_ANSWER,
             "sources": [],
-            "debug": {
-                "reason": "no usable text found in HydraDB chunks",
-                "raw_response_keys": (
-                    list(raw_response.keys())
-                    if isinstance(raw_response, dict) else None
-                ),
-                "chunks_returned": len(chunks),
-                "first_chunk_keys": first_chunk_keys,
-                "first_chunk_preview": (
-                    _first_chunk_preview(first_chunk) if first_chunk else None
-                ),
-                "top_k": top_k,
-            },
+            "debug": debug_payload,
         }
 
     context_text = "\n\n".join(context_blocks)
     answer = generate_grounded_answer(question=question, context=context_text)
 
+    # Clean the sources array for the UI WITHOUT touching the LLM context
+    # above. The LLM still saw every numbered chunk and its [N] citations
+    # remain valid against the surviving cards because we never renumber.
+    cleaned_sources = _clean_sources_for_ui(sources, top_k=top_k)
+
+    # The LLM may have cited indexes that got dropped (orphan minimal chunks
+    # or duplicates). Strip those dangling markers from the answer so the UI
+    # never references a source it doesn't have.
+    allowed_indexes: Set[int] = {
+        s["index"] for s in cleaned_sources
+        if isinstance(s.get("index"), int)
+    }
+    final_answer = _strip_invalid_citations(answer, allowed_indexes)
+
     return {
-        "answer": answer,
-        "sources": sources,
+        "answer": final_answer,
+        "sources": cleaned_sources,
         "debug": {
             "chunks_returned": len(chunks),
             "chunks_used": len(context_blocks),
+            "sources_before_clean": len(sources),
+            "sources_after_clean": len(cleaned_sources),
             "top_k": top_k,
         },
     }

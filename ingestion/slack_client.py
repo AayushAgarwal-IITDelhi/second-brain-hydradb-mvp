@@ -28,6 +28,14 @@ class SlackClientWrapper:
             raise ValueError("SLACK_BOT_TOKEN is not set in the environment.")
         self.client = WebClient(token=token)
 
+        # In-memory caches. They live for the lifetime of this wrapper
+        # instance (i.e. one ingestion run), which is all we need to avoid
+        # calling Slack repeatedly for the same user / message.
+        #   user_id -> display name (or None when lookup failed)
+        self._user_name_cache: Dict[str, Optional[str]] = {}
+        #   (channel_id, ts) -> permalink (or None when lookup failed)
+        self._permalink_cache: Dict[tuple, Optional[str]] = {}
+
     # ------------------------------------------------------------------ #
     # Channel-level messages
     # ------------------------------------------------------------------ #
@@ -121,6 +129,83 @@ class SlackClientWrapper:
                 break
 
         return collected
+
+    # ------------------------------------------------------------------ #
+    # User name resolution (cached)
+    # ------------------------------------------------------------------ #
+    def resolve_user_name(self, user_id: Optional[str]) -> Optional[str]:
+        """
+        Look up a Slack user's readable name from their U... ID.
+
+        Preference: real_name -> display_name -> name -> None.
+        Cached in-memory so we hit users.info at most once per user_id
+        per ingestion run. Returns None for falsy ids or on API errors.
+        """
+        if not user_id:
+            return None
+
+        if user_id in self._user_name_cache:
+            return self._user_name_cache[user_id]
+
+        name: Optional[str] = None
+        try:
+            response = self.client.users_info(user=user_id)
+            user = response.get("user") or {}
+            profile = user.get("profile") or {}
+            # Order matters: real_name is usually the best human label.
+            name = (
+                profile.get("real_name")
+                or profile.get("display_name")
+                or user.get("real_name")
+                or user.get("name")
+                or None
+            )
+            if isinstance(name, str):
+                name = name.strip() or None
+        except SlackApiError as e:
+            err = e.response.get("error", str(e)) if getattr(e, "response", None) else str(e)
+            print(f"[slack_client] users_info failed for {user_id}: {err}")
+
+        self._user_name_cache[user_id] = name
+        return name
+
+    # ------------------------------------------------------------------ #
+    # Permalinks (cached)
+    # ------------------------------------------------------------------ #
+    def get_permalink(
+        self,
+        channel_id: str,
+        message_ts: str,
+    ) -> Optional[str]:
+        """
+        Return the Slack permalink for a (channel_id, message_ts) pair.
+
+        Cached. Returns None on API error so ingestion never fails just
+        because a permalink lookup failed.
+        """
+        if not channel_id or not message_ts:
+            return None
+
+        cache_key = (channel_id, message_ts)
+        if cache_key in self._permalink_cache:
+            return self._permalink_cache[cache_key]
+
+        permalink: Optional[str] = None
+        try:
+            response = self.client.chat_getPermalink(
+                channel=channel_id,
+                message_ts=message_ts,
+            )
+            permalink = response.get("permalink") or None
+        except SlackApiError as e:
+            err = e.response.get("error", str(e)) if getattr(e, "response", None) else str(e)
+            print(
+                f"[slack_client] chat_getPermalink failed for "
+                f"{channel_id}/{message_ts}: {err}"
+            )
+
+        self._permalink_cache[cache_key] = permalink
+        return permalink
 
     # ------------------------------------------------------------------ #
     # Helpers

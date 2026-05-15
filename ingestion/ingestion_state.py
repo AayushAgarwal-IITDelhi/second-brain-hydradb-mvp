@@ -98,15 +98,46 @@ class IngestionState:
         ts: Optional[str] = None,
         thread_ts: Optional[str] = None,
         source_id: Optional[str] = None,
+        user_name: Optional[str] = None,
+        timestamp: Optional[str] = None,
+        snippet: Optional[str] = None,
+        permalink: Optional[str] = None,
+        document_type: Optional[str] = None,
     ) -> None:
         """Record a successful upload. Caller still needs to call save()."""
         self.entries[stable_key] = {
-            "stable_key":   stable_key,
-            "filename":     filename,
-            "source_id":    source_id,
-            "channel_id":   channel_id,
-            "channel_name": channel_name,
-            "ts":           ts,
-            "thread_ts":    thread_ts,
-            "uploaded_at":  datetime.now(timezone.utc).isoformat(),
+            "stable_key":     stable_key,
+            "filename":       filename,
+            "source_id":      source_id,
+            "channel_id":     channel_id,
+            "channel_name":   channel_name,
+            "ts":             ts,
+            "thread_ts":      thread_ts,
+            "uploaded_at":    datetime.now(timezone.utc).isoformat(),
+            # Newly added for UI-friendly source cards.
+            "user_name":      user_name,
+            "timestamp":      timestamp,
+            "snippet":        snippet,
+            "permalink":      permalink,
+            "document_type":  document_type,
         }
+
+    # ----- lookups for recall ----------------------------------------- #
+    def get(self, stable_key: str) -> Optional[Dict[str, Any]]:
+        return self.entries.get(stable_key)
+
+    def find_by_source_id(self, source_id: str) -> Optional[Dict[str, Any]]:
+        if not source_id:
+            return None
+        for entry in self.entries.values():
+            if entry.get("source_id") == source_id:
+                return entry
+        return None
+
+    def find_by_filename(self, filename: str) -> Optional[Dict[str, Any]]:
+        if not filename:
+            return None
+        for entry in self.entries.values():
+            if entry.get("filename") == filename:
+                return entry
+        return None

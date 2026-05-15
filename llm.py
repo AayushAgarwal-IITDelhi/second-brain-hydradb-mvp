@@ -63,6 +63,13 @@ def generate_grounded_answer(
     """
     model = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
+    # LLM_MAX_TOKENS=500 by default. Caps output length so demo responses
+    # stay tight and we don't burn unexpected tokens.
+    try:
+        max_tokens = int(os.getenv("LLM_MAX_TOKENS", "500"))
+    except ValueError:
+        max_tokens = 500
+
     if not context.strip():
         return INSUFFICIENT_CONTEXT_ANSWER
 
@@ -82,10 +89,14 @@ def generate_grounded_answer(
                 {"role": "user", "content": user_message},
             ],
             temperature=0.1,
+            max_tokens=max_tokens,
         )
     except Exception as e:  # noqa: BLE001 -- surface any SDK error to the API
-        print(f"[llm] LLM call failed: {e}")
-        return f"LLM error: {e}"
+        # Log only the exception class name and a short message — we
+        # intentionally do NOT print the API key, full prompt, or context
+        # snippets even on failure.
+        print(f"[llm] LLM call failed: {type(e).__name__}")
+        return "LLM error: upstream call failed."
 
     choices = response.choices
     if not choices:
