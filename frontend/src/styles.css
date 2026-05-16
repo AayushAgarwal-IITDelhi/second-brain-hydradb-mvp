@@ -198,6 +198,58 @@ body {
   color: var(--text-muted);
 }
 
+/* --------------------------- Admin card --------------------------- */
+
+.admin {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 8px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12px;
+  color: var(--text-muted);
+  box-shadow: var(--shadow);
+}
+
+.admin__label {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text);
+  font-size: 11px;
+}
+
+.admin__pill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+
+.admin__pill--on {
+  background: #ecfdf5;
+  color: #045a36;
+}
+
+.admin__pill--off {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.admin__metric strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.admin__placeholder {
+  font-style: italic;
+}
+
 .bubble__body {
   white-space: pre-wrap;
   word-wrap: break-word;

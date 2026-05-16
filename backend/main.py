@@ -2,12 +2,16 @@
 FastAPI app for the Second Brain MVP.
 
 Endpoints:
-    GET  /                  -> service info card             (public)
-    GET  /api/health        -> {"status": "ok", ...}         (public)
-    POST /api/query         -> {"answer", "sources", ...}    (X-API-Key + rate limited)
-    POST /api/query/stream  -> Server-Sent Events            (X-API-Key + rate limited)
+    GET  /                    -> service info card             (public)
+    GET  /api/health          -> {"status": "ok", ...}         (public)
+    POST /api/query           -> {"answer", "sources", ...}    (X-API-Key + rate limited)
+    POST /api/query/stream    -> Server-Sent Events            (X-API-Key + rate limited)
+    GET  /api/admin/status    -> ingestion status snapshot     (X-API-Key)
+    POST /slack/events        -> Slack Events API webhook      (Slack signature)
 
 The frontend MUST send `X-API-Key: <APP_API_KEY>` on every protected call.
+The /slack/events endpoint is public but authenticated via Slack's
+HMAC-SHA256 request signature — see slack_signature.py.
 """
 
 import json
@@ -20,9 +24,11 @@ from dotenv import load_dotenv
 # Load .env BEFORE importing modules that read env vars at runtime.
 load_dotenv()
 
-from fastapi import Depends, FastAPI, Request  # noqa: E402
+from fastapi import (  # noqa: E402
+    BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, status,
+)
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
-from fastapi.responses import StreamingResponse  # noqa: E402
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse  # noqa: E402
 from pydantic import BaseModel, ConfigDict, Field  # noqa: E402
 
 from auth import require_api_key  # noqa: E402
@@ -31,12 +37,18 @@ from llm import stream_grounded_answer  # noqa: E402
 from prompts import INSUFFICIENT_CONTEXT_ANSWER  # noqa: E402
 from query_cache import build_cache_key, get_cached, put as cache_put  # noqa: E402
 from rate_limit import rate_limit_dependency  # noqa: E402
+from realtime_ingest import (  # noqa: E402
+    admin_status_snapshot,
+    _event_already_seen,
+    process_slack_event,
+)
 from recall import (  # noqa: E402
     answer_question,
     finalize_answer,
     prepare_recall_context,
 )
-from scheduler import start_scheduler, stop_scheduler  # noqa: E402
+from scheduler import auto_ingest_enabled, start_scheduler, stop_scheduler  # noqa: E402
+from slack_signature import verify_slack_signature  # noqa: E402
 from startup import validate_required_env  # noqa: E402
 
 
@@ -342,3 +354,83 @@ def query_stream(req: QueryRequest, request: Request) -> StreamingResponse:
             "Connection": "keep-alive",
         },
     )
+
+
+# ---------- Slack Events API webhook ---------- #
+# Public route — authenticated by Slack's HMAC signature, not X-API-Key.
+# Slack expects us to ACK within 3 seconds, so we verify, queue the
+# ingestion as a BackgroundTask, and return 200 immediately.
+@app.post("/slack/events")
+async def slack_events(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    x_slack_signature: Optional[str] = Header(default=None, alias="X-Slack-Signature"),
+    x_slack_request_timestamp: Optional[str] = Header(
+        default=None, alias="X-Slack-Request-Timestamp"
+    ),
+):
+    # Read body BEFORE parsing so we can verify the signature over the
+    # exact bytes Slack sent. Reparsing the JSON to bytes would change
+    # whitespace and break the HMAC.
+    body = await request.body()
+
+    if not verify_slack_signature(body, x_slack_request_timestamp, x_slack_signature):
+        # Slack will keep retrying briefly. The 401 makes the failure
+        # visible in Slack's event dashboard so misconfigurations show up
+        # there instead of disappearing into the logs.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Slack signature.",
+        )
+
+    # Parse the body now that we trust it. If the body isn't valid JSON
+    # we return 400 — Slack should never send anything else, but it's the
+    # right response.
+    try:
+        payload = json.loads(body.decode("utf-8") or "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Body is not valid JSON.",
+        )
+
+    # ----- URL verification handshake -----
+    # When you add or edit the Events Subscription URL in Slack, Slack
+    # POSTs {"type": "url_verification", "challenge": "..."} and expects
+    # us to echo the challenge back as plain text (or as {"challenge": "..."}).
+    if payload.get("type") == "url_verification":
+        challenge = payload.get("challenge", "")
+        return PlainTextResponse(content=challenge, status_code=200)
+
+    # ----- Event callback -----
+    if payload.get("type") == "event_callback":
+        # Idempotency: Slack retries failed deliveries up to 3 times within
+        # an hour, so we dedupe by event_id. The webhook still ACKs 200 on
+        # duplicates so Slack stops retrying.
+        event_id = payload.get("event_id") or ""
+        if _event_already_seen(event_id):
+            print(f"[slack/events] duplicate event_id={event_id}; ack'd")
+            return JSONResponse(content={"ok": True})
+
+        event = payload.get("event") or {}
+        # Dispatch ingestion in the background so Slack gets its 200 ack
+        # within 3 seconds even if HydraDB / Slack API calls are slow.
+        background_tasks.add_task(process_slack_event, event)
+        return JSONResponse(content={"ok": True})
+
+    # Unknown top-level type. Ack 200 so Slack stops retrying.
+    print(f"[slack/events] ignoring payload type={payload.get('type')!r}")
+    return JSONResponse(content={"ok": True})
+
+
+# ---------- Admin status (light, read-only) ---------- #
+@app.get(
+    "/api/admin/status",
+    dependencies=[Depends(require_api_key)],
+)
+def admin_status() -> Dict[str, Any]:
+    """
+    Lightweight ingestion-status snapshot for the frontend admin card.
+    Does NOT expose any per-document content — only counters and flags.
+    """
+    return admin_status_snapshot(scheduler_enabled=auto_ingest_enabled())

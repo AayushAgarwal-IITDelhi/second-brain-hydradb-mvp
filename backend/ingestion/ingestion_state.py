@@ -203,3 +203,27 @@ class IngestionState:
             # equal-length seconds parts within any sensible time range.
             return
         self.channels[channel_id] = {"last_synced_ts": ts}
+
+    # ----- last-ingestion timestamp (used by /api/admin/status) ------- #
+    def get_last_ingested_at(self) -> Optional[str]:
+        """ISO timestamp of the most recent successful upload, if any."""
+        # We stash a top-level "_meta" dict via mark_uploaded.uploaded_at on
+        # the newest entry, but explicit storage is cleaner for the admin
+        # endpoint to read without scanning every entry.
+        value = self.channels.get("_meta", {}).get("last_ingested_at") if isinstance(
+            self.channels.get("_meta"), dict
+        ) else None
+        return value if isinstance(value, str) else None
+
+    def touch_last_ingested(self) -> None:
+        """Mark "we just ingested something". Caller should still call save()."""
+        # Stored alongside per-channel watermarks under a "_meta" key
+        # (which can never collide with a real Slack channel ID since IDs
+        # always start with a capital letter).
+        self.channels["_meta"] = {
+            "last_ingested_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def total_docs(self) -> int:
+        """How many docs we've successfully recorded."""
+        return len(self.entries)

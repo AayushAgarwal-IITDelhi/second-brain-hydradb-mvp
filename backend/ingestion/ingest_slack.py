@@ -468,11 +468,13 @@ def upload_in_batches(
         successes += ok
         failures += bad
 
-        _record_successful_uploads(
+        recorded = _record_successful_uploads(
             state,
             batch,
             response if isinstance(response, dict) else {},
         )
+        if recorded > 0:
+            state.touch_last_ingested()
         # Save after every batch so a crash mid-run still keeps partial progress.
         state.save()
 

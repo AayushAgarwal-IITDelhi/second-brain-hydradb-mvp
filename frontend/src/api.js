@@ -129,6 +129,35 @@ export async function askQuery(params) {
 }
 
 // ====================================================================
+// GET /api/admin/status
+// ====================================================================
+/**
+ * Fetch a small ingestion-status snapshot for the admin card.
+ * Returns null if the request fails — the admin card is best-effort
+ * UX and shouldn't break the rest of the app on failure.
+ */
+export async function getAdminStatus() {
+  if (!API_KEY) return null;
+
+  const url = `${API_BASE_URL}/api/admin/status`;
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "GET",
+      headers: { "X-API-Key": API_KEY },
+    });
+  } catch {
+    return null;
+  }
+  if (!response.ok) return null;
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+// ====================================================================
 // POST /api/query/stream  (Server-Sent Events)
 // ====================================================================
 /**

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { ApiError, streamQuery } from "./api.js";
+import { ApiError, getAdminStatus, streamQuery } from "./api.js";
 
 const MODES = [
   { value: "default",      label: "Default — concise answer" },
@@ -53,9 +53,10 @@ export default function App() {
   const [entries, setEntries] = useState([]);
   const [submitting, setSubmitting] = useState(false);
 
+  // Admin status snapshot (refreshed periodically and after each query).
+  const [adminStatus, setAdminStatus] = useState(null);
+
   // Latest in-flight stream's AbortController so the user can cancel.
-  // useRef so it survives re-renders and so the Stop handler always sees
-  // the freshest controller.
   const activeStreamRef = useRef(null);
 
   // Auto-scroll to bottom on any timeline change.
@@ -63,6 +64,22 @@ export default function App() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [entries]);
+
+  // Refresh admin status on mount, every 30s, and after each completed
+  // submission (so a freshly ingested doc bumps the counters live).
+  useEffect(() => {
+    let cancelled = false;
+    async function refresh() {
+      const data = await getAdminStatus();
+      if (!cancelled) setAdminStatus(data);
+    }
+    refresh();
+    const id = setInterval(refresh, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
 
   function patchAssistantEntry(id, patch) {
     setEntries((current) =>
@@ -168,6 +185,13 @@ export default function App() {
         activeStreamRef.current = null;
       }
       setSubmitting(false);
+
+      // Refresh admin status so any docs ingested while we were waiting
+      // (or as a result of activity unrelated to this query) show up
+      // immediately in the admin card.
+      getAdminStatus().then((data) => {
+        if (data) setAdminStatus(data);
+      });
     }
   }
 
@@ -204,6 +228,8 @@ export default function App() {
           Clear chat
         </button>
       </header>
+
+      <AdminStatus status={adminStatus} />
 
       <main className="chat">
         {entries.length === 0 && <EmptyState />}
@@ -341,6 +367,61 @@ export default function App() {
 // ----------------------------------------------------------------------
 // Sub-components
 // ----------------------------------------------------------------------
+
+function AdminStatus({ status }) {
+  if (!status) {
+    // Pre-load placeholder. Doesn't take up much room; avoids layout shift
+    // when the first fetch completes.
+    return (
+      <section className="admin admin--loading" aria-live="polite">
+        <span className="admin__label">Status</span>
+        <span className="admin__placeholder">loading…</span>
+      </section>
+    );
+  }
+
+  const lastIngested = status.last_ingested_at
+    ? formatIsoRelative(status.last_ingested_at)
+    : "never";
+
+  return (
+    <section className="admin" aria-live="polite">
+      <span className="admin__label">Status</span>
+
+      <span
+        className={`admin__pill admin__pill--${
+          status.realtime_ingest_enabled ? "on" : "off"
+        }`}
+        title="Slack Events webhook ingestion"
+      >
+        realtime {status.realtime_ingest_enabled ? "on" : "off"}
+      </span>
+
+      <span
+        className={`admin__pill admin__pill--${
+          status.scheduler_enabled ? "on" : "off"
+        }`}
+        title="Polling scheduler fallback"
+      >
+        scheduler {status.scheduler_enabled ? "on" : "off"}
+      </span>
+
+      <span className="admin__metric" title={status.last_ingested_at || "no ingestion yet"}>
+        last ingest: <strong>{lastIngested}</strong>
+      </span>
+
+      <span className="admin__metric">
+        docs: <strong>{status.total_docs ?? 0}</strong>
+      </span>
+
+      {typeof status.channels_tracked === "number" && (
+        <span className="admin__metric">
+          channels: <strong>{status.channels_tracked}</strong>
+        </span>
+      )}
+    </section>
+  );
+}
 
 function EmptyState() {
   return (
@@ -489,6 +570,31 @@ function formatTimestamp(slackTs) {
   if (Number.isNaN(date.getTime())) return slackTs;
   return date.toLocaleString(undefined, {
     year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/**
+ * Format an ISO timestamp as a short, friendly relative string.
+ *  - "12s ago" / "5m ago" / "2h ago" up to a day
+ *  - older than 1 day -> "Mar 12, 14:05" local
+ */
+function formatIsoRelative(iso) {
+  if (!iso) return "never";
+  const then = new Date(iso);
+  if (Number.isNaN(then.getTime())) return iso;
+  const diffMs = Date.now() - then.getTime();
+  if (diffMs < 0) return then.toLocaleString();
+  const diffSec = Math.floor(diffMs / 1000);
+  if (diffSec < 60) return `${diffSec}s ago`;
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  return then.toLocaleString(undefined, {
     month: "short",
     day: "numeric",
     hour: "2-digit",

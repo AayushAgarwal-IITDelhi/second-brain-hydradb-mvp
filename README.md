@@ -286,3 +286,6 @@ populated `.env`.
 - The frontend is a separate project. CORS is preconfigured for
   `http://localhost:3000` (Next.js) and `http://localhost:5173` (Vite);
   override via `CORS_ORIGINS`.
+
+Realtime Slack Events support is available behind REALTIME_INGEST_ENABLED=true.
+For normal local use, scheduled incremental sync is recommended.
