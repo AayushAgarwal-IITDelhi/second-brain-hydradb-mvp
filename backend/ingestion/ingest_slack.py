@@ -262,23 +262,47 @@ def process_channel(
     Pull messages + threads for one channel, then split into:
       - files_to_upload: brand-new (or force-mode) docs
       - skipped_count:   docs already present in state (only when not force)
+
+    Incremental sync:
+      - If FORCE_REINGEST is OFF and we have a `last_synced_ts` for this
+        channel, pass it as `oldest=` so Slack only returns newer messages.
+      - We track the newest ts seen during this run. The caller advances
+        the channel's watermark to it ONLY after the upload succeeds.
     """
     channel_name = fetch_channel_name(slack, channel_id)
-    print(
-        f"\n[ingest] Channel {channel_id} -> '{channel_name}'; fetching messages ..."
-    )
+
+    oldest = None if force else state.get_last_synced_ts(channel_id)
+    if oldest:
+        print(
+            f"\n[ingest] Channel {channel_id} -> '{channel_name}'; "
+            f"fetching messages newer than {oldest} ..."
+        )
+    else:
+        print(
+            f"\n[ingest] Channel {channel_id} -> '{channel_name}'; "
+            f"fetching full history (no prior sync) ..."
+        )
 
     raw_messages = slack.fetch_channel_messages(
         channel_id=channel_id,
         limit_per_channel=MESSAGES_PER_CHANNEL,
+        oldest=oldest,
     )
     print(f"[ingest] Got {len(raw_messages)} raw messages from {channel_id}.")
 
     files_to_upload: List[Dict[str, Any]] = []
     skipped_count = 0
     threads_fetched = 0
+    newest_ts_seen: Optional[str] = None  # advance watermark to this after upload
 
     for message in raw_messages:
+        # Track the newest ts seen across ALL messages (including ones we
+        # skip or filter as noise), so the watermark advances past them too
+        # and the next run doesn't waste an API call to re-see them.
+        msg_ts = message.get("ts") or ""
+        if msg_ts and (newest_ts_seen is None or msg_ts > newest_ts_seen):
+            newest_ts_seen = msg_ts
+
         if is_noise(message):
             continue
 
@@ -324,6 +348,7 @@ def process_channel(
         "thread_count": threads_fetched,
         "skipped_count": skipped_count,
         "files": files_to_upload,
+        "newest_ts_seen": newest_ts_seen,
     }
 
 
@@ -468,20 +493,30 @@ def main() -> None:
     force = force_reingest_enabled()
     if force:
         print("[ingest] FORCE_REINGEST=true -> ignoring existing state for dedupe.")
+        print("[ingest] FORCE_REINGEST=true -> ignoring last_synced_ts watermarks.")
 
     slack = SlackClientWrapper()
     hydra = HydraDBClient()
     state = IngestionState(STATE_PATH)
     print(
         f"[ingest] Loaded ingestion state from {STATE_PATH} "
-        f"({len(state.entries)} entries known)."
+        f"({len(state.entries)} entries, "
+        f"{len(state.channels)} channel watermarks)."
     )
 
     total_raw_messages = 0
     total_threads = 0
     total_skipped = 0
-    all_files: List[Dict[str, Any]] = []
+    total_files_prepared = 0
+    total_successes = 0
+    total_failures = 0
 
+    # We upload per-channel (not in one giant batch across channels) so we
+    # can advance each channel's `last_synced_ts` ONLY after that channel's
+    # upload actually succeeded. If the process is killed mid-run, channels
+    # that completed have their watermark moved; channels that hadn't
+    # finished keep their old watermark and re-fetch the same window next
+    # time — safe to retry.
     for channel_id in channel_ids:
         try:
             result = process_channel(slack, channel_id, state, force=force)
@@ -492,26 +527,55 @@ def main() -> None:
         total_raw_messages += result["raw_count"]
         total_threads += result["thread_count"]
         total_skipped += result["skipped_count"]
-        all_files.extend(result["files"])
+        total_files_prepared += len(result["files"])
+
+        if not result["files"]:
+            # Nothing new to upload. But if Slack returned messages at all
+            # (e.g. ones we'd already ingested or filtered as noise), we can
+            # safely advance the watermark to the newest ts we saw — that
+            # avoids re-fetching them next run.
+            newest = result.get("newest_ts_seen")
+            if newest:
+                state.set_last_synced_ts(result["channel_id"], newest)
+                state.save()
+                print(
+                    f"[ingest] Channel {result['channel_id']}: nothing new, "
+                    f"advanced last_synced_ts to {newest}."
+                )
+            continue
+
+        stats = upload_in_batches(hydra, result["files"], state)
+        total_successes += stats["successes"]
+        total_failures += stats["failures"]
+
+        # Advance the watermark ONLY if every file in this channel uploaded
+        # OK. If even one failed, we keep the old watermark so the next run
+        # re-fetches the failed window and tries again. (Stable-key dedupe
+        # makes the retry safe: anything that did upload won't be re-sent.)
+        newest = result.get("newest_ts_seen")
+        if newest and stats["failures"] == 0:
+            state.set_last_synced_ts(result["channel_id"], newest)
+            state.save()
+            print(
+                f"[ingest] Channel {result['channel_id']}: upload OK, "
+                f"advanced last_synced_ts to {newest}."
+            )
+        elif stats["failures"] > 0:
+            print(
+                f"[ingest] Channel {result['channel_id']}: "
+                f"{stats['failures']} failure(s); leaving last_synced_ts "
+                f"unchanged so the next run retries."
+            )
 
     print("\n[ingest] ============================================")
     print(f"[ingest] Channels processed:       {len(channel_ids)}")
     print(f"[ingest] Raw messages fetched:     {total_raw_messages}")
     print(f"[ingest] Threads fetched:          {total_threads}")
-    print(f"[ingest] Files prepared:           {len(all_files)}")
+    print(f"[ingest] Files prepared:           {total_files_prepared}")
     print(f"[ingest] Skipped (already in state):{total_skipped}")
-    print("[ingest] ============================================")
-
-    if not all_files:
-        print("[ingest] Nothing new to upload. Exiting.")
-        return
-
-    stats = upload_in_batches(hydra, all_files, state)
-
-    print("\n[ingest] ============================================")
-    print(f"[ingest] Upload successes: {stats['successes']}")
-    print(f"[ingest] Upload failures:  {stats['failures']}")
-    print(f"[ingest] State entries now: {len(state.entries)} "
+    print(f"[ingest] Upload successes:         {total_successes}")
+    print(f"[ingest] Upload failures:          {total_failures}")
+    print(f"[ingest] State entries now:        {len(state.entries)} "
           f"(saved to {STATE_PATH})")
     print("[ingest] ============================================")
 

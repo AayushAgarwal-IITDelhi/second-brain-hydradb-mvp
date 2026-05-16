@@ -141,6 +141,61 @@ body {
   letter-spacing: 0.04em;
   color: var(--text-muted);
   margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bubble__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-radius: 999px;
+}
+
+.badge--cache {
+  background: #ecfdf5;
+  color: #045a36;
+}
+
+.cursor {
+  display: inline-block;
+  margin-left: 2px;
+  animation: blink 1s steps(2, start) infinite;
+  color: var(--text-muted);
+}
+
+@keyframes blink {
+  to { visibility: hidden; }
+}
+
+.answer--placeholder {
+  color: var(--text-muted);
+  font-style: italic;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.aborted-note {
+  margin: 6px 0 0;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--text-muted);
 }
 
 .bubble__body {

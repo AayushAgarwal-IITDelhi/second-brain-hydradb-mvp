@@ -7,7 +7,7 @@ State lives in a plain JSON file (no database) at:
 
 Schema:
     {
-      "version": 1,
+      "version": 2,
       "entries": {
         "<stable_key>": {
           "stable_key":   "slack:C123:1778775842.876209",
@@ -17,11 +17,27 @@ Schema:
           "channel_name": "all-second-brain",
           "ts":           "1778775842.876209",  # for messages
           "thread_ts":    null,                 # for threads
-          "uploaded_at":  "2026-05-15T12:34:56.789012+00:00"
+          "uploaded_at":  "2026-05-15T12:34:56.789012+00:00",
+          "user_name":    "Praveer Nema",
+          "timestamp":    "1778775842.876209",
+          "snippet":      "first ~200 chars ...",
+          "permalink":    "https://...",
+          "document_type":"message" | "thread"
+        },
+        ...
+      },
+      "channels": {
+        "<channel_id>": {
+          "last_synced_ts": "1778775842.876209"   # newest message ts we've ingested
         },
         ...
       }
     }
+
+`channels` is added in version 2 for incremental Slack sync. Older files
+(missing `channels` or `version: 1`) load without error — we just start
+with an empty channels dict, which means the next run will fetch full
+history (one-time cost) before incremental kicks in.
 """
 
 import json
@@ -31,7 +47,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
-STATE_VERSION = 1
+STATE_VERSION = 2
 
 
 # ---------------------------------------------------------------------- #
@@ -54,6 +70,7 @@ class IngestionState:
     def __init__(self, path: Path):
         self.path = path
         self.entries: Dict[str, Dict[str, Any]] = {}
+        self.channels: Dict[str, Dict[str, Any]] = {}
         self._load()
 
     # ----- disk I/O ---------------------------------------------------- #
@@ -71,15 +88,28 @@ class IngestionState:
             )
             return
 
-        entries = raw.get("entries") if isinstance(raw, dict) else None
+        if not isinstance(raw, dict):
+            return
+
+        entries = raw.get("entries")
         if isinstance(entries, dict):
             self.entries = entries
+
+        # `channels` was added in version 2. Older files don't have it; we
+        # treat that as "empty" so the next run does a full sync once.
+        channels = raw.get("channels")
+        if isinstance(channels, dict):
+            self.channels = channels
 
     def save(self) -> None:
         """Atomically write the state file (write to .tmp, then rename)."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-        payload = {"version": STATE_VERSION, "entries": self.entries}
+        payload = {
+            "version": STATE_VERSION,
+            "entries": self.entries,
+            "channels": self.channels,
+        }
         with tmp_path.open("w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, sort_keys=True)
         os.replace(tmp_path, self.path)
@@ -141,3 +171,35 @@ class IngestionState:
             if entry.get("filename") == filename:
                 return entry
         return None
+
+    # ----- per-channel sync timestamps -------------------------------- #
+    def get_last_synced_ts(self, channel_id: str) -> Optional[str]:
+        """The newest Slack ts we've successfully ingested for this channel."""
+        info = self.channels.get(channel_id)
+        if isinstance(info, dict):
+            ts = info.get("last_synced_ts")
+            if isinstance(ts, str) and ts:
+                return ts
+        return None
+
+    def set_last_synced_ts(self, channel_id: str, ts: str) -> None:
+        """
+        Record the newest successfully-ingested ts for this channel.
+
+        Caller should only invoke this AFTER the channel's batch upload
+        succeeded, so a crash mid-run doesn't advance the watermark past
+        unuploaded messages.
+
+        We never move the watermark backward — if `ts` is older than the
+        stored value, we keep the stored one. This guards against edge
+        cases like a race where an old message arrives after a new one.
+        """
+        if not channel_id or not ts:
+            return
+        existing = self.get_last_synced_ts(channel_id)
+        if existing and existing >= ts:
+            # Slack ts strings sort lexicographically the same as numerically
+            # because they are zero-padded "<seconds>.<micros>" forms with
+            # equal-length seconds parts within any sensible time range.
+            return
+        self.channels[channel_id] = {"last_synced_ts": ts}

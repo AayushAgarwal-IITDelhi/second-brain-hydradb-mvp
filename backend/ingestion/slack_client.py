@@ -43,24 +43,34 @@ class SlackClientWrapper:
         self,
         channel_id: str,
         limit_per_channel: int = 500,
+        oldest: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Fetch up to `limit_per_channel` messages from a single Slack channel.
 
         Uses conversations.history with cursor pagination. Stops as soon as we
         hit limit_per_channel or run out of messages.
-        Returns the raw Slack message dicts (no normalization here).
+
+        If `oldest` is provided (a Slack ts string like "1778775842.876209"),
+        Slack returns only messages with ts STRICTLY greater than that
+        value — i.e. only what's been posted since our last successful
+        sync. This is the core of incremental ingestion.
         """
         collected: List[Dict[str, Any]] = []
         cursor: Optional[str] = None
         page_size = min(SLACK_MAX_PAGE_SIZE, limit_per_channel)
 
+        # Build kwargs once; only include `oldest` if set so callers using
+        # the default behavior aren't affected.
+        base_kwargs: Dict[str, Any] = {"channel": channel_id, "limit": page_size}
+        if oldest:
+            base_kwargs["oldest"] = oldest
+
         while True:
             try:
                 response = self.client.conversations_history(
-                    channel=channel_id,
-                    limit=page_size,
                     cursor=cursor,
+                    **base_kwargs,
                 )
             except SlackApiError as e:
                 # Print the Slack-side error message and decide whether to retry.

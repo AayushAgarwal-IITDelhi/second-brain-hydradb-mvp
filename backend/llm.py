@@ -95,3 +95,75 @@ def generate_grounded_answer(
 
     text = (choices[0].message.content or "").strip()
     return text or INSUFFICIENT_CONTEXT_ANSWER
+
+
+def stream_grounded_answer(
+    question: str,
+    context: str,
+    mode: str = "default",
+    model: Optional[str] = None,
+):
+    """
+    Yield token chunks from the LLM as they arrive.
+
+    Same prompts / temperature / max_tokens as generate_grounded_answer,
+    just with stream=True. Yields strings (deltas). Caller is responsible
+    for concatenating them.
+
+    Raises:
+        UpstreamTimeoutError on SDK timeout.
+        LLMError on any other SDK / network failure.
+    """
+    model = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+    try:
+        max_tokens = int(os.getenv("LLM_MAX_TOKENS", "500"))
+    except ValueError:
+        max_tokens = 500
+
+    if not context.strip():
+        yield INSUFFICIENT_CONTEXT_ANSWER
+        return
+
+    user_message = (
+        f"Question:\n{question}\n\n"
+        f"Context snippets:\n{context}\n\n"
+        f"Answer the question using only the context above. "
+        f"Cite sources as [1], [2], etc."
+    )
+    system_prompt = system_prompt_for_mode(mode)
+
+    try:
+        client = _build_client()
+        stream = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            temperature=0.1,
+            max_tokens=max_tokens,
+            stream=True,
+        )
+    except APITimeoutError as e:
+        raise UpstreamTimeoutError(
+            log_context=f"LLM stream timeout: {type(e).__name__}"
+        )
+    except Exception as e:  # noqa: BLE001
+        raise LLMError(log_context=f"LLM stream open failed: {type(e).__name__}")
+
+    try:
+        for event in stream:
+            # OpenAI SDK shape: event.choices[0].delta.content (may be None).
+            if not event.choices:
+                continue
+            delta = event.choices[0].delta
+            piece = getattr(delta, "content", None)
+            if piece:
+                yield piece
+    except APITimeoutError as e:
+        raise UpstreamTimeoutError(
+            log_context=f"LLM stream timeout: {type(e).__name__}"
+        )
+    except Exception as e:  # noqa: BLE001
+        raise LLMError(log_context=f"LLM stream iter failed: {type(e).__name__}")
