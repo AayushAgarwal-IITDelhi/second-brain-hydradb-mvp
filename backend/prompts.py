@@ -15,7 +15,10 @@ Backward compatible: "default" reproduces the original prompt.
 INSUFFICIENT_CONTEXT_ANSWER = "I do not have enough Slack context to answer that."
 
 
-SUPPORTED_MODES = ("default", "summary", "decisions", "action_items", "who_said")
+SUPPORTED_MODES = (
+    "default", "summary", "decisions", "action_items", "who_said",
+    "exact", "hybrid",
+)
 
 
 _HARD_RULES = f"""Rules:
@@ -70,6 +73,23 @@ _MODE_BODIES = {
         "- Use only quotes that are present in the context — do not paraphrase.\n"
         "- Cite the source for each quote.\n"
         "- If no relevant quotes exist, reply exactly with the fallback string."
+    ),
+    "exact": (
+        "You are operating in EXACT-MATCH mode. The context snippets shown "
+        "below were selected because they contain literal keyword matches "
+        "from the user's question.\n"
+        "- Quote or directly reference the matching phrases from the context.\n"
+        "- Stay close to the wording of the source. Do not paraphrase "
+        "loosely or add nuance not present in the snippets.\n"
+        "- Cite every claim. Prefer terse answers over long ones."
+    ),
+    "hybrid": (
+        "You are operating in HYBRID-RETRIEVAL mode. The context combines "
+        "semantically-similar snippets with snippets that contain literal "
+        "keyword matches from the question.\n"
+        "- Prefer evidence that includes the user's exact terms when "
+        "available, but you may still use semantically related context.\n"
+        "- Cite every claim. Prefer concise, direct answers."
     ),
 }
 

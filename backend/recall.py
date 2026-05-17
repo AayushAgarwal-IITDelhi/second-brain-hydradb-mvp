@@ -576,6 +576,7 @@ def _source_passes_filters(
 def prepare_recall_context(
     question: str,
     top_k: int,
+    mode: str = "default",
     channel: Optional[str] = None,
     user: Optional[str] = None,
     document_type: Optional[str] = None,
@@ -585,24 +586,41 @@ def prepare_recall_context(
     """
     Run HydraDB recall and build the LLM-ready context + parallel sources.
 
+    The `mode` parameter changes how we rank the chunks BEFORE they're
+    handed to the LLM:
+      - "exact":  prefer chunks containing the user's keywords verbatim.
+                  Fall back to semantic order if no exact matches exist.
+      - "hybrid": combine semantic order with a keyword-hit bonus.
+      - all others: preserve HydraDB's semantic order.
+
     Returns a dict with one of two shapes:
 
     Success:
         {
-            "ready":          True,
-            "context_text":   str,                    # numbered context to feed to LLM
-            "sources":        List[Dict[str, Any]],   # parallel source cards
-            "chunks_count":   int,
-            "filtered_out":   int,
-            "fallback_debug": None,
+            "ready":            True,
+            "context_text":     str,                  # numbered context for LLM
+            "sources":          List[Dict[str, Any]], # parallel cards (re-numbered)
+            "chunks_count":     int,
+            "filtered_out":     int,
+            "exact_matches":    int,                  # >=1 keyword hit
+            "retrieval_mode":   str,                  # what we actually did
+            "query_terms":      List[str],
+            "fallback_debug":   None,
         }
 
-    No usable context (HydraDB empty or filters dropped everything):
+    No usable context:
         {
             "ready":          False,
-            "fallback_debug": Dict[str, Any],         # ready-to-return debug payload
+            "fallback_debug": Dict[str, Any],
         }
     """
+    # Local imports keep recall.py's top-of-file import block stable.
+    from search_utils import (
+        dedupe_by_stable_key,
+        extract_query_terms,
+        rerank_chunks,
+    )
+
     hydra = HydraDBClient()
     raw_response = hydra.full_recall(query=question, top_k=top_k)
     chunks = _extract_chunks(raw_response)
@@ -619,19 +637,26 @@ def prepare_recall_context(
         print("[recall] ===========================================================")
 
     state = _load_state_safely()
-
     start_unix = _coerce_to_unix_seconds(start_timestamp)
     end_unix = _coerce_to_unix_seconds(end_timestamp)
+    query_terms = extract_query_terms(question) if mode in ("exact", "hybrid") else []
 
-    context_blocks: List[str] = []
-    sources: List[Dict[str, Any]] = []
+    # ---- Step 1: gather per-chunk metadata for ranking ----
+    # We build a parallel list of {text, source_card, original_index,
+    # timestamp_float, hits(_)}. Filters drop chunks before ranking so
+    # the rerank operates only on the candidate set the user actually
+    # wants.
+    chunks_with_meta: List[Dict[str, Any]] = []
     filtered_out = 0
-    for i, chunk in enumerate(chunks, start=1):
+    for original_index, chunk in enumerate(chunks, start=1):
         text = _chunk_text(chunk).strip()
         if not text:
             continue
         score = _chunk_score(chunk)
-        source_card = _build_source_card(chunk, i, score, state)
+        # The 'index' we initially put on the card is the HydraDB order.
+        # We'll renumber after reranking so the cards line up with the
+        # [N] labels the LLM sees.
+        source_card = _build_source_card(chunk, original_index, score, state)
 
         if not _source_passes_filters(
             source_card, channel, user, document_type, start_unix, end_unix,
@@ -639,11 +664,24 @@ def prepare_recall_context(
             filtered_out += 1
             continue
 
-        context_label = source_card.get("channel") or source_card.get("source")
-        context_blocks.append(f"[{i}] (source: {context_label})\n{text}")
-        sources.append(source_card)
+        chunks_with_meta.append({
+            "text": text,
+            "source_card": source_card,
+            "original_index": original_index,
+            "timestamp_float": _coerce_to_unix_seconds(source_card.get("timestamp")),
+        })
 
-    if not context_blocks:
+    # ---- Step 2: dedupe by stable_key BEFORE ranking ----
+    # Same Slack message that resurfaces twice in recall shouldn't get
+    # twice the ranking boost.
+    chunks_with_meta = dedupe_by_stable_key(chunks_with_meta)
+
+    # ---- Step 3: rerank if the mode asks for it; otherwise just cap ----
+    ranked, exact_matches_found = rerank_chunks(
+        chunks_with_meta, query_terms, mode, top_k,
+    )
+
+    if not ranked:
         first_chunk = chunks[0] if chunks else None
         first_chunk_keys = (
             list(first_chunk.keys()) if isinstance(first_chunk, dict) else None
@@ -654,22 +692,39 @@ def prepare_recall_context(
                 list(raw_response.keys())
                 if isinstance(raw_response, dict) else None
             ),
-            "chunks_returned": len(chunks),
+            "chunks_returned":     len(chunks),
             "chunks_filtered_out": filtered_out,
-            "first_chunk_keys": first_chunk_keys,
-            "top_k": top_k,
+            "first_chunk_keys":    first_chunk_keys,
+            "retrieval_mode":      mode,
+            "exact_matches_found": 0,
+            "query_terms":         query_terms,
+            "top_k":               top_k,
         }
         if debug_on and first_chunk is not None:
             debug_payload["first_chunk_preview"] = _first_chunk_preview(first_chunk)
         return {"ready": False, "fallback_debug": debug_payload}
 
+    # ---- Step 4: renumber 1..N so citations align with surviving cards ----
+    context_blocks: List[str] = []
+    sources: List[Dict[str, Any]] = []
+    for i, chunk in enumerate(ranked, start=1):
+        text = chunk["text"]
+        card = dict(chunk["source_card"])
+        card["index"] = i  # overwrite the original-order index
+        context_label = card.get("channel") or card.get("source")
+        context_blocks.append(f"[{i}] (source: {context_label})\n{text}")
+        sources.append(card)
+
     return {
-        "ready":          True,
-        "context_text":   "\n\n".join(context_blocks),
-        "sources":        sources,
-        "chunks_count":   len(chunks),
-        "filtered_out":   filtered_out,
-        "fallback_debug": None,
+        "ready":            True,
+        "context_text":     "\n\n".join(context_blocks),
+        "sources":          sources,
+        "chunks_count":     len(chunks),
+        "filtered_out":     filtered_out,
+        "exact_matches":    exact_matches_found,
+        "retrieval_mode":   mode,
+        "query_terms":      query_terms,
+        "fallback_debug":   None,
     }
 
 
@@ -718,7 +773,8 @@ def answer_question(
         question:         the natural-language question.
         top_k:            how many chunks to ask HydraDB for.
         mode:             "default" | "summary" | "decisions" | "action_items"
-                          | "who_said" — selects the system prompt.
+                          | "who_said" | "exact" | "hybrid" — selects the
+                          system prompt AND the retrieval/ranking strategy.
         channel:          optional channel-name filter (e.g. "general").
         user:             optional user-name filter (e.g. "Praveer Nema").
         document_type:    optional "message" or "thread".
@@ -743,6 +799,7 @@ def answer_question(
     prepared = prepare_recall_context(
         question=question,
         top_k=top_k,
+        mode=mode,
         channel=channel,
         user=user,
         document_type=document_type,
@@ -779,6 +836,9 @@ def answer_question(
             "sources_before_clean": finalized["sources_before"],
             "sources_after_clean":  finalized["sources_after"],
             "mode":                 mode,
+            "retrieval_mode":       prepared.get("retrieval_mode", mode),
+            "exact_matches_found":  prepared.get("exact_matches", 0),
+            "query_terms":          prepared.get("query_terms", []),
             "top_k":                top_k,
         },
     }

@@ -39,11 +39,16 @@ function buildRequestBody({
   documentType,
   startDate,
   endDate,
+  dateQuery,
 }) {
   const body = { question, top_k: topK, mode };
   if (channel && channel.trim()) body.channel = channel.trim();
   if (user && user.trim()) body.user = user.trim();
   if (documentType) body.document_type = documentType;
+
+  // Natural-language date phrase. The backend parses it; explicit start/end
+  // timestamps from the date pickers will still override the parsed range.
+  if (dateQuery && dateQuery.trim()) body.date_query = dateQuery.trim();
 
   const startSec = dateInputToUnixSeconds(startDate, "start");
   const endSec = dateInputToUnixSeconds(endDate, "end");

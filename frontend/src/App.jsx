@@ -8,6 +8,8 @@ const MODES = [
   { value: "decisions",    label: "Decisions — extract decisions" },
   { value: "action_items", label: "Action items — extract tasks" },
   { value: "who_said",     label: "Who said — quote attribution" },
+  { value: "exact",        label: "Exact — keyword match" },
+  { value: "hybrid",       label: "Hybrid — semantic + keyword" },
 ];
 
 const DOC_TYPES = [
@@ -48,6 +50,7 @@ export default function App() {
   const [documentType, setDocumentType] = useState("");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
+  const [dateQuery, setDateQuery] = useState("");
 
   // Chat history.
   const [entries, setEntries] = useState([]);
@@ -117,6 +120,7 @@ export default function App() {
       documentType,
       startDate,
       endDate,
+      dateQuery,
     };
 
     const userEntry = makeUserEntry(trimmed, params);
@@ -306,6 +310,17 @@ export default function App() {
             </select>
           </label>
 
+          <label className="field field--wide">
+            <span className="field__label">Date phrase (optional)</span>
+            <input
+              type="text"
+              value={dateQuery}
+              onChange={(e) => setDateQuery(e.target.value)}
+              placeholder="last week, yesterday, after May 10..."
+              disabled={submitting}
+            />
+          </label>
+
           <label className="field field--narrow">
             <span className="field__label">From</span>
             <input
@@ -443,6 +458,7 @@ function UserBubble({ entry }) {
   if (params.channel) usedFilters.push(`channel=${params.channel}`);
   if (params.user) usedFilters.push(`user=${params.user}`);
   if (params.documentType) usedFilters.push(`type=${params.documentType}`);
+  if (params.dateQuery) usedFilters.push(`date="${params.dateQuery}"`);
   if (params.startDate) usedFilters.push(`from=${params.startDate}`);
   if (params.endDate) usedFilters.push(`to=${params.endDate}`);
 
@@ -472,7 +488,11 @@ function AssistantBubble({ entry }) {
     );
   }
 
-  const cacheHit = entry.debug && entry.debug.cache_hit === true;
+  const debug = entry.debug || {};
+  const cacheHit = debug.cache_hit === true;
+  const retrievalMode = debug.retrieval_mode;
+  const exactMatches = debug.exact_matches_found;
+  const dateQueryDebug = debug.date_query;
 
   return (
     <div className="bubble bubble--assistant">
@@ -487,6 +507,33 @@ function AssistantBubble({ entry }) {
         {!entry.streaming && cacheHit && (
           <span className="badge badge--cache" title="Returned from cache">
             cached
+          </span>
+        )}
+        {!entry.streaming && retrievalMode && retrievalMode !== "default" && (
+          <span className="badge badge--mode" title="Retrieval strategy">
+            mode: {retrievalMode}
+          </span>
+        )}
+        {!entry.streaming && typeof exactMatches === "number"
+          && (retrievalMode === "exact" || retrievalMode === "hybrid") && (
+          <span
+            className={`badge badge--matches ${
+              exactMatches === 0 ? "badge--matches-none" : ""
+            }`}
+            title="Chunks containing at least one query keyword"
+          >
+            exact matches: {exactMatches}
+          </span>
+        )}
+        {!entry.streaming && dateQueryDebug && (
+          <span
+            className={`badge badge--date ${
+              dateQueryDebug.matched ? "" : "badge--date-failed"
+            }`}
+            title={dateQueryDebug.note || ""}
+          >
+            date: {dateQueryDebug.matched ? "✓" : "?"}{" "}
+            {dateQueryDebug.phrase}
           </span>
         )}
       </div>
