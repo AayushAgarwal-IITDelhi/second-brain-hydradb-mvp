@@ -40,6 +40,7 @@ function buildRequestBody({
   startDate,
   endDate,
   dateQuery,
+  conversationHistory,
 }) {
   const body = { question, top_k: topK, mode };
   if (channel && channel.trim()) body.channel = channel.trim();
@@ -54,6 +55,21 @@ function buildRequestBody({
   const endSec = dateInputToUnixSeconds(endDate, "end");
   if (startSec !== null) body.start_timestamp = startSec;
   if (endSec !== null) body.end_timestamp = endSec;
+
+  // Recent chat turns for follow-up reference resolution ("he", "that",
+  // "the earlier discussion"). Backend caps at 6 server-side; we cap
+  // here too so we don't send bytes the server is going to discard.
+  // Sending an empty array would defeat the cache for stateless asks,
+  // so we omit the field entirely when there's nothing to send.
+  if (Array.isArray(conversationHistory) && conversationHistory.length > 0) {
+    const trimmed = conversationHistory
+      .filter((m) => m && (m.role === "user" || m.role === "assistant")
+                       && typeof m.content === "string"
+                       && m.content.trim().length > 0)
+      .slice(-6)
+      .map((m) => ({ role: m.role, content: m.content }));
+    if (trimmed.length > 0) body.conversation_history = trimmed;
+  }
 
   return body;
 }

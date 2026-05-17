@@ -765,22 +765,28 @@ def answer_question(
     document_type: Optional[str] = None,
     start_timestamp: Any = None,
     end_timestamp: Any = None,
+    conversation_history: Optional[List[Any]] = None,
 ) -> Dict[str, Any]:
     """
     End-to-end recall + grounded answer.
 
     Args:
-        question:         the natural-language question.
-        top_k:            how many chunks to ask HydraDB for.
-        mode:             "default" | "summary" | "decisions" | "action_items"
-                          | "who_said" | "exact" | "hybrid" — selects the
-                          system prompt AND the retrieval/ranking strategy.
-        channel:          optional channel-name filter (e.g. "general").
-        user:             optional user-name filter (e.g. "Praveer Nema").
-        document_type:    optional "message" or "thread".
-        start_timestamp:  optional inclusive lower bound on source timestamps
-                          (Slack ts string or unix seconds).
-        end_timestamp:    optional inclusive upper bound.
+        question:              the natural-language question.
+        top_k:                 how many chunks to ask HydraDB for.
+        mode:                  "default" | "summary" | "decisions" | "action_items"
+                               | "who_said" | "exact" | "hybrid" — selects the
+                               system prompt AND the retrieval/ranking strategy.
+        channel:               optional channel-name filter (e.g. "general").
+        user:                  optional user-name filter (e.g. "Praveer Nema").
+        document_type:         optional "message" or "thread".
+        start_timestamp:       optional inclusive lower bound on source timestamps
+                               (Slack ts string or unix seconds).
+        end_timestamp:         optional inclusive upper bound.
+        conversation_history:  optional recent {role, content} turns. Passed
+                               to the LLM for reference resolution ("he",
+                               "that decision", etc). DOES NOT affect
+                               retrieval — only the latest question goes
+                               into HydraDB's similarity search.
 
     Returns:
         {
@@ -796,6 +802,8 @@ def answer_question(
             "debug": {"reason": "empty question"},
         }
 
+    # IMPORTANT: retrieval uses only the current question. Conversation
+    # history is intentionally NOT concatenated into the search query.
     prepared = prepare_recall_context(
         question=question,
         top_k=top_k,
@@ -818,6 +826,7 @@ def answer_question(
         question=question,
         context=prepared["context_text"],
         mode=mode,
+        conversation_history=conversation_history,
     )
 
     finalized = finalize_answer(
@@ -826,6 +835,7 @@ def answer_question(
         top_k=top_k,
     )
 
+    history_used = bool(conversation_history)
     return {
         "answer": finalized["answer"],
         "sources": finalized["cleaned_sources"],
@@ -840,5 +850,7 @@ def answer_question(
             "exact_matches_found":  prepared.get("exact_matches", 0),
             "query_terms":          prepared.get("query_terms", []),
             "top_k":                top_k,
+            "history_used":         history_used,
+            "history_turns":        len(conversation_history) if history_used else 0,
         },
     }

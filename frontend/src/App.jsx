@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 import { ApiError, getAdminStatus, streamQuery } from "./api.js";
 
@@ -17,6 +19,88 @@ const DOC_TYPES = [
   { value: "message", label: "Message" },
   { value: "thread",  label: "Thread" },
 ];
+
+// ----------------------------------------------------------------------
+// Query history (localStorage)
+// ----------------------------------------------------------------------
+// We store the last N user queries — NOT assistant answers — so a returning
+// user can re-fire a past question with its filters. All reads/writes go
+// through safe wrappers; if localStorage is disabled (private mode, quota
+// exceeded, SSR), we silently degrade to an in-memory-only experience.
+const HISTORY_STORAGE_KEY = "secondBrain.queryHistory";
+const HISTORY_LIMIT = 30;
+
+/**
+ * The shape we persist per history item. Kept compact: nothing about the
+ * conversation context (multi-turn memory) is stored — that's session-only
+ * by design.
+ */
+function makeHistoryItem(params) {
+  return {
+    id:            crypto.randomUUID(),
+    timestamp:     Date.now(),
+    question:      params.question || "",
+    mode:          params.mode || "default",
+    topK:          params.topK ?? 5,
+    channel:       params.channel || "",
+    user:          params.user || "",
+    documentType:  params.documentType || "",
+    dateQuery:     params.dateQuery || "",
+    startDate:     params.startDate || "",
+    endDate:       params.endDate || "",
+  };
+}
+
+function loadHistory() {
+  try {
+    const raw = window.localStorage.getItem(HISTORY_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    // Defensive: filter out anything that doesn't at least have a
+    // question — schema drift across versions shouldn't break the panel.
+    return parsed.filter(
+      (it) => it && typeof it.question === "string" && it.question.trim()
+    );
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(items) {
+  try {
+    window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(items));
+  } catch {
+    // QuotaExceeded, private-mode lockdown, etc. We don't surface this —
+    // the in-memory state still works for the rest of the session.
+  }
+}
+
+/**
+ * Push a new entry to the front of `prev`, capped at HISTORY_LIMIT.
+ * Deduplicates adjacent identical entries so clicking "Ask" twice in a
+ * row doesn't fill the panel with duplicates. We only compare the
+ * head — two identical queries with a different one between them are
+ * both kept on purpose (they represent real re-runs spaced over time).
+ */
+function pushHistoryItem(prev, params) {
+  const item = makeHistoryItem(params);
+  if (prev.length > 0 && isSameQuery(prev[0], item)) {
+    // Update the timestamp of the existing head so "Last asked" stays fresh.
+    return [{ ...prev[0], timestamp: item.timestamp }, ...prev.slice(1)];
+  }
+  return [item, ...prev].slice(0, HISTORY_LIMIT);
+}
+
+function isSameQuery(a, b) {
+  // Treat two items as the same query when every user-visible field
+  // matches. Timestamp / id are intentionally not part of the comparison.
+  const FIELDS = [
+    "question", "mode", "topK", "channel", "user",
+    "documentType", "dateQuery", "startDate", "endDate",
+  ];
+  return FIELDS.every((f) => (a[f] ?? "") === (b[f] ?? ""));
+}
 
 function makeUserEntry(question, params) {
   return {
@@ -40,6 +124,42 @@ function makePendingAssistantEntry() {
   };
 }
 
+/**
+ * Walk the chat timeline and return at most the last 6 (user, assistant)
+ * messages in chronological order, formatted as the API expects:
+ *   [{ role: "user", content: "..." }, { role: "assistant", content: "..." }, ...]
+ *
+ * Skips:
+ *   - assistant bubbles still streaming (no completed turn yet)
+ *   - assistant bubbles that errored (no real answer to feed back)
+ *   - aborted bubbles whose `answer` is empty (no useful turn)
+ * Aborted bubbles that DO have partial text are kept — that text was real
+ * model output and is fair game for reference resolution.
+ *
+ * The backend caps at 6 as well, so this is defense in depth; doing it on
+ * the client also keeps the request body small.
+ */
+function buildHistoryFromEntries(entries) {
+  const turns = [];
+  for (const entry of entries) {
+    if (entry.role === "user") {
+      const content = (entry.question || "").trim();
+      if (content) turns.push({ role: "user", content });
+      continue;
+    }
+    // assistant
+    if (entry.streaming) continue;
+    if (entry.error) continue;
+    const content = (entry.answer || "").trim();
+    if (!content) continue;
+    turns.push({ role: "assistant", content });
+  }
+  // Keep only the last 6 turns. Slicing the tail also keeps user/assistant
+  // pairing reasonable in practice (typical flow alternates), though we
+  // don't force pairing — the LLM is robust to either.
+  return turns.slice(-6);
+}
+
 export default function App() {
   // Form state
   const [question, setQuestion] = useState("");
@@ -58,6 +178,17 @@ export default function App() {
 
   // Admin status snapshot (refreshed periodically and after each query).
   const [adminStatus, setAdminStatus] = useState(null);
+
+  // Query history — the user's previous questions + filters, persisted
+  // to localStorage. Initial value comes from disk via a lazy initializer
+  // so we don't read storage on every re-render.
+  const [history, setHistory] = useState(() => loadHistory());
+  const [historyOpen, setHistoryOpen] = useState(false);
+
+  // Persist history whenever it changes. Cheap because we cap at 30.
+  useEffect(() => {
+    saveHistory(history);
+  }, [history]);
 
   // Latest in-flight stream's AbortController so the user can cancel.
   const activeStreamRef = useRef(null);
@@ -111,6 +242,14 @@ export default function App() {
       activeStreamRef.current = null;
     }
 
+    // Build conversation_history from completed entries in the timeline.
+    // Last 6 messages = up to 3 (user, assistant) pairs. We:
+    //   - skip the streaming/loading bubbles (not yet a real turn)
+    //   - skip error bubbles and aborted bubbles with no answer
+    //   - send turns in chronological order (oldest first)
+    // The backend caps at 6 server-side too, so this is defense in depth.
+    const conversationHistory = buildHistoryFromEntries(entries);
+
     const params = {
       question: trimmed,
       topK,
@@ -121,6 +260,7 @@ export default function App() {
       startDate,
       endDate,
       dateQuery,
+      conversationHistory,
     };
 
     const userEntry = makeUserEntry(trimmed, params);
@@ -129,6 +269,16 @@ export default function App() {
     setEntries((current) => [...current, userEntry, assistantEntry]);
     setQuestion("");
     setSubmitting(true);
+
+    // Record this query in the persistent history panel. We do NOT store
+    // the conversation_history field — that's session-only by design (and
+    // would balloon the localStorage payload). The remaining fields are
+    // enough to fully reconstruct the request when the user clicks a row.
+    setHistory((prev) => pushHistoryItem(prev, {
+      question: trimmed,
+      topK, mode, channel, user, documentType,
+      startDate, endDate, dateQuery,
+    }));
 
     const controller = new AbortController();
     activeStreamRef.current = controller;
@@ -219,19 +369,89 @@ export default function App() {
     setSubmitting(false);
   }
 
+  // -------- Query history handlers --------
+  // All three are no-ops while a stream is in flight, since changing the
+  // composer state mid-stream would be confusing (and submitting again
+  // is blocked by the `submitting` guard in handleSubmit anyway).
+  function loadHistoryItemIntoComposer(item) {
+    setQuestion(item.question || "");
+    setMode(item.mode || "default");
+    setTopK(item.topK ?? 5);
+    setChannel(item.channel || "");
+    setUser(item.user || "");
+    setDocumentType(item.documentType || "");
+    setStartDate(item.startDate || "");
+    setEndDate(item.endDate || "");
+    setDateQuery(item.dateQuery || "");
+  }
+
+  function handleLoadHistory(item) {
+    if (submitting) return;
+    loadHistoryItemIntoComposer(item);
+    setHistoryOpen(false); // collapse so the composer is visible
+  }
+
+  function handleRunAgain(item) {
+    if (submitting) return;
+    loadHistoryItemIntoComposer(item);
+    setHistoryOpen(false);
+    // Submit on the next tick so the state updates above have flushed
+    // — handleSubmit reads `question` / filters from state.
+    setTimeout(() => {
+      const form = document.querySelector(".composer");
+      if (form) form.requestSubmit();
+    }, 0);
+  }
+
+  function handleDeleteHistoryItem(id) {
+    setHistory((prev) => prev.filter((it) => it.id !== id));
+  }
+
+  function handleClearHistory() {
+    setHistory([]);
+  }
+
   return (
     <div className="app">
       <header className="app__header">
         <h1>Second Brain</h1>
-        <button
-          type="button"
-          className="btn btn--ghost"
-          onClick={handleClearChat}
-          disabled={entries.length === 0 && !submitting}
-        >
-          Clear chat
-        </button>
+        <div className="app__header-actions">
+          <button
+            type="button"
+            className={`btn btn--ghost ${historyOpen ? "btn--active" : ""}`}
+            onClick={() => setHistoryOpen((open) => !open)}
+            aria-expanded={historyOpen}
+            aria-controls="query-history-panel"
+            disabled={submitting}
+            title={history.length > 0
+              ? `${history.length} saved quer${history.length === 1 ? "y" : "ies"}`
+              : "No saved queries yet"}
+          >
+            History {history.length > 0 && (
+              <span className="btn__count">{history.length}</span>
+            )}
+          </button>
+          <button
+            type="button"
+            className="btn btn--ghost"
+            onClick={handleClearChat}
+            disabled={entries.length === 0 && !submitting}
+          >
+            Clear chat
+          </button>
+        </div>
       </header>
+
+      {historyOpen && (
+        <QueryHistoryPanel
+          history={history}
+          onLoad={handleLoadHistory}
+          onRunAgain={handleRunAgain}
+          onDelete={handleDeleteHistoryItem}
+          onClearAll={handleClearHistory}
+          submitting={submitting}
+        />
+      )}
 
       <AdminStatus status={adminStatus} />
 
@@ -382,6 +602,110 @@ export default function App() {
 // ----------------------------------------------------------------------
 // Sub-components
 // ----------------------------------------------------------------------
+
+function QueryHistoryPanel({
+  history,
+  onLoad,
+  onRunAgain,
+  onDelete,
+  onClearAll,
+  submitting,
+}) {
+  return (
+    <section
+      id="query-history-panel"
+      className="history"
+      aria-label="Recent queries"
+    >
+      <div className="history__header">
+        <div>
+          <strong className="history__title">Query History</strong>
+          <span className="history__hint">
+            {history.length === 0
+              ? "Past questions you ask will appear here."
+              : "Click a row to load it into the composer."}
+          </span>
+        </div>
+        {history.length > 0 && (
+          <button
+            type="button"
+            className="btn btn--ghost btn--small"
+            onClick={onClearAll}
+            disabled={submitting}
+          >
+            Clear history
+          </button>
+        )}
+      </div>
+
+      {history.length > 0 && (
+        <ul className="history__list">
+          {history.map((item) => (
+            <li key={item.id} className="history-item">
+              <button
+                type="button"
+                className="history-item__main"
+                onClick={() => onLoad(item)}
+                disabled={submitting}
+                title="Load this query into the composer"
+              >
+                <div className="history-item__question">
+                  {item.question}
+                </div>
+                <div className="history-item__meta">
+                  <span className="history-item__time">
+                    {formatIsoRelative(new Date(item.timestamp).toISOString())}
+                  </span>
+                  {summarizeFilters(item).map((chip) => (
+                    <span key={chip} className="history-item__chip">{chip}</span>
+                  ))}
+                </div>
+              </button>
+              <div className="history-item__actions">
+                <button
+                  type="button"
+                  className="btn btn--primary btn--small"
+                  onClick={() => onRunAgain(item)}
+                  disabled={submitting}
+                  title="Load this query and run it immediately"
+                >
+                  Run again
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--small"
+                  onClick={() => onDelete(item.id)}
+                  disabled={submitting}
+                  aria-label="Remove this entry from history"
+                  title="Remove from history"
+                >
+                  ✕
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Build the small chips shown next to a history row — only the non-default
+ * filters so a plain question with default settings looks tidy.
+ */
+function summarizeFilters(item) {
+  const chips = [];
+  if (item.mode && item.mode !== "default") chips.push(`mode: ${item.mode}`);
+  if (item.topK && item.topK !== 5) chips.push(`top_k: ${item.topK}`);
+  if (item.channel) chips.push(`#${item.channel}`);
+  if (item.user) chips.push(`@${item.user}`);
+  if (item.documentType) chips.push(item.documentType);
+  if (item.dateQuery) chips.push(`date: ${item.dateQuery}`);
+  if (item.startDate) chips.push(`from ${item.startDate}`);
+  if (item.endDate) chips.push(`to ${item.endDate}`);
+  return chips;
+}
 
 function AdminStatus({ status }) {
   if (!status) {
@@ -539,10 +863,14 @@ function AssistantBubble({ entry }) {
       </div>
       <div className="bubble__body">
         {entry.answer ? (
-          <p className="answer">
-            {entry.answer}
+          <div className="answer">
+            <AnswerMarkdown text={entry.answer} />
+            {/* Cursor lives outside the markdown tree so the parser
+                never sees the '▍' character. It's a small inline-block
+                sibling that visually appears right after the rendered
+                output. */}
             {entry.streaming && <span className="cursor">▍</span>}
-          </p>
+          </div>
         ) : entry.streaming ? (
           <p className="answer answer--placeholder">Searching memory...</p>
         ) : (
@@ -571,6 +899,77 @@ function AssistantBubble({ entry }) {
     </div>
   );
 }
+
+/**
+ * Render an assistant answer as Markdown.
+ *
+ * Why a thin wrapper:
+ *   - Centralizes the remark plugins + component overrides so the
+ *     AssistantBubble stays readable.
+ *   - Lets the bubble keep the blinking cursor as a sibling (NOT a
+ *     child of the markdown tree), which means partial-token states
+ *     like an unfinished code fence don't try to render the cursor
+ *     character.
+ *   - Disables raw HTML by default (react-markdown's default behavior)
+ *     so an LLM that emits "<script>...</script>" or "<img onerror=...>"
+ *     can't execute anything in the browser. We render markdown only.
+ *
+ * Citations like "[1]" survive untouched because react-markdown only
+ * converts "[text](url)" or reference-style "[text][label]" patterns
+ * into links — a bare "[1]" with no matching definition stays as-is.
+ * The CJK citation form "【N†source: ...】" has no Markdown meaning so
+ * it passes through verbatim.
+ */
+function AnswerMarkdown({ text }) {
+  return (
+    <div className="answer-md">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={MARKDOWN_COMPONENTS}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+// Component overrides applied to the rendered tree. Keeping them at
+// module scope avoids re-creating object identities on every render.
+const MARKDOWN_COMPONENTS = {
+  // External links open in a new tab; internal links (rare in answers)
+  // keep default behavior. We destructure `node` out of props so the
+  // ast metadata doesn't leak into the DOM as an attribute.
+  a({ node, children, href, ...props }) {
+    const isExternal = typeof href === "string"
+      && /^https?:\/\//i.test(href);
+    return (
+      <a
+        href={href}
+        target={isExternal ? "_blank" : undefined}
+        rel={isExternal ? "noopener noreferrer" : undefined}
+        {...props}
+      >
+        {children}
+      </a>
+    );
+  },
+  // We deliberately don't override `code`. react-markdown v9 dropped the
+  // `inline` prop, and the cleanest cross-version way to style inline vs
+  // fenced code is via CSS: inline `<code>` lives directly in flow text,
+  // while fenced code blocks are always wrapped in `<pre><code>`. The
+  // CSS rules `.answer-md code` and `.answer-md pre code` target each
+  // case without needing a JS-side discriminator.
+
+  // Tables get a wrapping div so wide tables scroll horizontally
+  // instead of bursting the bubble width.
+  table({ node, children, ...props }) {
+    return (
+      <div className="md-table-wrap">
+        <table {...props}>{children}</table>
+      </div>
+    );
+  },
+};
 
 function SourceCard({ source }) {
   const {

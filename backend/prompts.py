@@ -102,3 +102,65 @@ def system_prompt_for_mode(mode: str) -> str:
     """
     body = _MODE_BODIES.get(mode, _MODE_BODIES["default"])
     return f"{_BASE_PROMPT}{body}\n\n{_HARD_RULES}"
+
+
+# ---------------------------------------------------------------------- #
+# Conversation history formatting
+# ---------------------------------------------------------------------- #
+# Per-turn cap so a long prior assistant answer doesn't blow up the prompt.
+# Approximate; we slice on characters, not tokens, but that's fine for an
+# MVP — the LLM still has plenty of headroom even after a few truncated
+# turns plus the retrieved context.
+_HISTORY_TURN_CHAR_CAP = 800
+
+
+def format_conversation_history(history) -> str:
+    """
+    Build a short "Recent conversation context" section to prepend to the
+    user-turn message in the LLM call.
+
+    `history` is expected to be a list of dicts (or Pydantic models with
+    `.role` / `.content`) representing recent USER and ASSISTANT turns,
+    in chronological order (oldest first). The current question is NOT
+    in this list — main.py supplies that separately.
+
+    Returns an empty string when there's nothing to include, so callers
+    can do `f"{format_conversation_history(h)}Question: ..."` without
+    worrying about an extra blank line in the common case.
+    """
+    if not history:
+        return ""
+
+    lines = []
+    for msg in history:
+        # Accept either dicts or pydantic models with attribute access.
+        if isinstance(msg, dict):
+            role = (msg.get("role") or "").strip().lower()
+            content = (msg.get("content") or "").strip()
+        else:
+            role = (getattr(msg, "role", "") or "").strip().lower()
+            content = (getattr(msg, "content", "") or "").strip()
+
+        if role not in ("user", "assistant") or not content:
+            continue
+
+        # Truncate per-turn so very long assistant replies don't dominate.
+        if len(content) > _HISTORY_TURN_CHAR_CAP:
+            content = content[: _HISTORY_TURN_CHAR_CAP].rstrip() + " […]"
+
+        label = "User" if role == "user" else "Assistant"
+        lines.append(f"{label}: {content}")
+
+    if not lines:
+        return ""
+
+    # The preamble is explicit about purpose: history is for resolving
+    # references ONLY, not new evidence. Hard rules (cite from context,
+    # fallback string, etc.) still apply.
+    return (
+        "Recent conversation context (use ONLY to resolve references "
+        "like 'he', 'that', 'the earlier discussion' — do NOT cite from "
+        "this section or treat it as new evidence):\n"
+        + "\n".join(lines)
+        + "\n\n"
+    )
