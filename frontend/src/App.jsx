@@ -102,6 +102,357 @@ function isSameQuery(a, b) {
   return FIELDS.every((f) => (a[f] ?? "") === (b[f] ?? ""));
 }
 
+// ----------------------------------------------------------------------
+// Saved answers (localStorage)
+// ----------------------------------------------------------------------
+// Like query history but stores full assistant ANSWERS — not just the
+// question/filters — so users can revisit useful results without re-running
+// the LLM. We cap at 50 to keep the localStorage payload bounded; assistant
+// answers + source arrays add up faster than raw query items.
+const SAVED_STORAGE_KEY = "secondBrain.savedAnswers";
+const SAVED_LIMIT = 50;
+
+/**
+ * Build a saved item from a completed assistant entry + the user-bubble
+ * that triggered it. We snapshot the user's question + filters + the
+ * answer + sources + debug at the moment of save, so the saved view can
+ * replay the bubble exactly even if the LLM, the indexed Slack data, or
+ * the local query history change later.
+ */
+function makeSavedItem({ question, params, answer, sources, debug }) {
+  return {
+    id:        crypto.randomUUID(),
+    timestamp: Date.now(),
+    question:  question || "",
+    answer:    answer || "",
+    sources:   Array.isArray(sources) ? sources : [],
+    mode:      (params && params.mode) || "default",
+    filters: {
+      topK:         (params && params.topK) ?? 5,
+      channel:      (params && params.channel) || "",
+      user:         (params && params.user) || "",
+      documentType: (params && params.documentType) || "",
+      dateQuery:    (params && params.dateQuery) || "",
+      startDate:    (params && params.startDate) || "",
+      endDate:      (params && params.endDate) || "",
+    },
+    // Snapshot debug too so the saved-view can re-show cache/mode/
+    // inference badges. Stored on a best-effort basis — if missing,
+    // the saved view simply won't render those badges.
+    debug: debug || null,
+  };
+}
+
+function loadSavedAnswers() {
+  try {
+    const raw = window.localStorage.getItem(SAVED_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    // Defensive: drop entries missing the bare minimum fields. Schema
+    // drift across versions shouldn't crash the panel.
+    return parsed.filter(
+      (it) => it
+        && typeof it.id === "string"
+        && typeof it.question === "string"
+        && typeof it.answer === "string"
+    );
+  } catch {
+    return [];
+  }
+}
+
+function saveSavedAnswers(items) {
+  try {
+    window.localStorage.setItem(SAVED_STORAGE_KEY, JSON.stringify(items));
+  } catch {
+    // QuotaExceeded / private mode / disabled storage — silently degrade
+    // to in-memory only, just like the query-history layer.
+  }
+}
+
+/**
+ * Push to the front of `prev`, capped at SAVED_LIMIT.
+ * We DO NOT dedupe by question text — the same question can produce
+ * different answers over time (different filters, refreshed Slack
+ * data) and the user may legitimately want to save several variants.
+ */
+function pushSavedItem(prev, item) {
+  return [item, ...prev].slice(0, SAVED_LIMIT);
+}
+
+// ----------------------------------------------------------------------
+// Theme (light / dark) — persisted in localStorage, system pref by default
+// ----------------------------------------------------------------------
+const THEME_STORAGE_KEY = "secondBrain.theme";
+
+function loadTheme() {
+  // 1. Honor an explicit user choice if one was saved.
+  try {
+    const saved = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (saved === "light" || saved === "dark") return saved;
+  } catch {
+    // Private mode / disabled storage — fall through to system pref.
+  }
+  // 2. Default to the OS preference.
+  try {
+    if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+      return "dark";
+    }
+  } catch {
+    // matchMedia missing in some test environments.
+  }
+  return "light";
+}
+
+function saveTheme(theme) {
+  try {
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  } catch {
+    // Silent fallback — theme is still applied via React state.
+  }
+}
+
+/**
+ * Produce a short plaintext preview of an answer for use in the saved
+ * panel. Strips the most common markdown constructs so the preview
+ * doesn't render as `**bold** ## heading ` raw tokens.
+ *
+ * Intentionally light-touch — we're not parsing markdown, just cleaning
+ * the visible noise. Worst case a fancy answer renders with a few stray
+ * asterisks in the preview, which is acceptable.
+ */
+function buildAnswerPreview(answer, max = 140) {
+  if (typeof answer !== "string" || !answer) return "";
+  let s = answer
+    // strip fenced code blocks first so their language tags don't survive
+    .replace(/```[\s\S]*?```/g, " ")
+    // inline code -> bare contents
+    .replace(/`([^`]+)`/g, "$1")
+    // images -> alt text
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    // links -> link text
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    // bold/italic markers
+    .replace(/[*_]{1,3}([^*_]+)[*_]{1,3}/g, "$1")
+    // leading list markers / headings
+    .replace(/^\s*([#>\-*+]|\d+\.)\s+/gm, "")
+    // collapse whitespace
+    .replace(/\s+/g, " ")
+    .trim();
+  if (s.length > max) s = s.slice(0, max - 1).trimEnd() + "…";
+  return s;
+}
+
+// ----------------------------------------------------------------------
+// Export helpers (Markdown + TXT)
+// ----------------------------------------------------------------------
+
+/**
+ * Zero-pad an integer to at least 2 digits. Tiny helper, used only by
+ * the timestamp formatter below.
+ */
+function _pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+/**
+ * Build the YYYY-MM-DD-HH-mm portion of an export filename, in LOCAL
+ * time so the filename matches what the user sees on the clock. Accepts
+ * an optional ms-epoch so saved-item exports can use the bookmark's
+ * `timestamp` rather than the moment of clicking Export.
+ */
+function _filenameTimestamp(epochMs) {
+  const d = epochMs ? new Date(epochMs) : new Date();
+  return `${d.getFullYear()}-${_pad2(d.getMonth() + 1)}-${_pad2(d.getDate())}`
+       + `-${_pad2(d.getHours())}-${_pad2(d.getMinutes())}`;
+}
+
+/**
+ * Build a safe export filename of the form
+ *   second-brain-answer-YYYY-MM-DD-HH-mm.{md,txt}
+ *
+ * The filename is fixed-shape — no part of the question is interpolated,
+ * which means we don't have to defend against path traversal, slashes,
+ * Unicode lookalikes, etc. The only variable parts are the timestamp
+ * digits and the extension we control.
+ */
+function safeExportFilename(extension, epochMs) {
+  const ext = extension === "md" || extension === "txt" ? extension : "txt";
+  return `second-brain-answer-${_filenameTimestamp(epochMs)}.${ext}`;
+}
+
+/**
+ * Format a Slack ts string ("1778775842.876209") or a unix-seconds
+ * number into a human-friendly date string for inclusion in exports.
+ * Returns an empty string when the value is unparseable.
+ */
+function _formatTimestampForExport(value) {
+  if (value === null || value === undefined || value === "") return "";
+  let n = NaN;
+  if (typeof value === "number") n = value;
+  else if (typeof value === "string") {
+    const parsed = parseFloat(value.trim());
+    if (!Number.isNaN(parsed)) n = parsed;
+  }
+  if (!Number.isFinite(n)) return "";
+  const d = new Date(n * 1000);
+  if (Number.isNaN(d.getTime())) return "";
+  // ISO-style, local: "2026-05-18 14:32:09"
+  return `${d.getFullYear()}-${_pad2(d.getMonth() + 1)}-${_pad2(d.getDate())}`
+       + ` ${_pad2(d.getHours())}:${_pad2(d.getMinutes())}:${_pad2(d.getSeconds())}`;
+}
+
+/**
+ * Render an answer as a Markdown document with the question, the
+ * assistant's answer body, the sources, and an exported-at footer.
+ *
+ * The answer body is included verbatim — the LLM already produces
+ * markdown, so re-formatting would risk breaking citations or code
+ * blocks. Source snippets are wrapped in blockquotes so any markdown
+ * special characters inside them render literally.
+ */
+function buildMarkdownExport({ question, answer, sources, exportedAt }) {
+  const when = exportedAt ? new Date(exportedAt) : new Date();
+  const lines = [];
+
+  lines.push("# " + (question || "(no question)").trim());
+  lines.push("");
+  lines.push("## Answer");
+  lines.push("");
+  lines.push((answer || "").trim() || "_(empty answer)_");
+  lines.push("");
+
+  const arr = Array.isArray(sources) ? sources : [];
+  if (arr.length > 0) {
+    lines.push("## Sources");
+    lines.push("");
+    arr.forEach((s, i) => {
+      const num = (typeof s.index === "number" && s.index > 0) ? s.index : (i + 1);
+      lines.push(`### [${num}] ${s.channel ? "#" + s.channel : "(unknown channel)"}`);
+      lines.push("");
+      const metaParts = [];
+      if (s.user) metaParts.push(`**User:** ${s.user}`);
+      const ts = _formatTimestampForExport(s.timestamp);
+      if (ts) metaParts.push(`**Timestamp:** ${ts}`);
+      if (s.document_type) metaParts.push(`**Type:** ${s.document_type}`);
+      if (metaParts.length > 0) {
+        lines.push(metaParts.join(" · "));
+        lines.push("");
+      }
+      if (s.permalink) {
+        lines.push(`**Link:** [${s.permalink}](${s.permalink})`);
+        lines.push("");
+      }
+      if (s.snippet && s.snippet.trim()) {
+        // Blockquote each snippet line so internal markdown chars (asterisks,
+        // backticks, leading hashes) render as text, not syntax.
+        const quoted = s.snippet.split("\n").map((ln) => `> ${ln}`).join("\n");
+        lines.push(quoted);
+        lines.push("");
+      }
+    });
+  }
+
+  lines.push("---");
+  lines.push("");
+  lines.push(`_Exported from Second Brain at ${_formatTimestampForExport(when.getTime() / 1000) || when.toISOString()}._`);
+  lines.push("");
+  return lines.join("\n");
+}
+
+/**
+ * Plain-text variant of the markdown export. Same content, no markdown
+ * syntax — suitable for pasting into a doc that won't render markdown.
+ */
+function buildTxtExport({ question, answer, sources, exportedAt }) {
+  const when = exportedAt ? new Date(exportedAt) : new Date();
+  const lines = [];
+
+  lines.push("QUESTION");
+  lines.push("--------");
+  lines.push((question || "(no question)").trim());
+  lines.push("");
+
+  lines.push("ANSWER");
+  lines.push("------");
+  lines.push((answer || "").trim() || "(empty answer)");
+  lines.push("");
+
+  const arr = Array.isArray(sources) ? sources : [];
+  if (arr.length > 0) {
+    lines.push("SOURCES");
+    lines.push("-------");
+    lines.push("");
+    arr.forEach((s, i) => {
+      const num = (typeof s.index === "number" && s.index > 0) ? s.index : (i + 1);
+      lines.push(`[${num}] ${s.channel ? "#" + s.channel : "(unknown channel)"}`);
+      const metaParts = [];
+      if (s.user) metaParts.push(`User: ${s.user}`);
+      const ts = _formatTimestampForExport(s.timestamp);
+      if (ts) metaParts.push(`Timestamp: ${ts}`);
+      if (s.document_type) metaParts.push(`Type: ${s.document_type}`);
+      if (metaParts.length > 0) lines.push("    " + metaParts.join(" | "));
+      if (s.permalink) lines.push(`    Link: ${s.permalink}`);
+      if (s.snippet && s.snippet.trim()) {
+        // Indent snippet lines so the source structure stays readable
+        // when pasted into a plain-text editor.
+        s.snippet.split("\n").forEach((ln) => lines.push("    " + ln));
+      }
+      lines.push("");
+    });
+  }
+
+  lines.push("--");
+  lines.push(`Exported from Second Brain at ${_formatTimestampForExport(when.getTime() / 1000) || when.toISOString()}.`);
+  lines.push("");
+  return lines.join("\n");
+}
+
+/**
+ * Trigger a browser download of `content` as `filename` with the given
+ * MIME type. Uses the standard URL.createObjectURL + click + revoke
+ * dance; no library required.
+ *
+ * Defensive: wrapped in try/catch so that the (very unusual) case of a
+ * sandboxed iframe or other blocked-download environment fails silently
+ * rather than throwing into a React render path.
+ */
+function downloadFile(content, filename, mimeType) {
+  try {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    // Some browsers require the element to be in the DOM before .click().
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    // Revoke on the next tick so the click can resolve before we
+    // invalidate the URL.
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  } catch (err) {
+    console.error("[export] download failed:", err);
+  }
+}
+
+/**
+ * High-level convenience: export the given turn (question/answer/sources)
+ * as either "md" or "txt" with a safe filename and the right MIME type.
+ * `epochMs` lets callers anchor the filename to a specific point in time
+ * (e.g. saved-item exports use the bookmark's saved-at timestamp).
+ */
+function exportAnswer({ question, answer, sources, format, epochMs }) {
+  const fmt = format === "md" ? "md" : "txt";
+  const content = fmt === "md"
+    ? buildMarkdownExport({ question, answer, sources, exportedAt: epochMs })
+    : buildTxtExport({ question, answer, sources, exportedAt: epochMs });
+  const filename = safeExportFilename(fmt, epochMs);
+  const mime = fmt === "md" ? "text/markdown;charset=utf-8" : "text/plain;charset=utf-8";
+  downloadFile(content, filename, mime);
+}
+
 function makeUserEntry(question, params) {
   return {
     id: crypto.randomUUID(),
@@ -189,6 +540,32 @@ export default function App() {
   useEffect(() => {
     saveHistory(history);
   }, [history]);
+
+  // Saved answers — full assistant answers the user has bookmarked.
+  // Distinct from `history` (which only stores user-side params).
+  const [savedAnswers, setSavedAnswers] = useState(() => loadSavedAnswers());
+  const [savedPanelOpen, setSavedPanelOpen] = useState(false);
+  // When non-null, the saved-view overlay renders this item full-screen.
+  const [viewingSaved, setViewingSaved] = useState(null);
+
+  useEffect(() => {
+    saveSavedAnswers(savedAnswers);
+  }, [savedAnswers]);
+
+  // Theme — "light" or "dark". On first load we read the saved
+  // preference if any; otherwise we honor prefers-color-scheme.
+  const [theme, setTheme] = useState(() => loadTheme());
+  useEffect(() => {
+    // The data-theme attribute lives on <html> (documentElement) so the
+    // override cascades to <body> and everything below it. CSS variables
+    // do the rest.
+    document.documentElement.dataset.theme = theme;
+    saveTheme(theme);
+  }, [theme]);
+
+  function toggleTheme() {
+    setTheme((t) => (t === "dark" ? "light" : "dark"));
+  }
 
   // Latest in-flight stream's AbortController so the user can cancel.
   const activeStreamRef = useRef(null);
@@ -411,11 +788,90 @@ export default function App() {
     setHistory([]);
   }
 
+  // -------- Saved-answers handlers --------
+
+  /**
+   * Save the assistant bubble at `entryIndex` (which must be a completed
+   * assistant entry) along with the user bubble that preceded it. We
+   * mark the entry with the new saved item's id so the Save button can
+   * toggle to "Saved" without re-querying storage.
+   */
+  function handleSaveAnswer(entryIndex) {
+    const entry = entries[entryIndex];
+    if (!entry || entry.role !== "assistant") return;
+    if (entry.streaming || entry.error) return;
+    if (!entry.answer || !entry.answer.trim()) return;
+
+    // Find the user bubble that immediately preceded this assistant one
+    // — that's where the question + filters live.
+    const user = entries[entryIndex - 1];
+    if (!user || user.role !== "user") return;
+
+    const item = makeSavedItem({
+      question: user.question,
+      params:   user.params,
+      answer:   entry.answer,
+      sources:  entry.sources,
+      debug:    entry.debug,
+    });
+    setSavedAnswers((prev) => pushSavedItem(prev, item));
+    // Attach the id to the entry so the Save button switches to "Saved".
+    setEntries((current) => current.map((e, i) =>
+      i === entryIndex ? { ...e, savedId: item.id } : e
+    ));
+  }
+
+  function handleUnsaveAnswer(entryIndex) {
+    const entry = entries[entryIndex];
+    if (!entry || !entry.savedId) return;
+    const sid = entry.savedId;
+    setSavedAnswers((prev) => prev.filter((it) => it.id !== sid));
+    setEntries((current) => current.map((e, i) =>
+      i === entryIndex ? { ...e, savedId: null } : e
+    ));
+  }
+
+  function handleDeleteSavedItem(id) {
+    setSavedAnswers((prev) => prev.filter((it) => it.id !== id));
+    // If the user deleted the item that's currently open in the overlay,
+    // close the overlay so we don't render a stale snapshot.
+    if (viewingSaved && viewingSaved.id === id) {
+      setViewingSaved(null);
+    }
+    // Also clear `savedId` on any entry that referenced this saved item
+    // so the inline Save button returns to "Save".
+    setEntries((current) => current.map((e) =>
+      e.savedId === id ? { ...e, savedId: null } : e
+    ));
+  }
+
+  function handleClearSavedAnswers() {
+    setSavedAnswers([]);
+    setViewingSaved(null);
+    setEntries((current) => current.map((e) =>
+      e.savedId ? { ...e, savedId: null } : e
+    ));
+  }
+
+  function handleOpenSavedItem(item) {
+    setViewingSaved(item);
+    setSavedPanelOpen(false);
+  }
+
   return (
     <div className="app">
       <header className="app__header">
         <h1>Second Brain</h1>
         <div className="app__header-actions">
+          <button
+            type="button"
+            className="btn btn--ghost btn--theme"
+            onClick={toggleTheme}
+            title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+            aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+          >
+            {theme === "dark" ? "☀ Light" : "☾ Dark"}
+          </button>
           <button
             type="button"
             className={`btn btn--ghost ${historyOpen ? "btn--active" : ""}`}
@@ -433,12 +889,26 @@ export default function App() {
           </button>
           <button
             type="button"
-            className="btn btn--ghost"
-            onClick={handleClearChat}
-            disabled={entries.length === 0 && !submitting}
+            className={`btn btn--ghost ${savedPanelOpen ? "btn--active" : ""}`}
+            onClick={() => setSavedPanelOpen((open) => !open)}
+            aria-expanded={savedPanelOpen}
+            aria-controls="saved-answers-panel"
+            disabled={submitting}
+            title={savedAnswers.length > 0
+              ? `${savedAnswers.length} saved answer${savedAnswers.length === 1 ? "" : "s"}`
+              : "No saved answers yet"}
           >
-            Clear chat
+            Saved {savedAnswers.length > 0 && (
+              <span className="btn__count">{savedAnswers.length}</span>
+            )}
           </button>
+          <ArmedButton
+            onConfirm={handleClearChat}
+            label="Clear chat"
+            confirmLabel="Confirm clear?"
+            title="Clear the visible chat (history and saved answers are kept)"
+            disabled={entries.length === 0 && !submitting}
+          />
         </div>
       </header>
 
@@ -453,17 +923,48 @@ export default function App() {
         />
       )}
 
+      {savedPanelOpen && (
+        <SavedAnswersPanel
+          items={savedAnswers}
+          onOpen={handleOpenSavedItem}
+          onDelete={handleDeleteSavedItem}
+          onClearAll={handleClearSavedAnswers}
+        />
+      )}
+
+      {viewingSaved && (
+        <SavedAnswerOverlay
+          item={viewingSaved}
+          onClose={() => setViewingSaved(null)}
+          onDelete={() => handleDeleteSavedItem(viewingSaved.id)}
+        />
+      )}
+
       <AdminStatus status={adminStatus} />
 
       <main className="chat">
         {entries.length === 0 && <EmptyState />}
-        {entries.map((entry) =>
-          entry.role === "user" ? (
-            <UserBubble key={entry.id} entry={entry} />
-          ) : (
-            <AssistantBubble key={entry.id} entry={entry} />
-          )
-        )}
+        {entries.map((entry, idx) => {
+          if (entry.role === "user") {
+            return <UserBubble key={entry.id} entry={entry} />;
+          }
+          // The assistant bubble needs the question text for its export
+          // buttons. The immediately preceding entry is always the user
+          // turn that triggered this assistant turn.
+          const prior = entries[idx - 1];
+          const question = (prior && prior.role === "user")
+            ? (prior.question || "")
+            : "";
+          return (
+            <AssistantBubble
+              key={entry.id}
+              entry={entry}
+              question={question}
+              onSave={() => handleSaveAnswer(idx)}
+              onUnsave={() => handleUnsaveAnswer(idx)}
+            />
+          );
+        })}
         <div ref={bottomRef} />
       </main>
 
@@ -611,6 +1112,12 @@ function QueryHistoryPanel({
   onClearAll,
   submitting,
 }) {
+  const [filter, setFilter] = useState("");
+  const needle = filter.trim().toLowerCase();
+  const filtered = needle
+    ? history.filter((item) => itemMatchesFilter(item, needle))
+    : history;
+
   return (
     <section
       id="query-history-panel"
@@ -627,20 +1134,37 @@ function QueryHistoryPanel({
           </span>
         </div>
         {history.length > 0 && (
-          <button
-            type="button"
-            className="btn btn--ghost btn--small"
-            onClick={onClearAll}
+          <ArmedButton
+            onConfirm={onClearAll}
+            label="Clear history"
+            confirmLabel="Confirm clear?"
+            title="Remove all entries from query history"
             disabled={submitting}
-          >
-            Clear history
-          </button>
+            size="small"
+          />
         )}
       </div>
 
-      {history.length > 0 && (
+      <FilterBox
+        value={filter}
+        onChange={setFilter}
+        placeholder="Filter history…"
+        matchCount={filtered.length}
+        totalCount={history.length}
+        ariaLabel="Filter query history"
+      />
+
+      {history.length === 0 ? (
+        <div className="panel-empty">
+          No history yet. Ask a question and it'll show up here.
+        </div>
+      ) : filtered.length === 0 ? (
+        <div className="panel-empty">
+          No matches for “{filter.trim()}”.
+        </div>
+      ) : (
         <ul className="history__list">
-          {history.map((item) => (
+          {filtered.map((item) => (
             <li key={item.id} className="history-item">
               <button
                 type="button"
@@ -691,6 +1215,19 @@ function QueryHistoryPanel({
 }
 
 /**
+ * Lowercase substring match across all visible fields of a history
+ * item. Used by the panel filter input. Case-insensitive; needle is
+ * already trimmed/lowercased by the caller.
+ */
+function itemMatchesFilter(item, needle) {
+  const hay = [
+    item.question, item.mode, item.channel, item.user,
+    item.documentType, item.dateQuery,
+  ].filter(Boolean).join(" ").toLowerCase();
+  return hay.includes(needle);
+}
+
+/**
  * Build the small chips shown next to a history row — only the non-default
  * filters so a plain question with default settings looks tidy.
  */
@@ -705,6 +1242,255 @@ function summarizeFilters(item) {
   if (item.startDate) chips.push(`from ${item.startDate}`);
   if (item.endDate) chips.push(`to ${item.endDate}`);
   return chips;
+}
+
+/**
+ * Same chip-summary helper for saved items. Saved items keep filters
+ * under `item.filters` + `item.mode` (instead of flat top-level fields
+ * the way history items do), so we adapt to that shape here rather than
+ * forcing one schema on both.
+ */
+function summarizeSavedFilters(item) {
+  const f = item.filters || {};
+  const flattened = {
+    mode:         item.mode,
+    topK:         f.topK,
+    channel:      f.channel,
+    user:         f.user,
+    documentType: f.documentType,
+    dateQuery:    f.dateQuery,
+    startDate:    f.startDate,
+    endDate:      f.endDate,
+  };
+  return summarizeFilters(flattened);
+}
+
+function SavedAnswersPanel({ items, onOpen, onDelete, onClearAll }) {
+  const [filter, setFilter] = useState("");
+  const needle = filter.trim().toLowerCase();
+  const filtered = needle
+    ? items.filter((it) => savedItemMatchesFilter(it, needle))
+    : items;
+
+  return (
+    <section
+      id="saved-answers-panel"
+      className="saved"
+      aria-label="Saved answers"
+    >
+      <div className="saved__header">
+        <div>
+          <strong className="saved__title">Saved Answers</strong>
+          <span className="saved__hint">
+            {items.length === 0
+              ? "Answers you bookmark will appear here."
+              : "Click a row to open the full answer."}
+          </span>
+        </div>
+        {items.length > 0 && (
+          <ArmedButton
+            onConfirm={onClearAll}
+            label="Clear all"
+            confirmLabel="Confirm clear?"
+            title="Remove all saved answers"
+            size="small"
+          />
+        )}
+      </div>
+
+      <FilterBox
+        value={filter}
+        onChange={setFilter}
+        placeholder="Filter saved answers…"
+        matchCount={filtered.length}
+        totalCount={items.length}
+        ariaLabel="Filter saved answers"
+      />
+
+      {items.length === 0 ? (
+        <div className="panel-empty">
+          No saved answers yet. Use the ★ Save button on an answer to bookmark it.
+        </div>
+      ) : filtered.length === 0 ? (
+        <div className="panel-empty">
+          No matches for “{filter.trim()}”.
+        </div>
+      ) : (
+        <ul className="saved__list">
+          {filtered.map((item) => (
+            <li key={item.id} className="saved-item">
+              <button
+                type="button"
+                className="saved-item__main"
+                onClick={() => onOpen(item)}
+                title="Open the full saved answer"
+              >
+                <div className="saved-item__question">{item.question}</div>
+                <div className="saved-item__preview">
+                  {buildAnswerPreview(item.answer)}
+                </div>
+                <div className="saved-item__meta">
+                  <span className="saved-item__time">
+                    {formatIsoRelative(new Date(item.timestamp).toISOString())}
+                  </span>
+                  <span className="saved-item__sources">
+                    {item.sources?.length || 0} source{item.sources?.length === 1 ? "" : "s"}
+                  </span>
+                  {summarizeSavedFilters(item).slice(0, 3).map((chip) => (
+                    <span key={chip} className="saved-item__chip">{chip}</span>
+                  ))}
+                </div>
+              </button>
+              <button
+                type="button"
+                className="btn btn--ghost btn--small"
+                onClick={() => onDelete(item.id)}
+                aria-label="Remove this saved answer"
+                title="Remove this saved answer"
+              >
+                ✕
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Filter predicate for saved items. We match against the question, the
+ * answer body, and every visible filter chip — so typing "engineering"
+ * or "exact" narrows the list the way the user would expect.
+ */
+function savedItemMatchesFilter(item, needle) {
+  const filters = item.filters || {};
+  const hay = [
+    item.question, item.answer, item.mode,
+    filters.channel, filters.user, filters.documentType, filters.dateQuery,
+  ].filter(Boolean).join(" ").toLowerCase();
+  return hay.includes(needle);
+}
+
+/**
+ * Full-screen-ish overlay that shows the full saved answer + sources,
+ * rendered with the same markdown component the live chat uses.
+ *
+ * We render this as a sibling of the main chat (not a portal) because
+ * the existing layout is already a vertical column with a backdrop
+ * behavior achievable via fixed positioning + z-index. Keyboard:
+ * Escape closes the overlay.
+ */
+function SavedAnswerOverlay({ item, onClose, onDelete }) {
+  useEffect(() => {
+    function onKeydown(e) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKeydown);
+    return () => window.removeEventListener("keydown", onKeydown);
+  }, [onClose]);
+
+  const chips = summarizeSavedFilters(item);
+
+  return (
+    <div
+      className="saved-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Saved answer"
+      onClick={onClose}
+    >
+      {/* Stop clicks inside the card from bubbling up to the backdrop
+          (which would close the overlay). */}
+      <div className="saved-overlay__card" onClick={(e) => e.stopPropagation()}>
+        <header className="saved-overlay__header">
+          <div className="saved-overlay__meta">
+            <span className="saved-overlay__time">
+              Saved {formatIsoRelative(new Date(item.timestamp).toISOString())}
+            </span>
+            {chips.map((chip) => (
+              <span key={chip} className="saved-overlay__chip">{chip}</span>
+            ))}
+          </div>
+          <div className="saved-overlay__actions">
+            <button
+              type="button"
+              className="btn btn--ghost btn--small"
+              onClick={() => exportAnswer({
+                question: item.question,
+                answer:   item.answer,
+                sources:  item.sources,
+                format:   "md",
+                // Use the bookmark's saved-at time so the exported
+                // filename matches when this answer was captured, not
+                // when the user clicked Export.
+                epochMs:  item.timestamp,
+              })}
+              title="Download this saved answer as a Markdown file"
+            >
+              ⬇ MD
+            </button>
+            <button
+              type="button"
+              className="btn btn--ghost btn--small"
+              onClick={() => exportAnswer({
+                question: item.question,
+                answer:   item.answer,
+                sources:  item.sources,
+                format:   "txt",
+                epochMs:  item.timestamp,
+              })}
+              title="Download this saved answer as a plain text file"
+            >
+              ⬇ TXT
+            </button>
+            <CopyButton
+              text={item.answer}
+              label="⧉ Copy"
+              copiedLabel="✓ Copied!"
+              title="Copy the answer text to clipboard"
+              className="btn btn--ghost btn--small"
+              copiedClassName="bubble__copy--copied"
+            />
+            <ArmedButton
+              onConfirm={onDelete}
+              label="Delete"
+              confirmLabel="Confirm delete?"
+              title="Delete this saved answer"
+              size="small"
+            />
+            <button
+              type="button"
+              className="btn btn--ghost btn--small"
+              onClick={onClose}
+              aria-label="Close"
+            >
+              Close ✕
+            </button>
+          </div>
+        </header>
+
+        <h2 className="saved-overlay__question">{item.question}</h2>
+
+        <div className="saved-overlay__answer answer">
+          <AnswerMarkdown text={item.answer} />
+        </div>
+
+        {item.sources && item.sources.length > 0 && (
+          <div className="sources">
+            <div className="sources__heading">
+              Sources ({item.sources.length})
+            </div>
+            <div className="sources__list">
+              {item.sources.map((s) => (
+                <SourceCard key={`${item.id}-${s.index}`} source={s} />
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function AdminStatus({ status }) {
@@ -797,7 +1583,7 @@ function UserBubble({ entry }) {
   );
 }
 
-function AssistantBubble({ entry }) {
+function AssistantBubble({ entry, question, onSave, onUnsave }) {
   if (entry.error) {
     return (
       <div className="bubble bubble--assistant bubble--error">
@@ -817,6 +1603,20 @@ function AssistantBubble({ entry }) {
   const retrievalMode = debug.retrieval_mode;
   const exactMatches = debug.exact_matches_found;
   const dateQueryDebug = debug.date_query;
+  const queryRewrite = debug.query_rewrite;
+  const inferredPerson = queryRewrite ? queryRewrite.inferred_person : null;
+  const inferredChannel = queryRewrite ? queryRewrite.inferred_channel : null;
+  const personConfidence = queryRewrite ? queryRewrite.person_confidence : null;
+  const channelConfidence = queryRewrite ? queryRewrite.channel_confidence : null;
+
+  // The Save button is only meaningful for COMPLETED answers with real
+  // content. We deliberately hide it during streaming and for empty
+  // bubbles so users can't bookmark loading/error states.
+  const canSave = !entry.streaming
+    && !entry.error
+    && typeof entry.answer === "string"
+    && entry.answer.trim().length > 0;
+  const isSaved = Boolean(entry.savedId);
 
   return (
     <div className="bubble bubble--assistant">
@@ -859,6 +1659,71 @@ function AssistantBubble({ entry }) {
             date: {dateQueryDebug.matched ? "✓" : "?"}{" "}
             {dateQueryDebug.phrase}
           </span>
+        )}
+        {/* Subtle inference chips. Only render when the rewriter actually
+            inferred something — never clutter the UI on plain queries. */}
+        {!entry.streaming && inferredPerson && (
+          <span
+            className={`badge badge--person badge--inference-${personConfidence || "weak"}`}
+            title={`Detected person filter (${personConfidence || "weak"})`}
+          >
+            Person: {inferredPerson}
+            {personConfidence === "weak" && " (bias)"}
+          </span>
+        )}
+        {!entry.streaming && inferredChannel && (
+          <span
+            className={`badge badge--channel badge--inference-${channelConfidence || "weak"}`}
+            title={`Detected channel filter (${channelConfidence || "weak"})`}
+          >
+            Channel: {inferredChannel}
+            {channelConfidence === "weak" && " (bias)"}
+          </span>
+        )}
+        {canSave && (
+          <button
+            type="button"
+            className={`bubble__save ${isSaved ? "bubble__save--saved" : ""}`}
+            onClick={isSaved ? onUnsave : onSave}
+            title={isSaved ? "Remove from saved" : "Save this answer"}
+            aria-pressed={isSaved}
+          >
+            {isSaved ? "★ Saved" : "☆ Save"}
+          </button>
+        )}
+        {canSave && (
+          <button
+            type="button"
+            className="bubble__export"
+            onClick={() => exportAnswer({
+              question, answer: entry.answer, sources: entry.sources,
+              format: "md",
+            })}
+            title="Download this answer as a Markdown file"
+          >
+            ⬇ MD
+          </button>
+        )}
+        {canSave && (
+          <button
+            type="button"
+            className="bubble__export"
+            onClick={() => exportAnswer({
+              question, answer: entry.answer, sources: entry.sources,
+              format: "txt",
+            })}
+            title="Download this answer as a plain text file"
+          >
+            ⬇ TXT
+          </button>
+        )}
+        {canSave && (
+          <CopyButton
+            text={entry.answer}
+            label="⧉ Copy"
+            copiedLabel="✓ Copied!"
+            title="Copy the answer text to clipboard"
+          />
         )}
       </div>
       <div className="bubble__body">
@@ -995,14 +1860,24 @@ function SourceCard({ source }) {
       </div>
       {snippet && <p className="source__snippet">{snippet}</p>}
       {permalink && (
-        <a
-          href={permalink}
-          target="_blank"
-          rel="noreferrer"
-          className="source__link"
-        >
-          Open in Slack →
-        </a>
+        <div className="source__link-row">
+          <a
+            href={permalink}
+            target="_blank"
+            rel="noreferrer"
+            className="source__link"
+          >
+            Open in Slack →
+          </a>
+          <CopyButton
+            text={permalink}
+            label="⧉ Copy link"
+            copiedLabel="✓ Copied!"
+            title="Copy this Slack permalink to clipboard"
+            className="source-card__copy"
+            copiedClassName="source-card__copy--copied"
+          />
+        </div>
       )}
     </article>
   );
@@ -1046,4 +1921,190 @@ function formatIsoRelative(iso) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+// ----------------------------------------------------------------------
+// Reusable polish components (copy buttons, armed destructive buttons,
+// filter inputs). Kept at module scope so they don't recreate identities.
+// ----------------------------------------------------------------------
+
+/**
+ * Copy `text` to the clipboard using the modern Async Clipboard API.
+ *
+ * navigator.clipboard requires a secure context (https or localhost).
+ * On http://0.0.0.0 or older browsers it returns undefined / throws —
+ * we fall back to a hidden textarea + document.execCommand("copy")
+ * which is deprecated but still works as a last resort. If both fail
+ * we return false and the caller can show an error state.
+ */
+async function copyToClipboard(text) {
+  if (!text) return false;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Fall through to the legacy path.
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "-1000px";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return Boolean(ok);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Pill-style copy button. Shows "Copied!" for ~1.5s after a successful
+ * copy. `className` lets the caller pick which CSS variant to use
+ * (bubble__copy vs source-card__copy) so we don't proliferate
+ * component variants for tiny visual differences.
+ */
+function CopyButton({
+  text,
+  label = "Copy",
+  copiedLabel = "Copied!",
+  errorLabel = "Copy failed",
+  className = "bubble__copy",
+  copiedClassName = "bubble__copy--copied",
+  title,
+}) {
+  const [state, setState] = useState("idle"); // idle | copied | error
+  const timerRef = useRef(null);
+
+  useEffect(() => () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+  }, []);
+
+  async function onClick() {
+    const ok = await copyToClipboard(text);
+    setState(ok ? "copied" : "error");
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => setState("idle"), 1500);
+  }
+
+  const shownLabel =
+    state === "copied" ? copiedLabel :
+    state === "error" ? errorLabel : label;
+
+  return (
+    <button
+      type="button"
+      className={`${className} ${state === "copied" ? copiedClassName : ""}`}
+      onClick={onClick}
+      title={title || label}
+      disabled={!text}
+      aria-live="polite"
+    >
+      {shownLabel}
+    </button>
+  );
+}
+
+/**
+ * Destructive-action button with a two-click "tap to confirm" pattern.
+ * First click arms the button — label changes to confirmLabel and the
+ * arm style applies. Second click within `armWindowMs` (default 3s)
+ * fires `onConfirm`. After the window the button reverts to idle.
+ *
+ * This is intentionally cheaper than a modal: zero focus management,
+ * zero portal, no keyboard traps. The visual switch is enough to make
+ * an accidental click into a no-op.
+ */
+function ArmedButton({
+  onConfirm,
+  label,
+  confirmLabel,
+  title,
+  className = "btn btn--ghost",
+  armedClassName = "btn--armed",
+  armWindowMs = 3000,
+  disabled = false,
+  size = "default", // "default" or "small"
+}) {
+  const [armed, setArmed] = useState(false);
+  const timerRef = useRef(null);
+
+  useEffect(() => () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+  }, []);
+
+  function disarm() {
+    setArmed(false);
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  }
+
+  function handleClick() {
+    if (disabled) return;
+    if (!armed) {
+      setArmed(true);
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => setArmed(false), armWindowMs);
+      return;
+    }
+    disarm();
+    onConfirm();
+  }
+
+  const sizeClass = size === "small" ? " btn--small" : "";
+
+  return (
+    <button
+      type="button"
+      className={`${className}${sizeClass} ${armed ? armedClassName : ""}`}
+      onClick={handleClick}
+      onBlur={disarm}
+      title={title}
+      disabled={disabled}
+      aria-pressed={armed}
+    >
+      {armed ? confirmLabel : label}
+    </button>
+  );
+}
+
+/**
+ * Compact filter input for the saved + history panels. Shows a
+ * "matched / total" count to the right so the user always sees how
+ * narrowed the list is.
+ */
+function FilterBox({
+  value,
+  onChange,
+  placeholder,
+  matchCount,
+  totalCount,
+  ariaLabel,
+}) {
+  if (totalCount === 0) return null;
+  return (
+    <div className="panel-filter">
+      <input
+        type="search"
+        className="panel-filter__input"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        aria-label={ariaLabel || placeholder}
+      />
+      <span className="panel-filter__count">
+        {value.trim()
+          ? `${matchCount} / ${totalCount}`
+          : `${totalCount}`}
+      </span>
+    </div>
+  );
 }

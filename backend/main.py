@@ -37,6 +37,7 @@ from errors import AppError, LLMError, UpstreamTimeoutError, app_error_handler  
 from llm import stream_grounded_answer  # noqa: E402
 from prompts import INSUFFICIENT_CONTEXT_ANSWER  # noqa: E402
 from query_cache import build_cache_key, get_cached, put as cache_put  # noqa: E402
+from query_rewriter import rewrite_query  # noqa: E402
 from rate_limit import rate_limit_dependency  # noqa: E402
 from realtime_ingest import (  # noqa: E402
     admin_status_snapshot,
@@ -238,23 +239,38 @@ def _resolve_date_filters(req: QueryRequest) -> Dict[str, Any]:
     }
 
 
-def _cache_key_from_request(req: QueryRequest, resolved: Dict[str, Any]) -> str:
+def _cache_key_from_request(
+    req: QueryRequest,
+    resolved: Dict[str, Any],
+    rewrite: Dict[str, Any],
+) -> str:
     """
-    Build a cache key from the request + resolved date range.
+    Build a cache key from the request + resolved date range + resolved
+    query-rewrite filters.
 
-    Including the resolved range (not the raw date_query phrase) means
+    Including the resolved date range (not the raw date_query phrase) means
     two requests with different phrasings of the same window — "last week"
     vs "from <last Monday> to <last Sunday>" — both share a cache slot.
+
+    Including the effective_channel/effective_user/metadata_bias from the
+    query rewriter means two queries that look textually similar but
+    resolve to different inferred filters get different cache slots. The
+    `metadata_bias` is also keyed because weak inference still changes
+    the ranking order.
     """
     return build_cache_key({
         "question":        req.question,
         "top_k":           req.top_k,
         "mode":            req.mode,
-        "channel":         req.channel,
-        "user":            req.user,
+        # Use the EFFECTIVE filters (explicit OR strong-inferred) so an
+        # inferred filter cache-isolates from an unfiltered query.
+        "channel":         rewrite["effective_channel"],
+        "user":            rewrite["effective_user"],
         "document_type":   req.document_type,
         "start_timestamp": resolved["start_timestamp"],
         "end_timestamp":   resolved["end_timestamp"],
+        # Weak inference: metadata_bias is a dict or None.
+        "metadata_bias":   rewrite["metadata_bias"],
     })
 
 
@@ -285,6 +301,80 @@ def _normalize_history(req: QueryRequest) -> List[Dict[str, str]]:
     if len(cleaned) > MAX_CONVERSATION_HISTORY:
         cleaned = cleaned[-MAX_CONVERSATION_HISTORY:]
     return cleaned
+
+
+def _resolve_query_rewrite(req: QueryRequest) -> Dict[str, Any]:
+    """
+    Run person/channel inference on the question and split the results
+    into "effective filters" and "metadata bias":
+
+      strong inference -> becomes the effective filter (hard filter)
+      weak inference   -> becomes the metadata bias (ranking-only)
+
+    Explicit request filters always win — if the user sent `channel: ...`,
+    inference for channel is suppressed entirely. Same for `user`.
+
+    Returns:
+        {
+            "effective_channel": str | None,   # what prepare_recall sees
+            "effective_user":    str | None,
+            "metadata_bias":     {channel?, user?} | None,
+            "rewrite_debug":     {                  # surfaced to UI
+                "inferred_person":   str | None,
+                "inferred_channel":  str | None,
+                "person_confidence": "strong" | "weak" | None,
+                "channel_confidence":"strong" | "weak" | None,
+                "retrieval_biases_applied": list[str],
+            } | None,
+        }
+    """
+    rewrite = rewrite_query(
+        req.question,
+        explicit_channel=req.channel,
+        explicit_user=req.user,
+    )
+
+    effective_channel = req.channel
+    effective_user = req.user
+    bias: Dict[str, str] = {}
+
+    # Strong inference → hard filter (only when caller didn't set one).
+    if (rewrite["inferred_channel"]
+            and rewrite["channel_confidence"] == "strong"
+            and not (req.channel and req.channel.strip())):
+        effective_channel = rewrite["inferred_channel"]
+    elif (rewrite["inferred_channel"]
+            and rewrite["channel_confidence"] == "weak"
+            and not (req.channel and req.channel.strip())):
+        bias["channel"] = rewrite["inferred_channel"]
+
+    if (rewrite["inferred_person"]
+            and rewrite["person_confidence"] == "strong"
+            and not (req.user and req.user.strip())):
+        effective_user = rewrite["inferred_person"]
+    elif (rewrite["inferred_person"]
+            and rewrite["person_confidence"] == "weak"
+            and not (req.user and req.user.strip())):
+        bias["user"] = rewrite["inferred_person"]
+
+    rewrite_debug = None
+    if rewrite["inferred_person"] or rewrite["inferred_channel"]:
+        # Only attach the debug record when we actually inferred something —
+        # otherwise the UI would have to special-case empty rewrite blobs.
+        rewrite_debug = {
+            "inferred_person":          rewrite["inferred_person"],
+            "inferred_channel":         rewrite["inferred_channel"],
+            "person_confidence":        rewrite["person_confidence"],
+            "channel_confidence":       rewrite["channel_confidence"],
+            "retrieval_biases_applied": rewrite["retrieval_biases_applied"],
+        }
+
+    return {
+        "effective_channel": effective_channel,
+        "effective_user":    effective_user,
+        "metadata_bias":     bias or None,
+        "rewrite_debug":     rewrite_debug,
+    }
 
 
 # ---------- Public routes ---------- #
@@ -319,6 +409,7 @@ def query(req: QueryRequest) -> Dict[str, Any]:
     """
     resolved = _resolve_date_filters(req)
     history = _normalize_history(req)
+    rewrite = _resolve_query_rewrite(req)
 
     # Cache behavior when conversation_history is present:
     #   We BYPASS the cache entirely. Reasons:
@@ -329,7 +420,9 @@ def query(req: QueryRequest) -> Dict[str, Any]:
     #     3. Stateless queries (no history) keep working through the cache
     #        exactly as before — no regression.
     use_cache = not history
-    cache_key = _cache_key_from_request(req, resolved) if use_cache else None
+    cache_key = (
+        _cache_key_from_request(req, resolved, rewrite) if use_cache else None
+    )
 
     if use_cache:
         cached = get_cached(cache_key)
@@ -340,12 +433,16 @@ def query(req: QueryRequest) -> Dict[str, Any]:
         question=req.question,
         top_k=req.top_k,
         mode=req.mode,
-        channel=req.channel,
-        user=req.user,
+        # Effective filters: explicit > strong-inferred > None.
+        channel=rewrite["effective_channel"],
+        user=rewrite["effective_user"],
         document_type=req.document_type,
         start_timestamp=resolved["start_timestamp"],
         end_timestamp=resolved["end_timestamp"],
         conversation_history=history,
+        # Weak inference becomes a ranking bias (matching chunks float up
+        # but non-matching chunks aren't dropped).
+        metadata_bias=rewrite["metadata_bias"],
     )
 
     # Mark non-cached on the way out so the UI can render a "fresh" badge
@@ -355,6 +452,8 @@ def query(req: QueryRequest) -> Dict[str, Any]:
     debug["cache_hit"] = False
     if resolved["date_query_debug"] is not None:
         debug["date_query"] = resolved["date_query_debug"]
+    if rewrite["rewrite_debug"] is not None:
+        debug["query_rewrite"] = rewrite["rewrite_debug"]
     # Surface cache bypass reason so the UI can show why a follow-up
     # didn't hit the cache.
     if history:
@@ -399,19 +498,23 @@ def query_stream(req: QueryRequest, request: Request) -> StreamingResponse:
     final `done` event for source metadata. Cached responses are served
     by emitting a single `done` event immediately.
     """
-    # ----- Resolve date inputs, history, and cache key ---------------
+    # ----- Resolve date inputs, history, query rewrite, cache key ----
     resolved = _resolve_date_filters(req)
     history = _normalize_history(req)
+    rewrite = _resolve_query_rewrite(req)
 
     # Same bypass rule as /api/query: when conversation_history is set,
     # don't use or write the cache. Stateless streams still cache.
     use_cache = not history
-    cache_key = _cache_key_from_request(req, resolved) if use_cache else None
+    cache_key = (
+        _cache_key_from_request(req, resolved, rewrite) if use_cache else None
+    )
     cached = get_cached(cache_key) if use_cache else None
 
-    # Snapshot the date_query debug record once; both the cached and the
-    # fresh paths attach it to their `done` event.
+    # Snapshot the date_query + rewrite debug records once; both the
+    # cached and the fresh paths attach them to their `done` event.
     date_query_debug = resolved["date_query_debug"]
+    rewrite_debug = rewrite["rewrite_debug"]
 
     def _generator():
         # If we have a cached result, hand the client the whole answer in
@@ -422,6 +525,8 @@ def query_stream(req: QueryRequest, request: Request) -> StreamingResponse:
             cached_debug = dict(cached.get("debug", {}) or {})
             if date_query_debug is not None:
                 cached_debug["date_query"] = date_query_debug
+            if rewrite_debug is not None:
+                cached_debug["query_rewrite"] = rewrite_debug
             yield _sse_event("done", {
                 "answer":  cached.get("answer", ""),
                 "sources": cached.get("sources", []),
@@ -437,11 +542,12 @@ def query_stream(req: QueryRequest, request: Request) -> StreamingResponse:
                 question=req.question,
                 top_k=req.top_k,
                 mode=req.mode,
-                channel=req.channel,
-                user=req.user,
+                channel=rewrite["effective_channel"],
+                user=rewrite["effective_user"],
                 document_type=req.document_type,
                 start_timestamp=resolved["start_timestamp"],
                 end_timestamp=resolved["end_timestamp"],
+                metadata_bias=rewrite["metadata_bias"],
             )
         except AppError as e:
             yield _sse_event("error", {
@@ -463,6 +569,8 @@ def query_stream(req: QueryRequest, request: Request) -> StreamingResponse:
             fallback_debug = {**prepared["fallback_debug"], "cache_hit": False}
             if date_query_debug is not None:
                 fallback_debug["date_query"] = date_query_debug
+            if rewrite_debug is not None:
+                fallback_debug["query_rewrite"] = rewrite_debug
             if history:
                 fallback_debug["cache_bypassed"] = "conversation_history present"
             yield _sse_event("done", {
@@ -523,6 +631,8 @@ def query_stream(req: QueryRequest, request: Request) -> StreamingResponse:
         }
         if date_query_debug is not None:
             debug["date_query"] = date_query_debug
+        if rewrite_debug is not None:
+            debug["query_rewrite"] = rewrite_debug
         if history:
             debug["cache_bypassed"] = "conversation_history present"
         full_payload = {

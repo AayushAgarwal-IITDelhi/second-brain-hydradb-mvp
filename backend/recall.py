@@ -582,6 +582,7 @@ def prepare_recall_context(
     document_type: Optional[str] = None,
     start_timestamp: Any = None,
     end_timestamp: Any = None,
+    metadata_bias: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Run HydraDB recall and build the LLM-ready context + parallel sources.
@@ -592,6 +593,13 @@ def prepare_recall_context(
                   Fall back to semantic order if no exact matches exist.
       - "hybrid": combine semantic order with a keyword-hit bonus.
       - all others: preserve HydraDB's semantic order.
+
+    `metadata_bias` (e.g. `{"channel": "product", "user": "rahul"}`) is
+    forwarded to the reranker. Matching chunks get a ranking boost in
+    every mode — useful for weak person/channel inference where we don't
+    want to hard-filter but DO want matching chunks to surface first.
+    Strong inference should already have been collapsed into the
+    `channel` / `user` arguments before this function is called.
 
     Returns a dict with one of two shapes:
 
@@ -679,6 +687,7 @@ def prepare_recall_context(
     # ---- Step 3: rerank if the mode asks for it; otherwise just cap ----
     ranked, exact_matches_found = rerank_chunks(
         chunks_with_meta, query_terms, mode, top_k,
+        metadata_bias=metadata_bias,
     )
 
     if not ranked:
@@ -766,6 +775,7 @@ def answer_question(
     start_timestamp: Any = None,
     end_timestamp: Any = None,
     conversation_history: Optional[List[Any]] = None,
+    metadata_bias: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     End-to-end recall + grounded answer.
@@ -787,6 +797,11 @@ def answer_question(
                                "that decision", etc). DOES NOT affect
                                retrieval — only the latest question goes
                                into HydraDB's similarity search.
+        metadata_bias:         optional dict like {"channel": "product",
+                               "user": "rahul"} — weak inferred filters
+                               applied as a ranking bias rather than a
+                               hard filter. Strong inference should be
+                               passed via `channel`/`user` directly.
 
     Returns:
         {
@@ -813,6 +828,7 @@ def answer_question(
         document_type=document_type,
         start_timestamp=start_timestamp,
         end_timestamp=end_timestamp,
+        metadata_bias=metadata_bias,
     )
 
     if not prepared["ready"]:

@@ -118,23 +118,58 @@ def _ts_to_float(value: Any) -> Optional[float]:
     return None
 
 
+def _metadata_bias_score(
+    source_card: Dict[str, Any],
+    bias: Optional[Dict[str, str]],
+) -> int:
+    """
+    Count how many fields of `bias` (typically {"channel": ..., "user": ...})
+    match the chunk's source card. Comparisons are case-insensitive on
+    string values; missing card fields don't penalize, they just don't
+    contribute.
+
+    Returns an integer 0..len(bias) — used by the sort key in rerank_chunks
+    to push matching chunks up.
+    """
+    if not bias:
+        return 0
+    score = 0
+    for key, value in bias.items():
+        if not value:
+            continue
+        card_value = source_card.get(key)
+        if isinstance(card_value, str) and isinstance(value, str):
+            if card_value.lower() == value.lower():
+                score += 1
+    return score
+
+
 def rerank_chunks(
     chunks_with_meta: List[Dict[str, Any]],
     terms: List[str],
     mode: str,
     top_k: int,
+    metadata_bias: Optional[Dict[str, str]] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """
     Rerank a list of `{text, source_card, original_index, timestamp_float}`
-    dicts according to `mode`.
+    dicts according to `mode`, with an optional `metadata_bias`.
 
     Modes:
       - "exact":  Keep chunks with >=1 keyword hit, sorted by hit-count then
-                  by timestamp (newest first). If no chunk has any hit, fall
-                  back to the original semantic order and report 0 matches.
-      - "hybrid": Score each chunk = (hit_count * 100) + (newer_score). Higher
-                  is better. Even chunks with 0 hits stay, just deprioritized.
-      - anything else: pass through unchanged (semantic order).
+                  by metadata bias, then timestamp (newest first). If no
+                  chunk has any hit, fall back to semantic order biased by
+                  metadata.
+      - "hybrid": Score each chunk = (hits*100) + (bias*50) + (newer_score).
+                  Even chunks with 0 hits stay, deprioritized.
+      - anything else (incl. "default"): preserve semantic order, but push
+                  chunks matching `metadata_bias` ahead of the rest. This
+                  lets person/channel inference improve results in modes
+                  that don't otherwise rerank.
+
+    `metadata_bias` looks like `{"channel": "product", "user": "rahul"}`.
+    Each matching key adds to a per-chunk bias score. Comparisons are
+    case-insensitive; non-string card values are ignored.
 
     Returns (ranked_chunks, exact_matches_found).
       `ranked_chunks` is capped at `top_k`. `exact_matches_found` is the
@@ -143,26 +178,38 @@ def rerank_chunks(
     if not chunks_with_meta:
         return [], 0
 
-    # Annotate every chunk with its hit count.
+    # Annotate every chunk with its hit count + metadata bias score so the
+    # mode-specific sort keys below can use both signals.
     for chunk in chunks_with_meta:
         chunk["_hits"] = count_keyword_hits(chunk.get("text", ""), terms)
+        chunk["_bias"] = _metadata_bias_score(
+            chunk.get("source_card", {}), metadata_bias,
+        )
     matched_count = sum(1 for c in chunks_with_meta if c["_hits"] > 0)
 
     if mode == "exact":
         matched = [c for c in chunks_with_meta if c["_hits"] > 0]
         if matched:
-            # Newer-first as a secondary sort.
+            # Sort key: (hits desc, bias desc, newer first, stable index).
             matched.sort(
                 key=lambda c: (
                     -c["_hits"],
+                    -c["_bias"],
                     -(c.get("timestamp_float") or 0.0),
-                    c["original_index"],  # stable
+                    c["original_index"],
                 ),
             )
             return matched[:top_k], matched_count
-        # No exact matches: fall back to semantic order. Caller's debug
-        # field exact_matches_found=0 will surface this.
-        return chunks_with_meta[:top_k], 0
+        # No exact matches: fall back to semantic order but still let
+        # the metadata bias surface relevant chunks above unrelated ones.
+        ranked = sorted(
+            chunks_with_meta,
+            key=lambda c: (
+                -c["_bias"],
+                c["original_index"],
+            ),
+        )
+        return ranked[:top_k], 0
 
     if mode == "hybrid":
         max_ts = max(
@@ -172,13 +219,24 @@ def rerank_chunks(
             chunks_with_meta,
             key=lambda c: -(
                 c["_hits"] * 100
+                + c["_bias"] * 50
                 + (c.get("timestamp_float") or 0.0) / max_ts
             ),
         )
         return ranked[:top_k], matched_count
 
-    # All other modes — preserve semantic order.
-    return chunks_with_meta[:top_k], matched_count
+    # Default mode + summary/decisions/etc. — preserve semantic order, but
+    # still let metadata bias push matching chunks up. When bias is zero
+    # for everything (no inference), the sort collapses to original_index
+    # which is identical to the input order.
+    ranked = sorted(
+        chunks_with_meta,
+        key=lambda c: (
+            -c["_bias"],
+            c["original_index"],
+        ),
+    )
+    return ranked[:top_k], matched_count
 
 
 def dedupe_by_stable_key(chunks_with_meta: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
