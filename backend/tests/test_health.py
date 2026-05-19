@@ -27,6 +27,8 @@ Covers:
 
 import asyncio
 import json
+import logging
+import logging.handlers
 from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
@@ -582,19 +584,30 @@ class TestRegistration:
 
 class TestHealthLogging:
     def _capture_health_logs(self, check: HealthCheck):
-        import io
-        from contextlib import redirect_stdout
+        handler = logging.handlers.MemoryHandler(capacity=1000, flushLevel=logging.CRITICAL)
+        handler.buffer = []
 
-        buf = io.StringIO()
-        with redirect_stdout(buf):
+        health_logger = logging.getLogger("health")
+        health_logger.addHandler(handler)
+        original_level = health_logger.level
+        health_logger.setLevel(logging.DEBUG)
+
+        try:
             asyncio.run(_run_check(check))
+        finally:
+            health_logger.removeHandler(handler)
+            health_logger.setLevel(original_level)
+
         records = []
-        for line in buf.getvalue().splitlines():
-            if line.strip().startswith("{"):
-                try:
-                    records.append(json.loads(line.strip()))
-                except json.JSONDecodeError:
-                    pass
+        for lr in handler.buffer:
+            rec: dict = {"event": lr.getMessage()}
+            if hasattr(lr, "check"):
+                rec["check"] = lr.check
+            if hasattr(lr, "status"):
+                rec["status"] = lr.status
+            if hasattr(lr, "reason"):
+                rec["reason"] = lr.reason
+            records.append(rec)
         return records
 
     def test_started_and_completed_events(self):

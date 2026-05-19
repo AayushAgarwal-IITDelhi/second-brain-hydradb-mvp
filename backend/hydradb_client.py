@@ -51,6 +51,19 @@ def _post_upload(url: str, headers: dict, data: dict, files: list) -> requests.R
     return requests.post(url, headers=headers, data=data, files=files, timeout=120)
 
 
+# Retry-wrapped POST used by HydraDBClient.full_recall.  Operates at the raw
+# requests level so exception translation in full_recall stays clean and tests
+# always see HydraDBError / UpstreamTimeoutError (never RetryExhausted).
+@retry(
+    service="hydradb",
+    max_attempts=3,
+    initial_delay=1.0,
+    retryable_exceptions=(requests.Timeout, requests.ConnectionError, OSError),
+)
+def _post_recall(url: str, headers: dict, payload: dict) -> requests.Response:
+    return requests.post(url, headers=headers, json=payload, timeout=60)
+
+
 # ---------------------------------------------------------------------- #
 # Counting helper (shared by HydraDBClient.upload_knowledge and by the
 # CLI's upload_in_batches, so the per-batch print and the run-wide tally
@@ -247,24 +260,18 @@ class HydraDBClient:
     # ------------------------------------------------------------------ #
     # Retrieval
     # ------------------------------------------------------------------ #
-    @retry(
-        service="hydradb",
-        max_attempts=3,
-        initial_delay=1.0,
-        retryable_exceptions=(requests.Timeout, requests.ConnectionError, OSError,
-                               UpstreamTimeoutError, HydraDBError),
-    )
     def full_recall(self, query: str, top_k: int = 5) -> Dict[str, Any]:
         """
         Call POST /recall/full_recall and return the parsed JSON response.
 
-        Raises:
-            HydraDBError          on non-2xx, empty query, or bad JSON.
-            UpstreamTimeoutError  when the request times out.
+        Network retries (3 attempts, exponential backoff) are handled by the
+        module-level _post_recall helper so exception translation here always
+        yields stable types regardless of how many retries were attempted.
 
-        Operators can still see the full HydraDB error body in stdout
-        via the log line we print here; the exception only carries a
-        friendly summary back to the caller.
+        Raises:
+            HydraDBError          on non-2xx, empty query, bad JSON, or network
+                                  failure (including exhausted retries).
+            UpstreamTimeoutError  when all attempts time out.
         """
         if not query or not query.strip():
             raise HydraDBError(
@@ -285,18 +292,29 @@ class HydraDBClient:
         }
 
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            response = _post_recall(url, headers, payload)
         except requests.Timeout as e:
             logger.warning('hydradb_recall_timeout', extra={'error': type(e).__name__})
             raise UpstreamTimeoutError(
                 log_context=f"HydraDB full_recall timed out: {e}",
             )
+        except RetryExhausted as e:
+            # All retry attempts failed — surface as appropriate typed error.
+            cause = e.__cause__
+            if isinstance(cause, requests.Timeout):
+                logger.warning('hydradb_recall_timeout', extra={'error': 'RetryExhausted(Timeout)'})
+                raise UpstreamTimeoutError(
+                    log_context=f"HydraDB recall timed out after retries: {cause}",
+                ) from e
+            logger.warning('hydradb_recall_network_error', extra={'error': 'RetryExhausted'})
+            raise HydraDBError(
+                log_context=f"network error during full_recall after retries: {cause}",
+            ) from e
         except requests.RequestException as e:
             logger.warning('hydradb_recall_network_error', extra={'error': type(e).__name__})
             raise HydraDBError(
                 log_context=f"network error during full_recall: {e}",
             )
-        # RetryExhausted bubbles up as HydraDBError so callers see a stable type.
 
         logger.debug('hydradb_recall_response', extra={'http_status': response.status_code})
 

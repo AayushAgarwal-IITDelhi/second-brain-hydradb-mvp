@@ -134,6 +134,8 @@ class TestJobWrapper:
 
     def test_job_wrapper_calls_ingestion(self):
         from scheduler import _job_wrapper
-        with patch("scheduler.run_ingestion") as mock_run:
+        # _job_wrapper calls _run_ingestion_with_retry (the retry-wrapped version),
+        # not run_ingestion directly — patch the wrapper that's actually invoked.
+        with patch("scheduler._run_ingestion_with_retry") as mock_run:
             _job_wrapper()
             mock_run.assert_called_once()

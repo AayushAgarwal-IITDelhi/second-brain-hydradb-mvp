@@ -31,6 +31,7 @@ import openai
 from openai import APITimeoutError, OpenAI
 
 from errors import LLMError, UpstreamTimeoutError
+from retry import RetryExhausted
 from prompts import (
     INSUFFICIENT_CONTEXT_ANSWER,
     format_conversation_history,
@@ -146,6 +147,13 @@ def generate_grounded_answer(
         raise UpstreamTimeoutError(
             log_context=f"LLM timeout: {type(e).__name__}"
         )
+    except RetryExhausted as e:
+        # Retries exhausted — preserve the timeout signal if that was the root cause.
+        if isinstance(e.__cause__, APITimeoutError):
+            raise UpstreamTimeoutError(
+                log_context=f"LLM timeout after retries: {type(e.__cause__).__name__}"
+            ) from e
+        raise LLMError(log_context=f"LLM call failed after retries: {type(e.__cause__).__name__ if e.__cause__ else type(e).__name__}")
     except Exception as e:  # noqa: BLE001 -- surface any SDK error to the API
         # Log only the exception class name — never the API key, prompt,
         # or context. The user-facing detail is generic by design.

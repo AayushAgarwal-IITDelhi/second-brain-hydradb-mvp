@@ -28,9 +28,19 @@ class TestPublicEndpoints:
         assert r.status_code == 200
 
     def test_health_response_shape(self, client):
-        body = client.get("/api/health").json()
-        assert body["status"] == "ok"
-        assert "service" in body
+        # /api/health is our detailed diagnostics endpoint.
+        # It always returns 200; status reflects aggregate health across checks.
+        # In the test environment real services are not available, so we mock
+        # all checks to return ok so the shape assertion is deterministic.
+        from health import HealthResult, STATUS_OK, _get_registry
+        from unittest.mock import AsyncMock, patch as _patch
+
+        ok_result = HealthResult(status=STATUS_OK, latency_ms=1.0)
+        with _patch("health._run_check", new=AsyncMock(side_effect=lambda c: (c.name, ok_result))):
+            body = client.get("/api/health").json()
+        assert body["status"] in ("healthy", "degraded", "unhealthy")
+        assert "checks" in body
+        assert "timestamp" in body
 
     def test_docs_endpoint_available(self, client):
         r = client.get("/docs")

@@ -23,6 +23,8 @@ Covers:
 
 import asyncio
 import json
+import logging
+import logging.handlers
 import time
 from typing import Optional
 from unittest.mock import MagicMock, patch
@@ -409,25 +411,38 @@ class TestAsyncRetry:
 
 class TestRetryLogging:
     def _capture_logs(self, fn, *args, **kwargs):
-        """Run fn, capture all JSON printed to stdout, return parsed list."""
-        import io
-        from contextlib import redirect_stdout
+        """Run fn, capture log records emitted by the retry logger, return dicts."""
+        import logging
 
-        buf = io.StringIO()
+        handler = logging.handlers.MemoryHandler(capacity=1000, flushLevel=logging.CRITICAL)
+        handler.buffer = []
+
+        retry_logger = logging.getLogger("retry")
+        retry_logger.addHandler(handler)
+        original_level = retry_logger.level
+        retry_logger.setLevel(logging.DEBUG)
+
+        result: object = None
         try:
-            with redirect_stdout(buf):
-                result = fn(*args, **kwargs)
+            result = fn(*args, **kwargs)
         except Exception as exc:
             result = exc
-        raw = buf.getvalue()
+        finally:
+            retry_logger.removeHandler(handler)
+            retry_logger.setLevel(original_level)
+
         records = []
-        for line in raw.splitlines():
-            line = line.strip()
-            if line.startswith("{"):
-                try:
-                    records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
+        for lr in handler.buffer:
+            rec: dict = {"event": lr.getMessage()}
+            if hasattr(lr, "service"):
+                rec["service"] = lr.service
+            if hasattr(lr, "attempt"):
+                rec["attempt"] = lr.attempt
+            if hasattr(lr, "delay_seconds"):
+                rec["delay_seconds"] = lr.delay_seconds
+            if hasattr(lr, "error"):
+                rec["error"] = lr.error
+            records.append(rec)
         return records, result
 
     def test_retry_attempt_logged(self):
