@@ -18,6 +18,10 @@ from typing import Any, Dict, Optional
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 class AppError(Exception):
     """
@@ -85,8 +89,8 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     """Single handler for every AppError subclass."""
     # Log shape: operators see the error type + their own log_context, never
     # the raw stack and never user data.
-    if exc.log_context:
-        print(f"[{exc.error_type}] {exc.log_context}")
-    else:
-        print(f"[{exc.error_type}] {exc.detail}")
+    logger.warning(
+        'app_error',
+        extra={'error_type': exc.error_type, 'log_context': exc.log_context or exc.detail},
+    )
     return JSONResponse(status_code=exc.status_code, content=_payload(exc))

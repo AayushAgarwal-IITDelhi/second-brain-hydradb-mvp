@@ -9,6 +9,7 @@ Slack API errors are caught and printed so that one bad channel or thread
 does not crash the whole ingestion run.
 """
 
+import logging
 import os
 import time
 from typing import Any, Dict, List, Optional
@@ -17,6 +18,8 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 from retry import retry
+
+logger = logging.getLogger(__name__)
 
 
 # Slack's max page size for conversations.history / conversations.replies is 200.
@@ -45,33 +48,44 @@ class SlackClientWrapper:
         self,
         channel_id: str,
         limit_per_channel: int = 500,
+        oldest: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Fetch up to `limit_per_channel` messages from a single Slack channel.
 
         Uses conversations.history with cursor pagination. Stops as soon as we
         hit limit_per_channel or run out of messages.
-        Returns the raw Slack message dicts (no normalization here).
+
+        If `oldest` is provided (a Slack ts string like "1778775842.876209"),
+        Slack returns only messages with ts STRICTLY greater than that
+        value — i.e. only what's been posted since our last successful
+        sync. This is the core of incremental ingestion.
         """
         collected: List[Dict[str, Any]] = []
         cursor: Optional[str] = None
         page_size = min(SLACK_MAX_PAGE_SIZE, limit_per_channel)
 
+        # Build kwargs once; only include `oldest` if set so callers using
+        # the default behavior aren't affected.
+        base_kwargs: Dict[str, Any] = {"channel": channel_id, "limit": page_size}
+        if oldest:
+            base_kwargs["oldest"] = oldest
+
         while True:
             try:
                 response = self._call_conversations_history(
-                    channel=channel_id,
-                    limit=page_size,
                     cursor=cursor,
+                    **base_kwargs,
                 )
             except SlackApiError as e:
-                # Print the Slack-side error message and decide whether to retry.
                 err = e.response.get("error", str(e)) if getattr(e, "response", None) else str(e)
-                print(f"[slack_client] conversations_history failed for {channel_id}: {err}")
-
                 if self._is_rate_limited(e):
+                    logger.info('slack_rate_limited', extra={'api': 'conversations_history', 'channel_id': channel_id})
                     self._sleep_for_retry(e)
                     continue
+                logger.warning('slack_api_error', extra={
+                    'api': 'conversations_history', 'channel_id': channel_id, 'error': err,
+                })
                 break
 
             messages = response.get("messages", []) or []
@@ -113,14 +127,13 @@ class SlackClientWrapper:
                 )
             except SlackApiError as e:
                 err = e.response.get("error", str(e)) if getattr(e, "response", None) else str(e)
-                print(
-                    f"[slack_client] conversations_replies failed for "
-                    f"{channel_id}/{thread_ts}: {err}"
-                )
-
                 if self._is_rate_limited(e):
+                    logger.info('slack_rate_limited', extra={'api': 'conversations_replies', 'thread_ts': thread_ts})
                     self._sleep_for_retry(e)
                     continue
+                logger.warning('slack_api_error', extra={
+                    'api': 'conversations_replies', 'channel_id': channel_id, 'error': err,
+                })
                 break
 
             messages = response.get("messages", []) or []
@@ -166,7 +179,7 @@ class SlackClientWrapper:
                 name = name.strip() or None
         except SlackApiError as e:
             err = e.response.get("error", str(e)) if getattr(e, "response", None) else str(e)
-            print(f"[slack_client] users_info failed for {user_id}: {err}")
+            logger.warning('slack_api_error', extra={'api': 'users_info', 'error': err})
 
         self._user_name_cache[user_id] = name
         return name
@@ -201,10 +214,7 @@ class SlackClientWrapper:
             permalink = response.get("permalink") or None
         except SlackApiError as e:
             err = e.response.get("error", str(e)) if getattr(e, "response", None) else str(e)
-            print(
-                f"[slack_client] chat_getPermalink failed for "
-                f"{channel_id}/{message_ts}: {err}"
-            )
+            logger.warning('slack_api_error', extra={'api': 'chat_getPermalink', 'error': err})
 
         self._permalink_cache[cache_key] = permalink
         return permalink
@@ -218,19 +228,15 @@ class SlackClientWrapper:
 
     @retry(service="slack", max_attempts=3, initial_delay=1.0,
            retryable_exceptions=(ConnectionError, TimeoutError, OSError))
-    def _call_conversations_history(self, channel: str, limit: int,
-                                     cursor: Optional[str]):
-        return self.client.conversations_history(
-            channel=channel, limit=limit, cursor=cursor
-        )
+    def _call_conversations_history(self, **kwargs):
+        """Retry-wrapped conversations.history — accepts any kwargs for forward compat."""
+        return self.client.conversations_history(**kwargs)
 
     @retry(service="slack", max_attempts=3, initial_delay=1.0,
            retryable_exceptions=(ConnectionError, TimeoutError, OSError))
-    def _call_conversations_replies(self, channel: str, ts: str,
-                                     limit: int, cursor: Optional[str]):
-        return self.client.conversations_replies(
-            channel=channel, ts=ts, limit=limit, cursor=cursor
-        )
+    def _call_conversations_replies(self, **kwargs):
+        """Retry-wrapped conversations.replies — accepts any kwargs for forward compat."""
+        return self.client.conversations_replies(**kwargs)
 
     @retry(service="slack", max_attempts=3, initial_delay=1.0,
            retryable_exceptions=(ConnectionError, TimeoutError, OSError))
@@ -261,5 +267,5 @@ class SlackClientWrapper:
             retry_after = int(e.response.headers.get("Retry-After", 1))
         except Exception:
             pass
-        print(f"[slack_client] Rate limited. Sleeping {retry_after}s and retrying.")
+        logger.info('slack_rate_limit_sleep', extra={'retry_after_seconds': retry_after})
         time.sleep(retry_after)

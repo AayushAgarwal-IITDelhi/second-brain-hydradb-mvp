@@ -23,8 +23,11 @@ from typing import Any, Dict, List, Optional, Set
 
 from hydradb_client import HydraDBClient
 from llm import generate_grounded_answer
+from logging_config import get_logger
 from prompts import INSUFFICIENT_CONTEXT_ANSWER
 from ingestion.ingestion_state import IngestionState
+
+logger = get_logger(__name__)
 
 
 # Path to the ingestion state file (written by ingest_slack.py). Loaded once
@@ -372,10 +375,15 @@ def _build_source_card(
     if entry is None:
         # Graceful fallback: keep the old minimal shape so callers can still
         # render something even if state is missing or doesn't know the doc.
+        # Also promote stable_key and channel from the raw chunk so that
+        # dedupe_by_stable_key and _source_passes_filters work correctly even
+        # without a state-file entry. (BUG-003 / BUG-004 fix)
         return {
-            "index":  index,
-            "source": minimal_source,
-            "score":  score,
+            "index":      index,
+            "source":     minimal_source,
+            "score":      score,
+            "stable_key": candidate_stable_key,
+            "channel":    _get_path(chunk, ("metadata", "channel")) if isinstance(chunk, dict) else None,
         }
 
     # Rich source card backed by ingestion state.
@@ -399,7 +407,7 @@ def _load_state_safely() -> Optional[IngestionState]:
     try:
         return IngestionState(STATE_PATH)
     except Exception as e:  # noqa: BLE001 -- we never want recall to crash on this
-        print(f"[recall] Could not load ingestion state: {e}")
+        logger.warning('recall_state_load_failed', extra={'error': type(e).__name__})
         return None
 
 
@@ -510,20 +518,43 @@ def _strip_invalid_citations(answer: str, allowed_indexes: Set[int]) -> str:
     return _CITATION_PATTERN.sub(_replace, answer)
 
 
+def _coerce_to_unix_seconds(value: Any) -> Optional[float]:
+    """
+    Accept either a Slack ts string ('1778775842.876209') or a numeric
+    unix timestamp (int or float) and return seconds as a float.
+    Returns None if we can't parse.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
 def _source_passes_filters(
     source_card: Dict[str, Any],
     channel: Optional[str],
     user: Optional[str],
     document_type: Optional[str],
+    start_unix: Optional[float] = None,
+    end_unix: Optional[float] = None,
 ) -> bool:
     """
     Return True if this source card should be kept given the filters.
 
     Filters only apply when the source card carries the corresponding
     metadata. If a card was built from a chunk that didn't join to state
-    (no `channel` / `user` / `document_type` fields), we let it through —
-    better to over-include than to silently drop legitimate matches.
-    Comparisons are case-insensitive for channel/user.
+    (no `channel` / `user` / `document_type` / `timestamp` fields), we
+    let it through for the metadata-style filters — better to over-
+    include than to silently drop legitimate matches.
+
+    Date filters are slightly stricter: a card with no parseable
+    timestamp is also let through, on the same "don't drop" principle.
     """
     if channel:
         card_channel = source_card.get("channel")
@@ -537,11 +568,217 @@ def _source_passes_filters(
         card_type = source_card.get("document_type")
         if isinstance(card_type, str) and card_type != document_type:
             return False
+    if start_unix is not None or end_unix is not None:
+        ts_value = _coerce_to_unix_seconds(source_card.get("timestamp"))
+        if ts_value is not None:
+            if start_unix is not None and ts_value < start_unix:
+                return False
+            if end_unix is not None and ts_value > end_unix:
+                return False
     return True
 
 
 # ---------------------------------------------------------------------- #
-# Public entry point
+# Reusable building blocks: streaming and non-streaming endpoints share these
+# ---------------------------------------------------------------------- #
+def prepare_recall_context(
+    question: str,
+    top_k: int,
+    mode: str = "default",
+    channel: Optional[str] = None,
+    user: Optional[str] = None,
+    document_type: Optional[str] = None,
+    start_timestamp: Any = None,
+    end_timestamp: Any = None,
+    metadata_bias: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """
+    Run HydraDB recall and build the LLM-ready context + parallel sources.
+
+    The `mode` parameter changes how we rank the chunks BEFORE they're
+    handed to the LLM:
+      - "exact":  prefer chunks containing the user's keywords verbatim.
+                  Fall back to semantic order if no exact matches exist.
+      - "hybrid": combine semantic order with a keyword-hit bonus.
+      - all others: preserve HydraDB's semantic order.
+
+    `metadata_bias` (e.g. `{"channel": "product", "user": "rahul"}`) is
+    forwarded to the reranker. Matching chunks get a ranking boost in
+    every mode — useful for weak person/channel inference where we don't
+    want to hard-filter but DO want matching chunks to surface first.
+    Strong inference should already have been collapsed into the
+    `channel` / `user` arguments before this function is called.
+
+    Returns a dict with one of two shapes:
+
+    Success:
+        {
+            "ready":            True,
+            "context_text":     str,                  # numbered context for LLM
+            "sources":          List[Dict[str, Any]], # parallel cards (re-numbered)
+            "chunks_count":     int,
+            "filtered_out":     int,
+            "exact_matches":    int,                  # >=1 keyword hit
+            "retrieval_mode":   str,                  # what we actually did
+            "query_terms":      List[str],
+            "fallback_debug":   None,
+        }
+
+    No usable context:
+        {
+            "ready":          False,
+            "fallback_debug": Dict[str, Any],
+        }
+    """
+    # Local imports keep recall.py's top-of-file import block stable.
+    from search_utils import (
+        dedupe_by_stable_key,
+        extract_query_terms,
+        rerank_chunks,
+    )
+
+    hydra = HydraDBClient()
+    raw_response = hydra.full_recall(query=question, top_k=top_k)
+    chunks = _extract_chunks(raw_response)
+    debug_on = _debug_recall_enabled()
+
+    if debug_on:
+        logger.debug('recall_raw_response', extra={
+            'chunks_count': len(chunks),
+            'raw_response_preview': _safe_json(raw_response, limit=500),
+        })
+        if chunks:
+            logger.debug('recall_first_chunk_preview', extra={
+                'first_chunk_keys': list(chunks[0].keys()) if isinstance(chunks[0], dict) else None,
+            })
+
+    state = _load_state_safely()
+    start_unix = _coerce_to_unix_seconds(start_timestamp)
+    end_unix = _coerce_to_unix_seconds(end_timestamp)
+    query_terms = extract_query_terms(question) if mode in ("exact", "hybrid") else []
+
+    # ---- Step 1: gather per-chunk metadata for ranking ----
+    # We build a parallel list of {text, source_card, original_index,
+    # timestamp_float, hits(_)}. Filters drop chunks before ranking so
+    # the rerank operates only on the candidate set the user actually
+    # wants.
+    chunks_with_meta: List[Dict[str, Any]] = []
+    filtered_out = 0
+    for original_index, chunk in enumerate(chunks, start=1):
+        text = _chunk_text(chunk).strip()
+        if not text:
+            continue
+        score = _chunk_score(chunk)
+        # The 'index' we initially put on the card is the HydraDB order.
+        # We'll renumber after reranking so the cards line up with the
+        # [N] labels the LLM sees.
+        source_card = _build_source_card(chunk, original_index, score, state)
+
+        if not _source_passes_filters(
+            source_card, channel, user, document_type, start_unix, end_unix,
+        ):
+            filtered_out += 1
+            continue
+
+        chunks_with_meta.append({
+            "text": text,
+            "source_card": source_card,
+            "original_index": original_index,
+            "timestamp_float": _coerce_to_unix_seconds(source_card.get("timestamp")),
+        })
+
+    # ---- Step 2: dedupe by stable_key BEFORE ranking ----
+    # Same Slack message that resurfaces twice in recall shouldn't get
+    # twice the ranking boost.
+    chunks_with_meta = dedupe_by_stable_key(chunks_with_meta)
+
+    # ---- Step 3: rerank if the mode asks for it; otherwise just cap ----
+    ranked, exact_matches_found = rerank_chunks(
+        chunks_with_meta, query_terms, mode, top_k,
+        metadata_bias=metadata_bias,
+    )
+
+    logger.debug('recall_context_ready', extra={
+        'chunks_count': len(chunks),
+        'filtered_out': filtered_out,
+        'mode': mode,
+        'top_k': top_k,
+    })
+
+    if not ranked:
+        first_chunk = chunks[0] if chunks else None
+        first_chunk_keys = (
+            list(first_chunk.keys()) if isinstance(first_chunk, dict) else None
+        )
+        debug_payload: Dict[str, Any] = {
+            "reason": "no usable text found in HydraDB chunks",
+            "raw_response_keys": (
+                list(raw_response.keys())
+                if isinstance(raw_response, dict) else None
+            ),
+            "chunks_returned":     len(chunks),
+            "chunks_filtered_out": filtered_out,
+            "first_chunk_keys":    first_chunk_keys,
+            "retrieval_mode":      mode,
+            "exact_matches_found": 0,
+            "query_terms":         query_terms,
+            "top_k":               top_k,
+        }
+        if debug_on and first_chunk is not None:
+            debug_payload["first_chunk_preview"] = _first_chunk_preview(first_chunk)
+        return {"ready": False, "fallback_debug": debug_payload}
+
+    # ---- Step 4: renumber 1..N so citations align with surviving cards ----
+    context_blocks: List[str] = []
+    sources: List[Dict[str, Any]] = []
+    for i, chunk in enumerate(ranked, start=1):
+        text = chunk["text"]
+        card = dict(chunk["source_card"])
+        card["index"] = i  # overwrite the original-order index
+        context_label = card.get("channel") or card.get("source")
+        context_blocks.append(f"[{i}] (source: {context_label})\n{text}")
+        sources.append(card)
+
+    return {
+        "ready":            True,
+        "context_text":     "\n\n".join(context_blocks),
+        "sources":          sources,
+        "chunks_count":     len(chunks),
+        "filtered_out":     filtered_out,
+        "exact_matches":    exact_matches_found,
+        "retrieval_mode":   mode,
+        "query_terms":      query_terms,
+        "fallback_debug":   None,
+    }
+
+
+def finalize_answer(
+    raw_answer: str,
+    sources: List[Dict[str, Any]],
+    top_k: int,
+) -> Dict[str, Any]:
+    """
+    Apply source-cleaning + citation-stripping to a raw LLM answer.
+
+    Used by BOTH /api/query and /api/query/stream so the output post-
+    processing is identical regardless of how the answer text arrived.
+    """
+    cleaned_sources = _clean_sources_for_ui(sources, top_k=top_k)
+    allowed_indexes: Set[int] = {
+        s["index"] for s in cleaned_sources
+        if isinstance(s.get("index"), int)
+    }
+    final_answer = _strip_invalid_citations(raw_answer, allowed_indexes)
+    return {
+        "answer":          final_answer,
+        "cleaned_sources": cleaned_sources,
+        "sources_before":  len(sources),
+        "sources_after":   len(cleaned_sources),
+    }
+
+
+# ---------------------------------------------------------------------- #
+# Public entry point (non-streaming)
 # ---------------------------------------------------------------------- #
 def answer_question(
     question: str,
@@ -550,18 +787,36 @@ def answer_question(
     channel: Optional[str] = None,
     user: Optional[str] = None,
     document_type: Optional[str] = None,
+    start_timestamp: Any = None,
+    end_timestamp: Any = None,
+    conversation_history: Optional[List[Any]] = None,
+    metadata_bias: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     End-to-end recall + grounded answer.
 
     Args:
-        question:       the natural-language question.
-        top_k:          how many chunks to ask HydraDB for.
-        mode:           "default" | "summary" | "decisions" | "action_items"
-                        | "who_said" — selects the system prompt.
-        channel:        optional channel-name filter (e.g. "general").
-        user:           optional user-name filter (e.g. "Praveer Nema").
-        document_type:  optional "message" or "thread".
+        question:              the natural-language question.
+        top_k:                 how many chunks to ask HydraDB for.
+        mode:                  "default" | "summary" | "decisions" | "action_items"
+                               | "who_said" | "exact" | "hybrid" — selects the
+                               system prompt AND the retrieval/ranking strategy.
+        channel:               optional channel-name filter (e.g. "general").
+        user:                  optional user-name filter (e.g. "Praveer Nema").
+        document_type:         optional "message" or "thread".
+        start_timestamp:       optional inclusive lower bound on source timestamps
+                               (Slack ts string or unix seconds).
+        end_timestamp:         optional inclusive upper bound.
+        conversation_history:  optional recent {role, content} turns. Passed
+                               to the LLM for reference resolution ("he",
+                               "that decision", etc). DOES NOT affect
+                               retrieval — only the latest question goes
+                               into HydraDB's similarity search.
+        metadata_bias:         optional dict like {"channel": "product",
+                               "user": "rahul"} — weak inferred filters
+                               applied as a ranking bias rather than a
+                               hard filter. Strong inference should be
+                               passed via `channel`/`user` directly.
 
     Returns:
         {
@@ -577,109 +832,56 @@ def answer_question(
             "debug": {"reason": "empty question"},
         }
 
-    hydra = HydraDBClient()
-    raw_response = hydra.full_recall(query=question, top_k=top_k)
-    chunks = _extract_chunks(raw_response)
-    debug_on = _debug_recall_enabled()
+    # IMPORTANT: retrieval uses only the current question. Conversation
+    # history is intentionally NOT concatenated into the search query.
+    prepared = prepare_recall_context(
+        question=question,
+        top_k=top_k,
+        mode=mode,
+        channel=channel,
+        user=user,
+        document_type=document_type,
+        start_timestamp=start_timestamp,
+        end_timestamp=end_timestamp,
+        metadata_bias=metadata_bias,
+    )
 
-    # Verbose stdout dump is gated behind DEBUG_RECALL=true so demo logs
-    # stay clean and Slack content doesn't leak into the terminal.
-    if debug_on:
-        print("[recall] ===== raw HydraDB response (truncated to 8000 chars) =====")
-        print(_safe_json(raw_response, limit=8000))
-        if chunks:
-            print("[recall] ===== first chunk =====")
-            print(_safe_json(chunks[0], limit=4000))
-        else:
-            print("[recall] (no chunks returned)")
-        print("[recall] ===========================================================")
-
-    # Load ingestion state once for the whole request, used to enrich each
-    # chunk's source card. If the file is missing or unreadable we fall back
-    # to the old minimal source shape per chunk.
-    state = _load_state_safely()
-
-    # Build numbered context block + parallel source list.
-    context_blocks: List[str] = []
-    sources: List[Dict[str, Any]] = []
-    filtered_out = 0
-    for i, chunk in enumerate(chunks, start=1):
-        text = _chunk_text(chunk).strip()
-        if not text:
-            continue
-        score = _chunk_score(chunk)
-        source_card = _build_source_card(chunk, i, score, state)
-
-        # Drop chunks that don't match optional filters. We use the same
-        # index numbering across the LLM context AND the cleaned sources,
-        # so when a chunk is filtered out we skip BOTH — the LLM never
-        # sees it and there's no dangling source card.
-        if not _source_passes_filters(source_card, channel, user, document_type):
-            filtered_out += 1
-            continue
-
-        # The label we put into the LLM context next to [i] — prefer the
-        # channel name when we have it, otherwise the minimal source id.
-        context_label = source_card.get("channel") or source_card.get("source")
-        context_blocks.append(f"[{i}] (source: {context_label})\n{text}")
-        sources.append(source_card)
-
-    if not context_blocks:
-        # No usable text in any chunk -> surface enough detail to debug fast.
-        first_chunk = chunks[0] if chunks else None
-        first_chunk_keys = (
-            list(first_chunk.keys()) if isinstance(first_chunk, dict) else None
-        )
-        debug_payload: Dict[str, Any] = {
-            "reason": "no usable text found in HydraDB chunks",
-            "raw_response_keys": (
-                list(raw_response.keys())
-                if isinstance(raw_response, dict) else None
-            ),
-            "chunks_returned": len(chunks),
-            "first_chunk_keys": first_chunk_keys,
-            "top_k": top_k,
-        }
-        # first_chunk_preview can contain actual Slack content -> gated.
-        if debug_on and first_chunk is not None:
-            debug_payload["first_chunk_preview"] = _first_chunk_preview(first_chunk)
+    if not prepared["ready"]:
         return {
             "answer": INSUFFICIENT_CONTEXT_ANSWER,
             "sources": [],
-            "debug": debug_payload,
+            "debug": prepared["fallback_debug"],
         }
 
-    context_text = "\n\n".join(context_blocks)
-    answer = generate_grounded_answer(
+    raw_answer = generate_grounded_answer(
         question=question,
-        context=context_text,
+        context=prepared["context_text"],
         mode=mode,
+        conversation_history=conversation_history,
     )
 
-    # Clean the sources array for the UI WITHOUT touching the LLM context
-    # above. The LLM still saw every numbered chunk and its [N] citations
-    # remain valid against the surviving cards because we never renumber.
-    cleaned_sources = _clean_sources_for_ui(sources, top_k=top_k)
+    finalized = finalize_answer(
+        raw_answer=raw_answer,
+        sources=prepared["sources"],
+        top_k=top_k,
+    )
 
-    # The LLM may have cited indexes that got dropped (orphan minimal chunks
-    # or duplicates). Strip those dangling markers from the answer so the UI
-    # never references a source it doesn't have.
-    allowed_indexes: Set[int] = {
-        s["index"] for s in cleaned_sources
-        if isinstance(s.get("index"), int)
-    }
-    final_answer = _strip_invalid_citations(answer, allowed_indexes)
-
+    history_used = bool(conversation_history)
     return {
-        "answer": final_answer,
-        "sources": cleaned_sources,
+        "answer": finalized["answer"],
+        "sources": finalized["cleaned_sources"],
         "debug": {
-            "chunks_returned": len(chunks),
-            "chunks_used": len(context_blocks),
-            "chunks_filtered_out": filtered_out,
-            "sources_before_clean": len(sources),
-            "sources_after_clean": len(cleaned_sources),
-            "mode": mode,
-            "top_k": top_k,
+            "chunks_returned":      prepared["chunks_count"],
+            "chunks_used":          len(prepared["sources"]),
+            "chunks_filtered_out":  prepared["filtered_out"],
+            "sources_before_clean": finalized["sources_before"],
+            "sources_after_clean":  finalized["sources_after"],
+            "mode":                 mode,
+            "retrieval_mode":       prepared.get("retrieval_mode", mode),
+            "exact_matches_found":  prepared.get("exact_matches", 0),
+            "query_terms":          prepared.get("query_terms", []),
+            "top_k":                top_k,
+            "history_used":         history_used,
+            "history_turns":        len(conversation_history) if history_used else 0,
         },
     }

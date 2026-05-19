@@ -7,7 +7,7 @@ State lives in a plain JSON file (no database) at:
 
 Schema:
     {
-      "version": 1,
+      "version": 2,
       "entries": {
         "<stable_key>": {
           "stable_key":   "slack:C123:1778775842.876209",
@@ -17,21 +17,42 @@ Schema:
           "channel_name": "all-second-brain",
           "ts":           "1778775842.876209",  # for messages
           "thread_ts":    null,                 # for threads
-          "uploaded_at":  "2026-05-15T12:34:56.789012+00:00"
+          "uploaded_at":  "2026-05-15T12:34:56.789012+00:00",
+          "user_name":    "Praveer Nema",
+          "timestamp":    "1778775842.876209",
+          "snippet":      "first ~200 chars ...",
+          "permalink":    "https://...",
+          "document_type":"message" | "thread"
+        },
+        ...
+      },
+      "channels": {
+        "<channel_id>": {
+          "last_synced_ts": "1778775842.876209"   # newest message ts we've ingested
         },
         ...
       }
     }
+
+`channels` is added in version 2 for incremental Slack sync. Older files
+(missing `channels` or `version: 1`) load without error — we just start
+with an empty channels dict, which means the next run will fetch full
+history (one-time cost) before incremental kicks in.
 """
 
+import fcntl
 import json
+import logging
 import os
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Generator, Optional
+
+logger = logging.getLogger(__name__)
 
 
-STATE_VERSION = 1
+STATE_VERSION = 2
 
 
 # ---------------------------------------------------------------------- #
@@ -54,6 +75,7 @@ class IngestionState:
     def __init__(self, path: Path):
         self.path = path
         self.entries: Dict[str, Dict[str, Any]] = {}
+        self.channels: Dict[str, Dict[str, Any]] = {}
         self._load()
 
     # ----- disk I/O ---------------------------------------------------- #
@@ -65,21 +87,33 @@ class IngestionState:
             with self.path.open("r", encoding="utf-8") as f:
                 raw = json.load(f)
         except (OSError, json.JSONDecodeError) as e:
-            print(
-                f"[state] Could not read state file at {self.path}: {e}. "
-                f"Starting with empty state."
-            )
+            logger.warning('ingestion_state_load_failed', extra={
+                'path': str(self.path), 'error': type(e).__name__,
+            })
             return
 
-        entries = raw.get("entries") if isinstance(raw, dict) else None
+        if not isinstance(raw, dict):
+            return
+
+        entries = raw.get("entries")
         if isinstance(entries, dict):
             self.entries = entries
+
+        # `channels` was added in version 2. Older files don't have it; we
+        # treat that as "empty" so the next run does a full sync once.
+        channels = raw.get("channels")
+        if isinstance(channels, dict):
+            self.channels = channels
 
     def save(self) -> None:
         """Atomically write the state file (write to .tmp, then rename)."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-        payload = {"version": STATE_VERSION, "entries": self.entries}
+        payload = {
+            "version": STATE_VERSION,
+            "entries": self.entries,
+            "channels": self.channels,
+        }
         with tmp_path.open("w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, sort_keys=True)
         os.replace(tmp_path, self.path)
@@ -141,3 +175,92 @@ class IngestionState:
             if entry.get("filename") == filename:
                 return entry
         return None
+
+    # ----- per-channel sync timestamps -------------------------------- #
+    def get_last_synced_ts(self, channel_id: str) -> Optional[str]:
+        """The newest Slack ts we've successfully ingested for this channel."""
+        info = self.channels.get(channel_id)
+        if isinstance(info, dict):
+            ts = info.get("last_synced_ts")
+            if isinstance(ts, str) and ts:
+                return ts
+        return None
+
+    def set_last_synced_ts(self, channel_id: str, ts: str) -> None:
+        """
+        Record the newest successfully-ingested ts for this channel.
+
+        Caller should only invoke this AFTER the channel's batch upload
+        succeeded, so a crash mid-run doesn't advance the watermark past
+        unuploaded messages.
+
+        We never move the watermark backward — if `ts` is older than the
+        stored value, we keep the stored one. This guards against edge
+        cases like a race where an old message arrives after a new one.
+        """
+        if not channel_id or not ts:
+            return
+        existing = self.get_last_synced_ts(channel_id)
+        if existing and existing >= ts:
+            # Slack ts strings sort lexicographically the same as numerically
+            # because they are zero-padded "<seconds>.<micros>" forms with
+            # equal-length seconds parts within any sensible time range.
+            return
+        self.channels[channel_id] = {"last_synced_ts": ts}
+
+    # ----- last-ingestion timestamp (used by /api/admin/status) ------- #
+    def get_last_ingested_at(self) -> Optional[str]:
+        """ISO timestamp of the most recent successful upload, if any."""
+        # We stash a top-level "_meta" dict via mark_uploaded.uploaded_at on
+        # the newest entry, but explicit storage is cleaner for the admin
+        # endpoint to read without scanning every entry.
+        value = self.channels.get("_meta", {}).get("last_ingested_at") if isinstance(
+            self.channels.get("_meta"), dict
+        ) else None
+        return value if isinstance(value, str) else None
+
+    def touch_last_ingested(self) -> None:
+        """Mark "we just ingested something". Caller should still call save()."""
+        # Stored alongside per-channel watermarks under a "_meta" key
+        # (which can never collide with a real Slack channel ID since IDs
+        # always start with a capital letter).
+        self.channels["_meta"] = {
+            "last_ingested_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def total_docs(self) -> int:
+        """How many docs we've successfully recorded."""
+        return len(self.entries)
+
+    # ----- cross-process locking ---------------------------------------- #
+    @classmethod
+    @contextmanager
+    def locked(cls, path: Path) -> Generator["IngestionState", None, None]:
+        """
+        Exclusive cross-process read-modify-save context manager.
+
+        Acquires a POSIX advisory lock on a `<path>.lock` sidecar file,
+        loads a fresh IngestionState from disk inside the lock, yields it
+        for in-memory mutations, then saves and releases the lock.
+
+        Usage::
+
+            with IngestionState.locked(STATE_PATH) as state:
+                state.mark_uploaded(...)
+                # save() is called automatically on context exit
+
+        Note: fcntl is POSIX-only (Linux / macOS). This is acceptable for
+        a Docker/Linux deployment. On Windows, replace fcntl.flock with
+        msvcrt.locking or use a third-party cross-platform lock library.
+        """
+        path = Path(path)
+        lock_path = path.with_suffix(".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                state = cls(path)   # fresh load while we hold the lock
+                yield state
+                state.save()
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)

@@ -35,7 +35,6 @@ Never retried:
 import asyncio
 import functools
 import inspect
-import json
 import random
 import time
 from typing import Any, Callable, FrozenSet, Optional, Tuple, Type
@@ -45,6 +44,9 @@ from typing import Any, Callable, FrozenSet, Optional, Tuple, Type
 # ---------------------------------------------------------------------------
 RETRYABLE_STATUS_CODES: FrozenSet[int] = frozenset({429, 500, 502, 503, 504})
 NON_RETRYABLE_STATUS_CODES: FrozenSet[int] = frozenset({400, 401, 403, 404, 422})
+
+from logging_config import get_logger as _get_logger  # noqa: E402 (after constants)
+_logger = _get_logger(__name__)
 
 _DEFAULT_RETRYABLE_EXCEPTIONS: Tuple[Type[Exception], ...] = (
     TimeoutError,
@@ -74,12 +76,12 @@ def _log(
     delay_seconds: float = 0.0,
     error: str = "",
 ) -> None:
-    record: dict = {"event": event, "service": service, "attempt": attempt}
+    extra: dict = {"service": service, "attempt": attempt}
     if delay_seconds:
-        record["delay_seconds"] = round(delay_seconds, 3)
+        extra["delay_seconds"] = round(delay_seconds, 3)
     if error:
-        record["error"] = error[:300]
-    print(json.dumps(record))
+        extra["error"] = error[:300]
+    _logger.info(event, extra=extra)
 
 
 def _compute_delay(

@@ -1,0 +1,28 @@
+[tool.black]
+line-length = 120
+skip-string-normalization = true
+
+[tool.isort]
+profile = "black"
+line_length = 120
+known_first_party = [
+    "auth",
+    "date_utils",
+    "errors",
+    "hydradb_client",
+    "llm",
+    "logging_config",
+    "main",
+    "prompts",
+    "query_cache",
+    "query_rewriter",
+    "rate_limit",
+    "realtime_ingest",
+    "recall",
+    "request_context",
+    "scheduler",
+    "search_utils",
+    "slack_signature",
+    "startup",
+    "ingestion",
+]

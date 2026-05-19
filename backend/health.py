@@ -26,7 +26,6 @@ Structured log lines:
 """
 
 import asyncio
-import json
 import os
 import time
 from abc import ABC, abstractmethod
@@ -36,6 +35,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
+
+from logging_config import get_logger as _get_logger
+
+_logger = _get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Status constants
@@ -99,8 +102,7 @@ def _get_registry() -> List[HealthCheck]:
 # Logging helper
 # ---------------------------------------------------------------------------
 def _log(event: str, check_name: str, **kwargs: Any) -> None:
-    record = {"event": event, "check": check_name, **kwargs}
-    print(json.dumps(record))
+    _logger.info(event, extra={"check": check_name, **kwargs})
 
 
 # ---------------------------------------------------------------------------
