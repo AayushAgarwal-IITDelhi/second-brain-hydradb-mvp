@@ -33,7 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field  # noqa: E402
 
 from auth import require_api_key  # noqa: E402
 from date_utils import parse_date_query  # noqa: E402
-from errors import AppError, LLMError, UpstreamTimeoutError, app_error_handler  # noqa: E402
+from errors import AppError, app_error_handler  # noqa: E402
 from llm import stream_grounded_answer  # noqa: E402
 from logging_config import configure_logging, get_logger  # noqa: E402
 from prompts import INSUFFICIENT_CONTEXT_ANSWER  # noqa: E402
@@ -239,7 +239,7 @@ def _resolve_date_filters(req: QueryRequest) -> Dict[str, Any]:
             "matched":        parsed["matched"],
             "note":           parsed["note"],
             "applied_start":  parsed["start_timestamp"] if explicit_start is None else None,
-            "applied_end":    parsed["end_timestamp"]   if explicit_end is None   else None,
+            "applied_end":    parsed["end_timestamp"] if explicit_end is None else None,
         },
     }
 

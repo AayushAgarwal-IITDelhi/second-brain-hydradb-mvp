@@ -9,7 +9,6 @@ X-Request-ID response header without touching the body at all.
 """
 
 import uuid
-from typing import Callable
 
 from logging_config import bind_request_context
 

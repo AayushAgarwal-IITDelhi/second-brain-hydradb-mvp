@@ -13,8 +13,6 @@ ContextVars carry per-request state across async tasks and threads:
 
 import json
 import logging
-import traceback
-import uuid
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Optional

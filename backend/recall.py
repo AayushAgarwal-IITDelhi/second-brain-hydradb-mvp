@@ -383,8 +383,7 @@ def _build_source_card(
             "source":     minimal_source,
             "score":      score,
             "stable_key": candidate_stable_key,
-            "channel":    _get_path(chunk, ("metadata", "channel"))
-                          if isinstance(chunk, dict) else None,
+            "channel":    _get_path(chunk, ("metadata", "channel")) if isinstance(chunk, dict) else None,
         }
 
     # Rich source card backed by ingestion state.

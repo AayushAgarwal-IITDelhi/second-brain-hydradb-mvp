@@ -17,7 +17,6 @@ Notes:
 """
 
 import os
-import traceback
 from datetime import datetime, timezone
 from typing import Optional
 

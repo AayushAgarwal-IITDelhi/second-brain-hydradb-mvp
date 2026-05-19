@@ -32,7 +32,6 @@ from ingestion.ingest_slack import (
 from ingestion.ingestion_state import (
     IngestionState,
     stable_key_for_message,
-    stable_key_for_thread,
 )
 from ingestion.normalize import is_noise
 from ingestion.slack_client import SlackClientWrapper
