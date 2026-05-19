@@ -10,6 +10,10 @@ mysteriously at 3am.
 import os
 from typing import List
 
+from logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 # Vars whose values are required to be set AND non-empty before the app
 # can serve any request. Optional/tunable vars (LLM_MAX_TOKENS,
@@ -37,6 +41,7 @@ def validate_required_env() -> None:
         if not (os.getenv(name) or "").strip()
     ]
     if not missing:
+        logger.info('startup_env_validated')
         return
 
     lines = [

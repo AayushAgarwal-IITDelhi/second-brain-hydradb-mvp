@@ -17,13 +17,15 @@ Notes:
 """
 
 import os
-import traceback
 from datetime import datetime, timezone
 from typing import Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from ingestion.ingest_slack import main as run_ingestion
+from logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 JOB_ID = "second-brain-ingestion"
@@ -58,17 +60,14 @@ def _job_wrapper() -> None:
     stop scheduling the job.
     """
     started_at = datetime.now(timezone.utc).isoformat()
-    print(f"[scheduler] Ingestion job starting at {started_at} UTC")
+    logger.info('scheduler_job_start', extra={'started_at': started_at})
     try:
         run_ingestion()
-        print("[scheduler] Ingestion job finished.")
+        logger.info('scheduler_job_finished')
     except SystemExit as e:
-        # ingest_slack.main calls sys.exit(1) when SLACK_CHANNEL_IDS is
-        # unset. Log it but keep the scheduler alive.
-        print(f"[scheduler] Ingestion exited with code {e.code}.")
+        logger.warning('scheduler_job_sys_exit', extra={'exit_code': e.code})
     except Exception as e:  # noqa: BLE001
-        print(f"[scheduler] Ingestion job failed: {type(e).__name__}: {e}")
-        traceback.print_exc()
+        logger.error('scheduler_job_failed', extra={'error': type(e).__name__}, exc_info=True)
 
 
 _scheduler: Optional[BackgroundScheduler] = None
@@ -78,11 +77,11 @@ def start_scheduler() -> None:
     """Start the scheduler if AUTO_INGEST is enabled."""
     global _scheduler
     if not auto_ingest_enabled():
-        print("[scheduler] AUTO_INGEST is off; not starting.")
+        logger.info('scheduler_disabled', extra={'reason': 'AUTO_INGEST=false'})
         return
 
     if _scheduler is not None:
-        print("[scheduler] Already started.")
+        logger.info('scheduler_already_started')
         return
 
     minutes = interval_minutes()
@@ -97,13 +96,10 @@ def start_scheduler() -> None:
         replace_existing=True,
     )
     _scheduler.start()
-    print(
-        f"[scheduler] Started. Ingestion will run every {minutes} minute(s)."
-    )
+    logger.info('scheduler_started', extra={'interval_minutes': minutes})
 
     if run_on_startup_enabled():
-        print("[scheduler] AUTO_INGEST_RUN_ON_STARTUP=true; queueing one run now.")
-        # APScheduler runs add_job-with-no-trigger immediately on a thread.
+        logger.info('scheduler_startup_run_queued')
         _scheduler.add_job(_job_wrapper, id=f"{JOB_ID}-startup")
 
 
@@ -112,6 +108,6 @@ def stop_scheduler() -> None:
     global _scheduler
     if _scheduler is None:
         return
-    print("[scheduler] Shutting down.")
+    logger.info('scheduler_stopping')
     _scheduler.shutdown(wait=False)
     _scheduler = None

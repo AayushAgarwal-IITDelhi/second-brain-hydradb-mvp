@@ -23,8 +23,11 @@ from typing import Any, Dict, List, Optional, Set
 
 from hydradb_client import HydraDBClient
 from llm import generate_grounded_answer
+from logging_config import get_logger
 from prompts import INSUFFICIENT_CONTEXT_ANSWER
 from ingestion.ingestion_state import IngestionState
+
+logger = get_logger(__name__)
 
 
 # Path to the ingestion state file (written by ingest_slack.py). Loaded once
@@ -380,8 +383,7 @@ def _build_source_card(
             "source":     minimal_source,
             "score":      score,
             "stable_key": candidate_stable_key,
-            "channel":    _get_path(chunk, ("metadata", "channel"))
-                          if isinstance(chunk, dict) else None,
+            "channel":    _get_path(chunk, ("metadata", "channel")) if isinstance(chunk, dict) else None,
         }
 
     # Rich source card backed by ingestion state.
@@ -405,7 +407,7 @@ def _load_state_safely() -> Optional[IngestionState]:
     try:
         return IngestionState(STATE_PATH)
     except Exception as e:  # noqa: BLE001 -- we never want recall to crash on this
-        print(f"[recall] Could not load ingestion state: {e}")
+        logger.warning('recall_state_load_failed', extra={'error': type(e).__name__})
         return None
 
 
@@ -641,14 +643,14 @@ def prepare_recall_context(
     debug_on = _debug_recall_enabled()
 
     if debug_on:
-        print("[recall] ===== raw HydraDB response (truncated to 8000 chars) =====")
-        print(_safe_json(raw_response, limit=8000))
+        logger.debug('recall_raw_response', extra={
+            'chunks_count': len(chunks),
+            'raw_response_preview': _safe_json(raw_response, limit=500),
+        })
         if chunks:
-            print("[recall] ===== first chunk =====")
-            print(_safe_json(chunks[0], limit=4000))
-        else:
-            print("[recall] (no chunks returned)")
-        print("[recall] ===========================================================")
+            logger.debug('recall_first_chunk_preview', extra={
+                'first_chunk_keys': list(chunks[0].keys()) if isinstance(chunks[0], dict) else None,
+            })
 
     state = _load_state_safely()
     start_unix = _coerce_to_unix_seconds(start_timestamp)
@@ -695,6 +697,13 @@ def prepare_recall_context(
         chunks_with_meta, query_terms, mode, top_k,
         metadata_bias=metadata_bias,
     )
+
+    logger.debug('recall_context_ready', extra={
+        'chunks_count': len(chunks),
+        'filtered_out': filtered_out,
+        'mode': mode,
+        'top_k': top_k,
+    })
 
     if not ranked:
         first_chunk = chunks[0] if chunks else None

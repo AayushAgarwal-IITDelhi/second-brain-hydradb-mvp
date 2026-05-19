@@ -264,6 +264,7 @@ export async function streamQuery(params, handlers, signal) {
   let buffer = "";
 
   try {
+    // eslint-disable-next-line no-constant-condition
     while (true) {
       // Cheap inline check — `reader.read()` will also throw AbortError
       // when the signal aborts mid-read, but checking here means we exit

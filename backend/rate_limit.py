@@ -16,7 +16,7 @@ import os
 import time
 from collections import deque
 from threading import Lock
-from typing import Deque, Dict, Optional
+from typing import Deque, Dict
 
 from fastapi import Request
 

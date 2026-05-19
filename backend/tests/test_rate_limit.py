@@ -86,7 +86,6 @@ class TestSlidingWindowLimiter:
         from rate_limit import _SlidingWindowLimiter, WINDOW_SECONDS
         limiter = _SlidingWindowLimiter()
         # Manually insert old timestamps just outside the window
-        import time
         now = time.monotonic()
         from collections import deque
         limiter._buckets["stale-client"] = deque(
