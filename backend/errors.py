@@ -13,7 +13,7 @@ class name, full stack trace, prompt content, or API key into the
 response body.
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -32,12 +32,22 @@ class AppError(Exception):
     error_type: str = "internal_error"
     default_detail: str = "Something went wrong."
 
-    def __init__(self, detail: str = "", *, log_context: str = ""):
+    def __init__(
+        self,
+        detail: str = "",
+        *,
+        log_context: str = "",
+        upstream_status: Optional[int] = None,
+    ):
         # `detail` is shown to the user.
         # `log_context` is printed to stdout for operators but never returned.
+        # `upstream_status` carries the HTTP status from the upstream service
+        #   so the retry framework can decide whether to retry without
+        #   knowing the error message content.
         super().__init__(detail or self.default_detail)
         self.detail = detail or self.default_detail
         self.log_context = log_context
+        self.upstream_status: Optional[int] = upstream_status
 
 
 class HydraDBError(AppError):

@@ -24,6 +24,19 @@ from typing import Optional
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from ingestion.ingest_slack import main as run_ingestion
+from retry import retry, RetryExhausted
+
+
+# Wrap ingestion with retry so transient network blips don't abort the whole
+# run.  Delays are generous (5 s / 15 s) because ingestion is a background
+# batch job, not a user-facing request.
+_run_ingestion_with_retry = retry(
+    service="scheduler",
+    max_attempts=3,
+    initial_delay=5.0,
+    max_delay=60.0,
+    retryable_exceptions=(ConnectionError, TimeoutError, OSError),
+)(run_ingestion)
 
 
 JOB_ID = "second-brain-ingestion"
@@ -60,12 +73,14 @@ def _job_wrapper() -> None:
     started_at = datetime.utcnow().isoformat()
     print(f"[scheduler] Ingestion job starting at {started_at} UTC")
     try:
-        run_ingestion()
+        _run_ingestion_with_retry()
         print("[scheduler] Ingestion job finished.")
     except SystemExit as e:
         # ingest_slack.main calls sys.exit(1) when SLACK_CHANNEL_IDS is
         # unset. Log it but keep the scheduler alive.
         print(f"[scheduler] Ingestion exited with code {e.code}.")
+    except RetryExhausted as e:
+        print(f"[scheduler] Ingestion exhausted retries: {e}")
     except Exception as e:  # noqa: BLE001
         print(f"[scheduler] Ingestion job failed: {type(e).__name__}: {e}")
         traceback.print_exc()

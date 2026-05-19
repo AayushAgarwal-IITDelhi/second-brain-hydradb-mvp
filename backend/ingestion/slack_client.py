@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
+from retry import retry
+
 
 # Slack's max page size for conversations.history / conversations.replies is 200.
 SLACK_MAX_PAGE_SIZE = 200
@@ -57,7 +59,7 @@ class SlackClientWrapper:
 
         while True:
             try:
-                response = self.client.conversations_history(
+                response = self._call_conversations_history(
                     channel=channel_id,
                     limit=page_size,
                     cursor=cursor,
@@ -103,7 +105,7 @@ class SlackClientWrapper:
 
         while True:
             try:
-                response = self.client.conversations_replies(
+                response = self._call_conversations_replies(
                     channel=channel_id,
                     ts=thread_ts,
                     limit=SLACK_MAX_PAGE_SIZE,
@@ -149,7 +151,7 @@ class SlackClientWrapper:
 
         name: Optional[str] = None
         try:
-            response = self.client.users_info(user=user_id)
+            response = self._call_users_info(user_id=user_id)
             user = response.get("user") or {}
             profile = user.get("profile") or {}
             # Order matters: real_name is usually the best human label.
@@ -192,8 +194,8 @@ class SlackClientWrapper:
 
         permalink: Optional[str] = None
         try:
-            response = self.client.chat_getPermalink(
-                channel=channel_id,
+            response = self._call_get_permalink(
+                channel_id=channel_id,
                 message_ts=message_ts,
             )
             permalink = response.get("permalink") or None
@@ -206,6 +208,41 @@ class SlackClientWrapper:
 
         self._permalink_cache[cache_key] = permalink
         return permalink
+
+    # ------------------------------------------------------------------ #
+    # Retry-wrapped API call helpers
+    # ------------------------------------------------------------------ #
+    # These wrap the network-level calls so transient connection errors are
+    # retried automatically.  SlackApiError (including 429) is handled
+    # separately by the pagination loops above (which honour Retry-After).
+
+    @retry(service="slack", max_attempts=3, initial_delay=1.0,
+           retryable_exceptions=(ConnectionError, TimeoutError, OSError))
+    def _call_conversations_history(self, channel: str, limit: int,
+                                     cursor: Optional[str]):
+        return self.client.conversations_history(
+            channel=channel, limit=limit, cursor=cursor
+        )
+
+    @retry(service="slack", max_attempts=3, initial_delay=1.0,
+           retryable_exceptions=(ConnectionError, TimeoutError, OSError))
+    def _call_conversations_replies(self, channel: str, ts: str,
+                                     limit: int, cursor: Optional[str]):
+        return self.client.conversations_replies(
+            channel=channel, ts=ts, limit=limit, cursor=cursor
+        )
+
+    @retry(service="slack", max_attempts=3, initial_delay=1.0,
+           retryable_exceptions=(ConnectionError, TimeoutError, OSError))
+    def _call_users_info(self, user_id: str):
+        return self.client.users_info(user=user_id)
+
+    @retry(service="slack", max_attempts=3, initial_delay=1.0,
+           retryable_exceptions=(ConnectionError, TimeoutError, OSError))
+    def _call_get_permalink(self, channel_id: str, message_ts: str):
+        return self.client.chat_getPermalink(
+            channel=channel_id, message_ts=message_ts
+        )
 
     # ------------------------------------------------------------------ #
     # Helpers

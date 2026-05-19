@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from errors import HydraDBError, UpstreamTimeoutError
+from retry import retry, RetryExhausted
 
 
 # ---------------------------------------------------------------------- #
@@ -32,6 +33,18 @@ from errors import HydraDBError, UpstreamTimeoutError
 # print a clear hint pointing here whenever the server returns a 4xx.
 # ---------------------------------------------------------------------- #
 RECALL_TOP_K_FIELD = "top_k"
+
+
+# Retry-wrapped POST used by upload_knowledge.  Retries on network-level
+# transients (timeout, connection reset) but not on auth or 4xx errors.
+@retry(
+    service="hydradb",
+    max_attempts=3,
+    initial_delay=1.0,
+    retryable_exceptions=(requests.Timeout, requests.ConnectionError, OSError),
+)
+def _post_upload(url: str, headers: dict, data: dict, files: list) -> requests.Response:
+    return requests.post(url, headers=headers, data=data, files=files, timeout=120)
 
 
 # ---------------------------------------------------------------------- #
@@ -180,14 +193,13 @@ class HydraDBClient:
 
         # ------------------------------------------------------------------
         try:
-            response = requests.post(
+            response = _post_upload(
                 url,
                 headers=self._auth_headers(),
                 data=data,
                 files=multipart_files,
-                timeout=120,
             )
-        except requests.RequestException as e:
+        except (requests.RequestException, RetryExhausted) as e:
             print(f"[hydradb] Network error talking to HydraDB: {e}")
             return {}
 
@@ -235,6 +247,13 @@ class HydraDBClient:
     # ------------------------------------------------------------------ #
     # Retrieval
     # ------------------------------------------------------------------ #
+    @retry(
+        service="hydradb",
+        max_attempts=3,
+        initial_delay=1.0,
+        retryable_exceptions=(requests.Timeout, requests.ConnectionError, OSError,
+                               UpstreamTimeoutError, HydraDBError),
+    )
     def full_recall(self, query: str, top_k: int = 5) -> Dict[str, Any]:
         """
         Call POST /recall/full_recall and return the parsed JSON response.
@@ -275,6 +294,7 @@ class HydraDBClient:
             raise HydraDBError(
                 log_context=f"network error during full_recall: {e}",
             )
+        # RetryExhausted bubbles up as HydraDBError so callers see a stable type.
 
         print(f"[hydradb] POST {url} -> HTTP {response.status_code}")
 
@@ -291,6 +311,7 @@ class HydraDBClient:
             raise HydraDBError(
                 detail=f"Knowledge backend returned HTTP {response.status_code}.",
                 log_context=f"full_recall HTTP {response.status_code} body={response.text[:400]}",
+                upstream_status=response.status_code,
             )
 
         try:

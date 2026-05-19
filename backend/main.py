@@ -2,9 +2,11 @@
 FastAPI app for the Second Brain MVP.
 
 Endpoints:
-    GET  /            -> service info card             (public)
-    GET  /api/health  -> {"status": "ok", ...}         (public)
-    POST /api/query   -> {"answer", "sources", ...}    (X-API-Key + rate limited)
+    GET  /                  -> service info card          (public)
+    GET  /api/health/live   -> liveness probe             (public)
+    GET  /api/health/ready  -> readiness probe            (public)
+    GET  /api/health        -> detailed diagnostics       (public)
+    POST /api/query         -> {"answer", "sources", ...} (X-API-Key + rate limited)
 
 The frontend MUST send `X-API-Key: <APP_API_KEY>` on every protected call.
 
@@ -27,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field  # noqa: E402
 
 from auth import require_api_key  # noqa: E402
 from errors import AppError, app_error_handler  # noqa: E402
+from health import router as health_router  # noqa: E402
 from rate_limit import rate_limit_dependency  # noqa: E402
 from recall import answer_question  # noqa: E402
 from scheduler import start_scheduler, stop_scheduler  # noqa: E402
@@ -64,9 +67,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Second Brain (Slack MVP)", lifespan=lifespan)
 
-
 # Translate every typed AppError into a normalized JSON 4xx/5xx response.
 app.add_exception_handler(AppError, app_error_handler)
+
+# Health endpoints: /api/health/live, /api/health/ready, /api/health
+app.include_router(health_router)
 
 
 # ---------- CORS ---------- #
@@ -131,13 +136,9 @@ def root() -> Dict[str, str]:
         "status": "ok",
         "docs":   "/docs",
         "health": "/api/health",
+        "liveness": "/api/health/live",
+        "readiness": "/api/health/ready",
     }
-
-
-@app.get("/api/health")
-def health() -> Dict[str, str]:
-    """Public health check so external probes don't need the API key."""
-    return {"status": "ok", "service": "second-brain-api"}
 
 
 # ---------- Protected routes ---------- #

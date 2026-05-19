@@ -11,10 +11,30 @@ No Ollama / no local LLM.
 import os
 from typing import Optional
 
+import openai
 from openai import APITimeoutError, OpenAI
 
 from errors import LLMError, UpstreamTimeoutError
 from prompts import INSUFFICIENT_CONTEXT_ANSWER, system_prompt_for_mode
+from retry import retry
+
+
+@retry(
+    service="llm",
+    max_attempts=3,
+    initial_delay=1.0,
+    retryable_exceptions=(
+        openai.APITimeoutError,
+        openai.APIConnectionError,
+        openai.InternalServerError,
+        openai.RateLimitError,
+    ),
+    # 401/403 are in NON_RETRYABLE_STATUS_CODES; the retry decorator will
+    # also block them via status-code inspection even without listing them here.
+)
+def _create_completion(client: OpenAI, **kwargs):  # type: ignore[return]
+    """Thin wrapper so the retry decorator operates below the exception translator."""
+    return client.chat.completions.create(**kwargs)
 
 
 def _build_client() -> OpenAI:
@@ -71,7 +91,8 @@ def generate_grounded_answer(
 
     try:
         client = _build_client()
-        response = client.chat.completions.create(
+        response = _create_completion(
+            client,
             model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
