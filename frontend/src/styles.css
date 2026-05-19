@@ -1,6 +1,11 @@
 /* -----------------------------------------------------------------
    Second Brain — frontend styles
    Plain CSS, no framework. Single file so it's easy to scan/edit.
+
+   Theming model: CSS custom properties on :root for light mode.
+   The dark theme is enabled by setting [data-theme="dark"] on the
+   <html> element (App.jsx does this via useEffect). All themable
+   properties are listed in both blocks so the toggle is symmetric.
    ----------------------------------------------------------------- */
 
 :root {
@@ -16,9 +21,95 @@
   --error-text:  #9a1d1d;
   --tag-bg:      #eef2ff;
   --tag-text:    #3b3f8a;
+  --backdrop:    rgba(15, 23, 42, 0.5);
+
+  /* Accent backgrounds for status badges. Light pastels in light mode;
+     darker, more saturated tones in dark mode so they remain readable
+     against the dark surface without washing out. */
+  --badge-cache-bg:        #ecfdf5;
+  --badge-cache-text:      #045a36;
+  --badge-mode-bg:         #eef2ff;
+  --badge-mode-text:       #3b3f8a;
+  --badge-matches-bg:      #fef9c3;
+  --badge-matches-text:    #854d0e;
+  --badge-matches-none-bg: #fee2e2;
+  --badge-matches-none-text:#991b1b;
+  --badge-date-bg:         #f1f5f9;
+  --badge-date-text:       #334155;
+  --badge-date-failed-bg:  #fee2e2;
+  --badge-date-failed-text:#991b1b;
+  --badge-person-bg:       #ede9fe;
+  --badge-person-text:     #5b21b6;
+  --badge-channel-bg:      #cffafe;
+  --badge-channel-text:    #155e75;
+  --badge-saved-bg:        #fef3c7;
+  --badge-saved-text:      #92400e;
+  --badge-saved-border:    #fde68a;
+  --badge-saved-hover:     #fde68a;
+
   --radius:      10px;
   --shadow:      0 1px 2px rgba(0, 0, 0, 0.04),
                  0 4px 12px rgba(0, 0, 0, 0.04);
+}
+
+/* Dark theme: the toggle in App.jsx sets data-theme="dark" on <html>.
+   We override every themable variable; everything else (badges that
+   reference these variables, components that use them) just works. */
+[data-theme="dark"] {
+  --bg:          #0f1115;
+  --surface:     #1a1d23;
+  --surface-2:   #232830;
+  --text:        #e6e8eb;
+  --text-muted:  #9aa3ad;
+  --border:      #2c313a;
+  --primary:     #5c93ff;
+  --primary-fg:  #0f1115;
+  --error-bg:    #3a1d1d;
+  --error-text:  #ffb3b3;
+  --tag-bg:      #2a3060;
+  --tag-text:    #c4cbff;
+  --backdrop:    rgba(0, 0, 0, 0.65);
+
+  --badge-cache-bg:        #143a2a;
+  --badge-cache-text:      #6ee7b7;
+  --badge-mode-bg:         #1f2350;
+  --badge-mode-text:       #c4cbff;
+  --badge-matches-bg:      #3a2e0a;
+  --badge-matches-text:    #fde68a;
+  --badge-matches-none-bg: #3a1d1d;
+  --badge-matches-none-text:#ffb3b3;
+  --badge-date-bg:         #232830;
+  --badge-date-text:       #cbd5e1;
+  --badge-date-failed-bg:  #3a1d1d;
+  --badge-date-failed-text:#ffb3b3;
+  --badge-person-bg:       #2b1e4d;
+  --badge-person-text:     #c4b5fd;
+  --badge-channel-bg:      #103642;
+  --badge-channel-text:    #67e8f9;
+  --badge-saved-bg:        #3a2e0a;
+  --badge-saved-text:      #fde68a;
+  --badge-saved-border:    #5a4515;
+  --badge-saved-hover:     #5a4515;
+
+  --shadow:      0 1px 2px rgba(0, 0, 0, 0.3),
+                 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* Smoothly transition between themes so the swap doesn't feel jarring.
+   Limited to color-ish properties — we don't want layout properties to
+   animate, just chromatic ones. */
+:root,
+[data-theme="dark"] {
+  color-scheme: light;
+}
+[data-theme="dark"] {
+  color-scheme: dark;
+}
+body, .bubble, .composer, .history, .saved, .admin,
+.saved-overlay__card, .source-card, .badge, .btn,
+input, select, textarea, .answer-md pre, .answer-md code {
+  transition: background-color 0.18s ease, color 0.18s ease,
+              border-color 0.18s ease;
 }
 
 * {
@@ -141,6 +232,305 @@ body {
   letter-spacing: 0.04em;
   color: var(--text-muted);
   margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Wrap action buttons (Save / Export) onto a second line on narrow
+     viewports so they don't push off the right edge. */
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.bubble__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-radius: 999px;
+}
+
+.badge--cache {
+  background: var(--badge-cache-bg);
+  color: var(--badge-cache-text);
+}
+
+.badge--mode {
+  background: var(--badge-mode-bg);
+  color: var(--badge-mode-text);
+}
+
+.badge--matches {
+  background: var(--badge-matches-bg);
+  color: var(--badge-matches-text);
+}
+
+.badge--matches-none {
+  background: var(--badge-matches-none-bg);
+  color: var(--badge-matches-none-text);
+}
+
+.badge--date {
+  background: var(--badge-date-bg);
+  color: var(--badge-date-text);
+}
+
+.badge--date-failed {
+  background: var(--badge-date-failed-bg);
+  color: var(--badge-date-failed-text);
+}
+
+.badge--person {
+  background: var(--badge-person-bg);
+  color: var(--badge-person-text);
+}
+
+.badge--channel {
+  background: var(--badge-channel-bg);
+  color: var(--badge-channel-text);
+}
+
+/* Weak-confidence inference is a bias-only signal — render slightly
+   muted so users can tell at a glance it's not a hard filter. */
+.badge--inference-weak {
+  opacity: 0.75;
+  font-style: italic;
+}
+
+.field--wide {
+  grid-column: span 2;
+}
+
+.cursor {
+  display: inline-block;
+  margin-left: 2px;
+  animation: blink 1s steps(2, start) infinite;
+  color: var(--text-muted);
+}
+
+@keyframes blink {
+  to { visibility: hidden; }
+}
+
+/* --------------------- Markdown answer rendering --------------------- */
+/* All rules are scoped under .answer-md so we don't accidentally style
+   markdown rendered elsewhere on the page (e.g. if a future feature
+   reuses ReactMarkdown). Sizes are deliberately small — a `# Heading`
+   inside a chat bubble shouldn't look like a page title. */
+
+.answer-md {
+  /* The wrapper sits inside .answer; .answer already owns the outer
+     text color, so the markdown tree just needs typography + spacing. */
+  display: inline;  /* let the cursor sit on the same baseline as the last line */
+}
+
+/* Collapse top/bottom margins of edge children so the bubble stays
+   visually compact. */
+.answer-md > *:first-child { margin-top: 0; }
+.answer-md > *:last-child  { margin-bottom: 0; }
+
+.answer-md p {
+  margin: 0 0 8px;
+  line-height: 1.5;
+}
+.answer-md p:last-child { margin-bottom: 0; }
+
+.answer-md h1, .answer-md h2, .answer-md h3,
+.answer-md h4, .answer-md h5, .answer-md h6 {
+  margin: 10px 0 6px;
+  line-height: 1.25;
+  font-weight: 600;
+}
+.answer-md h1 { font-size: 18px; }
+.answer-md h2 { font-size: 17px; }
+.answer-md h3 { font-size: 16px; }
+.answer-md h4,
+.answer-md h5,
+.answer-md h6 { font-size: 15px; }
+
+.answer-md ul,
+.answer-md ol {
+  margin: 0 0 8px;
+  padding-left: 22px;
+}
+.answer-md li { margin: 2px 0; }
+/* Tighten nested lists so bullets don't waste two extra lines of space. */
+.answer-md li > ul,
+.answer-md li > ol { margin: 2px 0 4px; }
+
+.answer-md a {
+  color: var(--primary);
+  text-decoration: none;
+}
+.answer-md a:hover { text-decoration: underline; }
+
+.answer-md strong { font-weight: 600; }
+.answer-md em     { font-style: italic; }
+
+.answer-md blockquote {
+  margin: 6px 0;
+  padding: 4px 10px;
+  border-left: 3px solid var(--border);
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border-radius: 0 6px 6px 0;
+}
+
+.answer-md hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 10px 0;
+}
+
+/* Inline code: any <code> that is NOT inside <pre>. The :not(pre *)
+   selector excludes any code descendant of a pre, leaving only inline
+   spans of code that sit directly in the prose. */
+.answer-md code {
+  font-family: ui-monospace, "SF Mono", "Cascadia Code",
+               "Roboto Mono", Menlo, Consolas, monospace;
+  font-size: 13px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  padding: 0 5px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+/* Fenced code blocks: react-markdown wraps these in <pre><code>. The
+   <pre> handles the container chrome; the inner <code> resets to look
+   like a block element instead of an inline pill. */
+.answer-md pre {
+  margin: 8px 0;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.answer-md pre code {
+  display: block;
+  font-family: ui-monospace, "SF Mono", "Cascadia Code",
+               "Roboto Mono", Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text);
+  /* Reset the inline-pill styles when inside a pre. */
+  background: transparent;
+  border: 0;
+  padding: 0;
+  border-radius: 0;
+  white-space: pre;
+}
+
+/* GFM tables. The wrapper enables horizontal scroll on narrow viewports
+   so a wide table doesn't burst the bubble's width. */
+.md-table-wrap {
+  overflow-x: auto;
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.answer-md table {
+  border-collapse: collapse;
+  font-size: 13px;
+  width: 100%;
+}
+.answer-md th,
+.answer-md td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.answer-md th {
+  background: var(--surface-2);
+  font-weight: 600;
+}
+.answer-md tr:last-child td { border-bottom: 0; }
+
+/* GFM task list checkboxes — disable interaction, they're for display. */
+.answer-md input[type="checkbox"] {
+  margin-right: 6px;
+  pointer-events: none;
+}
+
+.answer--placeholder {
+  color: var(--text-muted);
+  font-style: italic;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.aborted-note {
+  margin: 6px 0 0;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--text-muted);
+}
+
+/* --------------------------- Admin card --------------------------- */
+
+.admin {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 8px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12px;
+  color: var(--text-muted);
+  box-shadow: var(--shadow);
+}
+
+.admin__label {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text);
+  font-size: 11px;
+}
+
+.admin__pill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+
+.admin__pill--on {
+  background: var(--badge-cache-bg);
+  color: var(--badge-cache-text);
+}
+
+.admin__pill--off {
+  background: var(--badge-matches-bg);
+  color: var(--badge-matches-text);
+}
+
+.admin__metric strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.admin__placeholder {
+  font-style: italic;
 }
 
 .bubble__body {
@@ -311,7 +701,7 @@ body {
   padding: 6px 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  background: #fff;
+  background: var(--surface);
   font-size: 14px;
   font-family: inherit;
   color: var(--text);
@@ -337,7 +727,7 @@ body {
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
   font: inherit;
   color: var(--text);
 }
@@ -353,7 +743,7 @@ body {
 .btn {
   cursor: pointer;
   border: 1px solid var(--border);
-  background: #fff;
+  background: var(--surface);
   color: var(--text);
   padding: 8px 14px;
   font: inherit;
@@ -388,6 +778,175 @@ body {
   color: var(--text);
 }
 
+.btn--small {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+}
+
+.btn--active {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.btn__count {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 6px;
+  min-width: 18px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  border-radius: 999px;
+  background: var(--primary);
+  color: var(--primary-fg);
+  text-align: center;
+}
+
+/* --------------------- Header action group --------------------- */
+
+.app__header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* --------------------------- Query history panel --------------------------- */
+
+.history {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  /* Cap the panel so a long history doesn't push the chat off-screen.
+     On short viewports the list scrolls internally. */
+  max-height: 50vh;
+}
+
+.history__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.history__title {
+  display: block;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text);
+}
+
+.history__hint {
+  display: block;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.history__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.history-item {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  background: var(--surface-2);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.history-item__main {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+  padding: 4px 2px;
+  font: inherit;
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;          /* allow truncation inside flex */
+  border-radius: 6px;
+}
+
+.history-item__main:hover:not(:disabled) {
+  background: rgba(47, 111, 235, 0.06);
+}
+
+.history-item__main:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.history-item__question {
+  font-weight: 500;
+  /* Single-line truncation: keeps each row compact on narrow screens. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-item__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.history-item__time {
+  font-variant-numeric: tabular-nums;
+}
+
+.history-item__chip {
+  display: inline-block;
+  padding: 1px 8px;
+  font-size: 11px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+}
+
+.history-item__actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* Mobile-narrow: keep rows usable. The Run-again button can wrap below
+   the question line; everything stays tappable. */
+@media (max-width: 520px) {
+  .history-item {
+    flex-wrap: wrap;
+  }
+  .history-item__actions {
+    margin-left: auto;
+  }
+  .history-item__question {
+    white-space: normal;       /* allow wrapping when there's no room */
+  }
+}
+
 /* ------------------------- Scrollbar ------------------------- */
 
 .chat::-webkit-scrollbar {
@@ -398,5 +957,444 @@ body {
   border-radius: 4px;
 }
 .chat::-webkit-scrollbar-thumb:hover {
-  background: #c8cbd0;
+  background: var(--text-muted);
+}
+
+/* ====================== Saved answers ====================== */
+
+/* Save button inside the assistant bubble header — small, low-contrast,
+   only present after a turn completes. The "Saved" state uses an
+   accented background so users can scan the timeline and see which
+   bubbles are bookmarked. */
+.bubble__save {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: 999px;
+  cursor: pointer;
+  line-height: 1.4;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.bubble__save:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.bubble__save--saved {
+  background: var(--badge-saved-bg);
+  color: var(--badge-saved-text);
+  border-color: var(--badge-saved-border);
+}
+.bubble__save--saved:hover {
+  background: var(--badge-saved-hover);
+}
+
+/* Export buttons sit next to the Save button in the bubble header.
+   They share the pill aesthetic but never carry a "saved-style" accent —
+   they're momentary actions, not state badges. We don't set
+   margin-left: auto here because the preceding .bubble__save (which IS
+   guaranteed to render alongside them — same canSave guard) already
+   pushes the action group to the right edge. */
+.bubble__export {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: 999px;
+  cursor: pointer;
+  line-height: 1.4;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.bubble__export:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+/* On very narrow viewports, action buttons should wrap below the badge
+   row rather than overflow horizontally. The bubble__role already has
+   `flex-wrap: wrap` in the base bubble.css, so this is mostly a hint
+   that long badge counts won't push exports off-screen. */
+
+/* Drawer panel under the header. Same visual rhythm as the query-history
+   panel; styles share variables but stay class-scoped so future changes
+   to one don't bleed into the other. */
+.saved {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 50vh;
+}
+
+.saved__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.saved__title {
+  display: block;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text);
+}
+
+.saved__hint {
+  display: block;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.saved__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.saved-item {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  background: var(--surface-2);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.saved-item__main {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+  padding: 4px 2px;
+  font: inherit;
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  border-radius: 6px;
+}
+
+.saved-item__main:hover {
+  background: rgba(47, 111, 235, 0.06);
+}
+
+.saved-item__question {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.saved-item__preview {
+  font-size: 13px;
+  color: var(--text-muted);
+  /* Two-line clamp so the row stays compact while still showing useful
+     context. Falls back to single-line truncation on browsers without
+     -webkit-line-clamp (rare today). */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  line-height: 1.4;
+}
+
+.saved-item__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.saved-item__time {
+  font-variant-numeric: tabular-nums;
+}
+
+.saved-item__sources {
+  font-weight: 500;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  padding: 1px 8px;
+  border-radius: 999px;
+}
+
+.saved-item__chip {
+  display: inline-block;
+  padding: 1px 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+}
+
+/* Saved-answer overlay. Fixed-positioned card with a dimmed backdrop
+   that closes when clicked outside the card. Internal scroll keeps long
+   answers usable on small screens. */
+.saved-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--backdrop);
+  z-index: 50;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 24px 16px;
+  overflow-y: auto;
+}
+
+.saved-overlay__card {
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.25);
+  width: 100%;
+  max-width: 800px;
+  padding: 20px 22px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.saved-overlay__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.saved-overlay__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.saved-overlay__time {
+  font-variant-numeric: tabular-nums;
+}
+
+.saved-overlay__chip {
+  display: inline-block;
+  padding: 1px 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+}
+
+.saved-overlay__actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.saved-overlay__question {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.saved-overlay__answer {
+  font-size: 14px;
+}
+
+/* Mobile-narrow: tighter padding + wrap the actions row underneath. */
+@media (max-width: 520px) {
+  .saved-overlay {
+    padding: 12px 8px;
+  }
+  .saved-overlay__card {
+    padding: 16px 14px 18px;
+  }
+  .saved-item {
+    flex-wrap: wrap;
+  }
+  .saved-item__question {
+    white-space: normal;
+  }
+}
+
+/* ====================== Polish pass: copy / filter / armed ====================== */
+
+/* Filter input shared by the history + saved panels. Compact, full-width
+   inside the panel, themable. */
+.panel-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 6px;
+}
+.panel-filter__input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  font-size: 13px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.panel-filter__input:focus {
+  outline: 2px solid rgba(47, 111, 235, 0.25);
+  outline-offset: 1px;
+  border-color: var(--primary);
+}
+.panel-filter__count {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* Empty-state messages inside the panels. */
+.panel-empty {
+  padding: 14px 4px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* "Armed" state for destructive buttons (Clear chat / Clear history /
+   Clear all). First click arms the button — text changes to "Confirm?",
+   background turns red-tinted. Second click confirms. Auto-disarms
+   after a few seconds via the component. */
+.btn--armed {
+  background: var(--badge-matches-none-bg) !important;
+  color: var(--badge-matches-none-text) !important;
+  border-color: var(--badge-matches-none-text) !important;
+}
+
+/* Copy button — same pill style as bubble__export but with its own class
+   so we can target the just-copied "Copied!" state without touching
+   exports. */
+.bubble__copy {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: 999px;
+  cursor: pointer;
+  line-height: 1.4;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.bubble__copy:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.bubble__copy--copied {
+  background: var(--badge-cache-bg);
+  color: var(--badge-cache-text);
+  border-color: var(--badge-cache-text);
+}
+
+/* Copy-link button on each source card. Small icon-only square so it
+   doesn't crowd the card. */
+.source-card__copy {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 1px 7px;
+  font-size: 11px;
+  border-radius: 6px;
+  cursor: pointer;
+  line-height: 1.4;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.source-card__copy:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.source-card__copy--copied {
+  background: var(--badge-cache-bg);
+  color: var(--badge-cache-text);
+  border-color: var(--badge-cache-text);
+}
+
+/* Theme toggle button in the header — keep flush with the other ghost
+   buttons but show the current state via the icon (sun/moon). */
+.btn--theme {
+  /* shares .btn .btn--ghost padding; just a small consistency hook. */
+  letter-spacing: 0;
+}
+
+/* ====================== Mobile polish ====================== */
+
+/* Source card content can include long permalinks / IDs / paths. Force
+   wrapping so the card never bursts the bubble width. */
+.source-card,
+.source-card__snippet,
+.source-card__permalink {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* Tables and code blocks already scroll horizontally (set in the
+   markdown rules earlier). Just make sure the wrapper is allowed to
+   shrink inside flex/grid contexts on narrow viewports. */
+.md-table-wrap,
+.answer-md pre {
+  max-width: 100%;
+}
+
+/* Tighten header on narrow screens so the action group has room. */
+@media (max-width: 600px) {
+  .app__header {
+    gap: 8px;
+  }
+  .app__header-actions {
+    /* The action buttons already wrap; tighter gap fits more per row. */
+    gap: 4px;
+  }
+}
+
+/* On very narrow viewports give the panels a bit more breathing room
+   so filter inputs aren't cramped. */
+@media (max-width: 440px) {
+  .history,
+  .saved {
+    padding: 10px 12px;
+  }
+  .saved-overlay {
+    padding: 8px 6px;
+  }
+  .saved-overlay__card {
+    padding: 14px 12px 16px;
+  }
+}
+
+/* Source-card link row — keeps the "Open in Slack →" link and the
+   copy-link button on the same line, wrapping to two lines only on
+   very narrow viewports. */
+.source__link-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
 }

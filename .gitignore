@@ -1,0 +1,21 @@
+# --- Local ingestion state (don't commit) ---
+data/ingestion_state.json
+data/ingestion_state.json.tmp
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+
+# --- Environment ---
+.env
+.env.local
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+.DS_Store

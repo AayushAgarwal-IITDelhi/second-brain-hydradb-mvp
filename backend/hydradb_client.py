@@ -18,12 +18,17 @@ Recall contract (JSON body): tenant_id, sub_tenant_id, query, top_k.
 If the deployment rejects `top_k`, flip RECALL_TOP_K_FIELD below.
 """
 
+import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
 from errors import HydraDBError, UpstreamTimeoutError
+from logging_config import get_logger
+from retry import retry, RetryExhausted
+
+logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------- #
@@ -32,6 +37,31 @@ from errors import HydraDBError, UpstreamTimeoutError
 # print a clear hint pointing here whenever the server returns a 4xx.
 # ---------------------------------------------------------------------- #
 RECALL_TOP_K_FIELD = "top_k"
+
+
+# Retry-wrapped POST used by upload_knowledge.  Retries on network-level
+# transients (timeout, connection reset) but not on auth or 4xx errors.
+@retry(
+    service="hydradb",
+    max_attempts=3,
+    initial_delay=1.0,
+    retryable_exceptions=(requests.Timeout, requests.ConnectionError, OSError),
+)
+def _post_upload(url: str, headers: dict, data: dict, files: list) -> requests.Response:
+    return requests.post(url, headers=headers, data=data, files=files, timeout=120)
+
+
+# Retry-wrapped POST used by HydraDBClient.full_recall.  Operates at the raw
+# requests level so exception translation in full_recall stays clean and tests
+# always see HydraDBError / UpstreamTimeoutError (never RetryExhausted).
+@retry(
+    service="hydradb",
+    max_attempts=3,
+    initial_delay=1.0,
+    retryable_exceptions=(requests.Timeout, requests.ConnectionError, OSError),
+)
+def _post_recall(url: str, headers: dict, payload: dict) -> requests.Response:
+    return requests.post(url, headers=headers, json=payload, timeout=60)
 
 
 # ---------------------------------------------------------------------- #
@@ -153,7 +183,7 @@ class HydraDBClient:
         Returns the parsed HydraDB response dict on success, or {} on failure.
         """
         if not files:
-            print("[hydradb] No files to upload.")
+            logger.debug('hydradb_upload_skipped', extra={'reason': 'no_files'})
             return {}
 
         url = f"{self.base_url}/ingestion/upload_knowledge"
@@ -180,20 +210,21 @@ class HydraDBClient:
 
         # ------------------------------------------------------------------
         try:
-            response = requests.post(
+            response = _post_upload(
                 url,
                 headers=self._auth_headers(),
                 data=data,
                 files=multipart_files,
-                timeout=120,
             )
-        except requests.RequestException as e:
-            print(f"[hydradb] Network error talking to HydraDB: {e}")
+        except (requests.RequestException, RetryExhausted) as e:
+            logger.warning('hydradb_upload_network_error', extra={'error': type(e).__name__})
             return {}
 
-        # Always print the raw response so failures are easy to debug.
-        print(f"[hydradb] POST {url} -> HTTP {response.status_code}")
-        print(f"[hydradb] Response body: {response.text}")
+        level = logging.DEBUG if response.status_code < 400 else logging.WARNING
+        logger.log(level, 'hydradb_upload_response', extra={
+            'http_status': response.status_code,
+            'file_count': len(files),
+        })
 
         if response.status_code >= 400:
             return {}
@@ -201,34 +232,28 @@ class HydraDBClient:
         try:
             payload = response.json()
         except ValueError:
-            print("[hydradb] Response was not JSON.")
+            logger.warning('hydradb_upload_non_json', extra={'http_status': response.status_code})
             return {}
 
-        # ----- Per-file logging -------------------------------------------
-        # Print one line per result so individual failures are easy to spot,
-        # regardless of how we end up counting the batch totals.
         results = payload.get("results")
         if isinstance(results, list):
             for i, r in enumerate(results):
-                status = (r.get("status") or "").lower() or "unknown"
-                ref = (
-                    r.get("id")
-                    or r.get("doc_id")
-                    or r.get("filename")
-                    or f"file_{i}"
-                )
-                err = r.get("error")
-                err_suffix = f" error={err!r}" if err else ""
-                print(f"[hydradb] result {i}: ref={ref} status={status}{err_suffix}")
+                status_str = (r.get("status") or "").lower() or "unknown"
+                logger.debug('hydradb_upload_result', extra={
+                    'result_index': i,
+                    'status': status_str,
+                    'has_error': bool(r.get("error")),
+                })
 
-        # ----- Batch totals (uses shared helper) --------------------------
         ok, bad = summarize_upload_response(payload, batch_size=len(files))
         source = (
             "server-reported"
             if ("success_count" in payload or "failed_count" in payload)
             else "derived"
         )
-        print(f"[hydradb] batch summary ({source}): {ok} ok, {bad} failed")
+        logger.info('hydradb_upload_batch_summary', extra={
+            'ok': ok, 'failed': bad, 'count_source': source,
+        })
 
         return payload
 
@@ -239,13 +264,14 @@ class HydraDBClient:
         """
         Call POST /recall/full_recall and return the parsed JSON response.
 
-        Raises:
-            HydraDBError          on non-2xx, empty query, or bad JSON.
-            UpstreamTimeoutError  when the request times out.
+        Network retries (3 attempts, exponential backoff) are handled by the
+        module-level _post_recall helper so exception translation here always
+        yields stable types regardless of how many retries were attempted.
 
-        Operators can still see the full HydraDB error body in stdout
-        via the log line we print here; the exception only carries a
-        friendly summary back to the caller.
+        Raises:
+            HydraDBError          on non-2xx, empty query, bad JSON, or network
+                                  failure (including exhausted retries).
+            UpstreamTimeoutError  when all attempts time out.
         """
         if not query or not query.strip():
             raise HydraDBError(
@@ -266,31 +292,41 @@ class HydraDBClient:
         }
 
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            response = _post_recall(url, headers, payload)
         except requests.Timeout as e:
+            logger.warning('hydradb_recall_timeout', extra={'error': type(e).__name__})
             raise UpstreamTimeoutError(
                 log_context=f"HydraDB full_recall timed out: {e}",
             )
+        except RetryExhausted as e:
+            # All retry attempts failed — surface as appropriate typed error.
+            cause = e.__cause__
+            if isinstance(cause, requests.Timeout):
+                logger.warning('hydradb_recall_timeout', extra={'error': 'RetryExhausted(Timeout)'})
+                raise UpstreamTimeoutError(
+                    log_context=f"HydraDB recall timed out after retries: {cause}",
+                ) from e
+            logger.warning('hydradb_recall_network_error', extra={'error': 'RetryExhausted'})
+            raise HydraDBError(
+                log_context=f"network error during full_recall after retries: {cause}",
+            ) from e
         except requests.RequestException as e:
+            logger.warning('hydradb_recall_network_error', extra={'error': type(e).__name__})
             raise HydraDBError(
                 log_context=f"network error during full_recall: {e}",
             )
 
-        print(f"[hydradb] POST {url} -> HTTP {response.status_code}")
+        logger.debug('hydradb_recall_response', extra={'http_status': response.status_code})
 
         if response.status_code >= 400:
-            # Print operator-facing detail to stdout but don't echo it to
-            # the user — that body can include long stack traces.
-            print(f"[hydradb] Response body: {response.text}")
-            print(
-                f"[hydradb] HINT: HydraDB rejected the request. If the error "
-                f"mentions '{RECALL_TOP_K_FIELD}' or an unknown field, change "
-                f"RECALL_TOP_K_FIELD at the top of hydradb_client.py "
-                f"(e.g. to 'max_results')."
-            )
+            logger.warning('hydradb_recall_error', extra={
+                'http_status': response.status_code,
+                'top_k_field': RECALL_TOP_K_FIELD,
+            })
             raise HydraDBError(
                 detail=f"Knowledge backend returned HTTP {response.status_code}.",
                 log_context=f"full_recall HTTP {response.status_code} body={response.text[:400]}",
+                upstream_status=response.status_code,
             )
 
         try:
