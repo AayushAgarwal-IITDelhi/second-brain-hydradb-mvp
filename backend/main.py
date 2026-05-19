@@ -35,6 +35,7 @@ from auth import require_api_key  # noqa: E402
 from date_utils import parse_date_query  # noqa: E402
 from errors import AppError, LLMError, UpstreamTimeoutError, app_error_handler  # noqa: E402
 from llm import stream_grounded_answer  # noqa: E402
+from logging_config import configure_logging, get_logger  # noqa: E402
 from prompts import INSUFFICIENT_CONTEXT_ANSWER  # noqa: E402
 from query_cache import build_cache_key, get_cached, put as cache_put  # noqa: E402
 from query_rewriter import rewrite_query  # noqa: E402
@@ -49,9 +50,13 @@ from recall import (  # noqa: E402
     finalize_answer,
     prepare_recall_context,
 )
+from request_context import RequestContextMiddleware  # noqa: E402
 from scheduler import auto_ingest_enabled, start_scheduler, stop_scheduler  # noqa: E402
 from slack_signature import verify_slack_signature  # noqa: E402
 from startup import validate_required_env  # noqa: E402
+
+configure_logging(level=os.getenv('LOG_LEVEL', 'INFO'))
+logger = get_logger(__name__)
 
 
 # ---------- CORS configuration ---------- #
@@ -64,7 +69,6 @@ def _parse_cors_origins() -> List[str]:
 
 
 ALLOWED_ORIGINS = _parse_cors_origins()
-print(f"[main] CORS allowed origins: {ALLOWED_ORIGINS}")
 
 
 # ---------- Lifespan: startup checks + scheduler ---------- #
@@ -90,6 +94,7 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "X-API-Key"],
 )
+app.add_middleware(RequestContextMiddleware)
 
 
 # ---------- Request validation ---------- #
@@ -559,7 +564,7 @@ def query_stream(req: QueryRequest, request: Request) -> StreamingResponse:
                 "detail": "Unexpected server error.",
                 "error_type": "internal_error",
             })
-            print(f"[query_stream] unexpected: {type(e).__name__}: {e}")
+            logger.error('query_stream_unexpected_error', extra={'error': type(e).__name__})
             return
 
         if not prepared["ready"]:
@@ -604,7 +609,7 @@ def query_stream(req: QueryRequest, request: Request) -> StreamingResponse:
                 "detail": "Unexpected LLM error.",
                 "error_type": "internal_error",
             })
-            print(f"[query_stream] llm unexpected: {type(e).__name__}: {e}")
+            logger.error('query_stream_llm_error', extra={'error': type(e).__name__})
             return
 
         # ----- Finalize and emit done ---------------------------------
@@ -714,7 +719,7 @@ async def slack_events(
         # duplicates so Slack stops retrying.
         event_id = payload.get("event_id") or ""
         if _event_already_seen(event_id):
-            print(f"[slack/events] duplicate event_id={event_id}; ack'd")
+            logger.debug('slack_events_duplicate', extra={'event_id': event_id})
             return JSONResponse(content={"ok": True})
 
         event = payload.get("event") or {}
@@ -724,7 +729,7 @@ async def slack_events(
         return JSONResponse(content={"ok": True})
 
     # Unknown top-level type. Ack 200 so Slack stops retrying.
-    print(f"[slack/events] ignoring payload type={payload.get('type')!r}")
+    logger.debug('slack_events_unknown_type', extra={'payload_type': payload.get('type')})
     return JSONResponse(content={"ok": True})
 
 

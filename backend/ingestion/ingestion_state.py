@@ -42,11 +42,14 @@ history (one-time cost) before incremental kicks in.
 
 import fcntl
 import json
+import logging
 import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Generator, Optional
+
+logger = logging.getLogger(__name__)
 
 
 STATE_VERSION = 2
@@ -84,10 +87,9 @@ class IngestionState:
             with self.path.open("r", encoding="utf-8") as f:
                 raw = json.load(f)
         except (OSError, json.JSONDecodeError) as e:
-            print(
-                f"[state] Could not read state file at {self.path}: {e}. "
-                f"Starting with empty state."
-            )
+            logger.warning('ingestion_state_load_failed', extra={
+                'path': str(self.path), 'error': type(e).__name__,
+            })
             return
 
         if not isinstance(raw, dict):

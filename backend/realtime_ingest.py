@@ -36,6 +36,9 @@ from ingestion.ingestion_state import (
 )
 from ingestion.normalize import is_noise
 from ingestion.slack_client import SlackClientWrapper
+from logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------- #
@@ -111,7 +114,7 @@ def _resolve_bot_user_id(slack: SlackClientWrapper) -> Optional[str]:
             uid = resp.get("user_id") or ""
             _bot_user_id = uid if isinstance(uid, str) else ""
         except Exception as e:  # noqa: BLE001
-            print(f"[realtime] auth.test failed (continuing without bot_user_id): {e}")
+            logger.warning('realtime_auth_test_failed', extra={'error': type(e).__name__})
             _bot_user_id = ""
     return _bot_user_id or None
 
@@ -132,47 +135,40 @@ def process_slack_event(event: Dict[str, Any]) -> None:
     crashes the webhook worker.
     """
     if not _realtime_enabled():
-        print("[realtime] REALTIME_INGEST_ENABLED=false; skipping.")
+        logger.debug('realtime_disabled')
         return
 
     try:
         _process_slack_event_inner(event)
     except Exception as e:  # noqa: BLE001
-        # Print but don't re-raise. The webhook has already 200'd to Slack.
-        print(f"[realtime] event handler failed: {type(e).__name__}: {e}")
+        logger.error('realtime_event_handler_failed', extra={'error': type(e).__name__})
 
 
 def _process_slack_event_inner(event: Dict[str, Any]) -> None:
     event_type = event.get("type")
     if event_type != "message":
-        print(f"[realtime] ignoring event type={event_type}")
+        logger.debug('realtime_event_ignored', extra={'event_type': event_type})
         return
 
-    # ----- Filter noisy subtypes -----
-    # Most subtyped messages are not worth ingesting in realtime:
-    #   - message_changed / message_deleted: we don't update/delete yet
-    #   - channel_join/leave/topic/etc: handled by is_noise()
-    #   - bot_message: ignored to prevent loops
     subtype = event.get("subtype")
     if subtype == "message_changed" or subtype == "message_deleted":
-        print(f"[realtime] ignoring subtype={subtype}")
+        logger.debug('realtime_event_ignored', extra={'subtype': subtype})
         return
     if subtype == "bot_message":
-        print("[realtime] ignoring bot_message")
+        logger.debug('realtime_event_ignored', extra={'subtype': 'bot_message'})
         return
     if is_noise(event):
-        print(f"[realtime] ignoring noise subtype={subtype}")
+        logger.debug('realtime_event_ignored', extra={'reason': 'noise', 'subtype': subtype})
         return
 
     channel_id = event.get("channel")
     if not channel_id:
-        print("[realtime] event has no channel; skipping")
+        logger.debug('realtime_event_no_channel')
         return
 
-    # ----- Channel allow-list -----
     allowed = _allowed_channel_ids()
     if allowed and channel_id not in allowed:
-        print(f"[realtime] channel {channel_id} not in SLACK_CHANNEL_IDS; skipping")
+        logger.debug('realtime_channel_not_allowed', extra={'channel_id': channel_id})
         return
 
     # ----- Build clients -----
@@ -182,13 +178,13 @@ def _process_slack_event_inner(event: Dict[str, Any]) -> None:
     # ----- Bot-loop guard -----
     bot_user_id = _resolve_bot_user_id(slack)
     if event.get("bot_id"):
-        print("[realtime] ignoring event with bot_id set")
+        logger.debug('realtime_event_ignored', extra={'reason': 'bot_id_set'})
         return
     if bot_user_id and event.get("user") == bot_user_id:
-        print("[realtime] ignoring event from our own bot user")
+        logger.debug('realtime_event_ignored', extra={'reason': 'own_bot_user'})
         return
     if not (event.get("text") or "").strip():
-        print("[realtime] empty text; skipping")
+        logger.debug('realtime_event_ignored', extra={'reason': 'empty_text'})
         return
 
     channel_name = fetch_channel_name(slack, channel_id)
@@ -227,11 +223,11 @@ def _ingest_standalone(
     with _state_lock:
         state = IngestionState(STATE_PATH)
         if state.has(stable_key):
-            print(f"[realtime] already ingested {stable_key}; skipping")
+            logger.debug('realtime_already_ingested', extra={'stable_key': stable_key})
             return
 
     prepared = build_message_file(message, channel_id, channel_name, slack)
-    print(f"[realtime] uploading standalone {stable_key}")
+    logger.info('realtime_uploading', extra={'stable_key': stable_key, 'doc_type': 'message'})
 
     response = hydra.upload_knowledge([prepared])
     ok, _bad = summarize_upload_response(
@@ -239,7 +235,7 @@ def _ingest_standalone(
         batch_size=1,
     )
     if ok < 1:
-        print(f"[realtime] upload failed for {stable_key}; will retry on next poll")
+        logger.warning('realtime_upload_failed', extra={'stable_key': stable_key})
         return
 
     with _state_lock:
@@ -273,21 +269,21 @@ def _ingest_thread(
         channel_id=channel_id, thread_ts=thread_ts,
     )
     if not replies:
-        print(f"[realtime] no replies returned for thread {thread_ts}; skipping")
+        logger.debug('realtime_thread_no_replies', extra={'thread_ts': thread_ts})
         return
 
-    # The first message in replies IS the parent (Slack's contract).
     parent = replies[0]
     if is_noise(parent):
-        print("[realtime] thread parent is noise; skipping")
+        logger.debug('realtime_thread_parent_noise')
         return
 
     prepared = build_thread_file(parent, replies, channel_id, channel_name, slack)
     stable_key = prepared["stable_key"]
-    print(
-        f"[realtime] uploading thread {stable_key} "
-        f"({len(replies)} message(s) including parent)"
-    )
+    logger.info('realtime_uploading', extra={
+        'stable_key': stable_key,
+        'doc_type': 'thread',
+        'reply_count': len(replies),
+    })
 
     response = hydra.upload_knowledge([prepared])
     ok, _bad = summarize_upload_response(
@@ -295,7 +291,7 @@ def _ingest_thread(
         batch_size=1,
     )
     if ok < 1:
-        print(f"[realtime] upload failed for {stable_key}; will retry on next poll")
+        logger.warning('realtime_upload_failed', extra={'stable_key': stable_key})
         return
 
     with _state_lock:
