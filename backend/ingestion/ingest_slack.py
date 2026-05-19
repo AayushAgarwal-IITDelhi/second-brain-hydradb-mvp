@@ -152,7 +152,7 @@ def build_message_file(
 
     filename = (
         f"slack_{_safe_filename_part(channel_name)}_"
-        f"{_ts_for_filename(ts)}.md"
+        f"msg_{_ts_for_filename(ts)}.md"
     )
     return {
         "filename": filename,
@@ -230,7 +230,7 @@ def build_thread_file(
     content = "\n".join(lines)
     filename = (
         f"slack_{_safe_filename_part(channel_name)}_"
-        f"{_ts_for_filename(thread_ts)}.md"
+        f"thread_{_ts_for_filename(thread_ts)}.md"
     )
     return {
         "filename": filename,

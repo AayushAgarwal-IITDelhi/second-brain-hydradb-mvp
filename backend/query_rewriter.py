@@ -244,13 +244,36 @@ def rewrite_query(
     return result
 
 
+def _clean_captured_name(raw: str) -> str:
+    """
+    Strip trailing words that are not Title-Case.
+
+    Person-name patterns are compiled with re.IGNORECASE, so the optional
+    second-word group can accidentally absorb lowercase stop-words like
+    "the" or prepositions like "in".  Any trailing word whose first
+    character is lowercase was captured only because of IGNORECASE — it
+    is not a proper noun — so we strip it.
+
+    Examples:
+        "Charlie the" → "Charlie"
+        "Eve in"      → "Eve"
+        "Praveer Nema" → "Praveer Nema"  (both words start uppercase)
+    """
+    parts = raw.split()
+    while len(parts) > 1 and not parts[-1][0].isupper():
+        parts = parts[:-1]
+    return " ".join(parts)
+
+
 def _detect_person(text: str) -> Tuple[Optional[str], Optional[str]]:
     """Return (name, confidence) or (None, None)."""
-    name = _find_first_match(_PERSON_STRONG_PATTERNS, text)
+    raw = _find_first_match(_PERSON_STRONG_PATTERNS, text)
+    name = _clean_captured_name(raw) if raw else None
     if name and not _is_blocked_person(name):
         return name.strip(), "strong"
 
-    name = _find_first_match(_PERSON_WEAK_PATTERNS, text)
+    raw = _find_first_match(_PERSON_WEAK_PATTERNS, text)
+    name = _clean_captured_name(raw) if raw else None
     if name and not _is_blocked_person(name):
         return name.strip(), "weak"
 
