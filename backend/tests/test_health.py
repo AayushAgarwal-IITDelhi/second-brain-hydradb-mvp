@@ -194,6 +194,7 @@ class TestRunCheck:
         class _BrokenCheck(HealthCheck):
             name = "broken"
             required = False
+
             async def check(self) -> HealthResult:
                 raise RuntimeError("oops")
 
@@ -254,6 +255,7 @@ class TestReadiness:
             def __init__(self, name, req):
                 self.name = name
                 self.required = req
+
             async def check(self) -> HealthResult:
                 called.append(self.name)
                 return HealthResult(STATUS_OK)
@@ -547,6 +549,7 @@ class TestRegistration:
         class _FutureCheck(HealthCheck):
             name = "future_service"
             required = False
+
             async def check(self) -> HealthResult:
                 return HealthResult(status=STATUS_OK, message="plugged in")
 
@@ -566,6 +569,7 @@ class TestRegistration:
         class _EvidenceCheck(HealthCheck):
             name = "evidence_check"
             required = False
+
             async def check(self) -> HealthResult:
                 called.append(True)
                 return HealthResult(status=STATUS_OK)

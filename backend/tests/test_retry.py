@@ -149,7 +149,7 @@ class TestShouldRetry:
     def _check(self, exc, retryable_exc=(ConnectionError,),
                non_retryable_exc=()):
         return _should_retry(exc, retryable_exc, self._retryable_codes,
-                              non_retryable_exc)
+                             non_retryable_exc)
 
     def test_connection_error_retried(self):
         assert self._check(ConnectionError("network")) is True
@@ -186,7 +186,8 @@ class TestShouldRetry:
         assert self._check(exc, retryable_exc=()) is True
 
     def test_explicit_non_retryable_exception(self):
-        class MyError(Exception): pass
+        class MyError(Exception):
+            pass
         exc = MyError("stop")
         assert self._check(exc, retryable_exc=(Exception,),
                            non_retryable_exc=(MyError,)) is False
@@ -290,7 +291,8 @@ class TestSyncRetry:
         assert sleep_calls[1] == pytest.approx(2.0)
 
     def test_non_retryable_exception_param(self):
-        class Boom(Exception): pass
+        class Boom(Exception):
+            pass
         call_count = [0]
 
         @retry(service="test", max_attempts=3, initial_delay=0.0, jitter=False,
