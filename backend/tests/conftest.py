@@ -51,6 +51,7 @@ def _patched_app():
         patch("scheduler.stop_scheduler"),
     ):
         import main as _main  # noqa: PLC0415
+
         return _main.app
 
 

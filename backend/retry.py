@@ -46,6 +46,7 @@ RETRYABLE_STATUS_CODES: FrozenSet[int] = frozenset({429, 500, 502, 503, 504})
 NON_RETRYABLE_STATUS_CODES: FrozenSet[int] = frozenset({400, 401, 403, 404, 422})
 
 from logging_config import get_logger as _get_logger  # noqa: E402 (after constants)
+
 _logger = _get_logger(__name__)
 
 _DEFAULT_RETRYABLE_EXCEPTIONS: Tuple[Type[Exception], ...] = (
@@ -176,6 +177,7 @@ def retry(
 
     def decorator(func: Callable) -> Callable:
         if inspect.iscoroutinefunction(func):
+
             @functools.wraps(func)
             async def _async(*args: Any, **kwargs: Any) -> Any:
                 for attempt in range(1, max_attempts + 1):
@@ -186,25 +188,29 @@ def retry(
                         return result
                     except Exception as exc:
                         if not _should_retry(
-                            exc, retryable_exceptions, _retryable_codes,
+                            exc,
+                            retryable_exceptions,
+                            _retryable_codes,
                             non_retryable_exceptions,
                         ):
                             raise
                         if attempt == max_attempts:
                             _log("retry_exhausted", service, attempt, error=str(exc))
-                            raise RetryExhausted(
-                                f"[{service}] exhausted {max_attempts} attempts: {exc}"
-                            ) from exc
+                            raise RetryExhausted(f"[{service}] exhausted {max_attempts} attempts: {exc}") from exc
                         delay = _compute_delay(
-                            attempt, initial_delay, max_delay,
-                            exponential_multiplier, jitter,
+                            attempt,
+                            initial_delay,
+                            max_delay,
+                            exponential_multiplier,
+                            jitter,
                         )
-                        _log("retry_attempt", service, attempt,
-                             delay_seconds=delay, error=str(exc))
+                        _log("retry_attempt", service, attempt, delay_seconds=delay, error=str(exc))
                         await asyncio.sleep(delay)
+
             return _async
 
         else:
+
             @functools.wraps(func)
             def _sync(*args: Any, **kwargs: Any) -> Any:
                 for attempt in range(1, max_attempts + 1):
@@ -215,22 +221,25 @@ def retry(
                         return result
                     except Exception as exc:
                         if not _should_retry(
-                            exc, retryable_exceptions, _retryable_codes,
+                            exc,
+                            retryable_exceptions,
+                            _retryable_codes,
                             non_retryable_exceptions,
                         ):
                             raise
                         if attempt == max_attempts:
                             _log("retry_exhausted", service, attempt, error=str(exc))
-                            raise RetryExhausted(
-                                f"[{service}] exhausted {max_attempts} attempts: {exc}"
-                            ) from exc
+                            raise RetryExhausted(f"[{service}] exhausted {max_attempts} attempts: {exc}") from exc
                         delay = _compute_delay(
-                            attempt, initial_delay, max_delay,
-                            exponential_multiplier, jitter,
+                            attempt,
+                            initial_delay,
+                            max_delay,
+                            exponential_multiplier,
+                            jitter,
                         )
-                        _log("retry_attempt", service, attempt,
-                             delay_seconds=delay, error=str(exc))
+                        _log("retry_attempt", service, attempt, delay_seconds=delay, error=str(exc))
                         time.sleep(delay)
+
             return _sync
 
     return decorator

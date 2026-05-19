@@ -37,7 +37,6 @@ already-resolved terms".
 import re
 from typing import Any, Dict, Optional, Tuple
 
-
 # ---------------------------------------------------------------------- #
 # Tokens we never want to surface as a "person"
 # ---------------------------------------------------------------------- #
@@ -45,21 +44,69 @@ from typing import Any, Dict, Optional, Tuple
 # We compare case-insensitively, so list lowercase entries.
 _PERSON_BLOCKLIST = {
     # Product / tech terms that often appear Title-Cased
-    "slack", "hydradb", "openai", "openrouter", "groq", "claude",
-    "second", "brain", "api", "llm", "sql", "url", "json",
+    "slack",
+    "hydradb",
+    "openai",
+    "openrouter",
+    "groq",
+    "claude",
+    "second",
+    "brain",
+    "api",
+    "llm",
+    "sql",
+    "url",
+    "json",
     # Generic role nouns
-    "team", "engineer", "engineering", "manager", "designer",
-    "customer", "customers", "users", "user", "people",
+    "team",
+    "engineer",
+    "engineering",
+    "manager",
+    "designer",
+    "customer",
+    "customers",
+    "users",
+    "user",
+    "people",
     # Time / calendar tokens
-    "monday", "tuesday", "wednesday", "thursday", "friday",
-    "saturday", "sunday",
-    "january", "february", "march", "april", "may", "june", "july",
-    "august", "september", "october", "november", "december",
-    "today", "yesterday", "tomorrow",
-    "q1", "q2", "q3", "q4",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+    "today",
+    "yesterday",
+    "tomorrow",
+    "q1",
+    "q2",
+    "q3",
+    "q4",
     # Question / determiner words that can get captured by `did X` patterns
-    "anyone", "someone", "everybody", "anybody", "nobody", "everyone",
-    "that", "this", "those", "these", "the",
+    "anyone",
+    "someone",
+    "everybody",
+    "anybody",
+    "nobody",
+    "everyone",
+    "that",
+    "this",
+    "those",
+    "these",
+    "the",
 }
 
 # Lowercase tokens that look like channel names — we list a few common
@@ -67,9 +114,22 @@ _PERSON_BLOCKLIST = {
 # doesn't mistake "product" for a person. The BLOCKLIST above already
 # covers the person-vs-channel disambiguation for these.
 _COMMON_CHANNEL_HINTS = {
-    "general", "random", "product", "engineering", "design",
-    "sales", "marketing", "support", "ops", "infra", "platform",
-    "backend", "frontend", "data", "growth", "hr",
+    "general",
+    "random",
+    "product",
+    "engineering",
+    "design",
+    "sales",
+    "marketing",
+    "support",
+    "ops",
+    "infra",
+    "platform",
+    "backend",
+    "frontend",
+    "data",
+    "growth",
+    "hr",
 }
 # Add channel hints to the person blocklist too, so a phrase like
 # "what did product say" doesn't infer person="Product".
@@ -93,7 +153,10 @@ _CHANNEL = r"#?([a-z][a-z0-9\-]{1,60})"
 # ---------- PERSON: strong patterns ----------
 _PERSON_STRONG_PATTERNS = [
     # "what did X say/mention/discuss/think/decide"
-    re.compile(rf"\bwhat\s+did\s+{_NAME}\s+(?:say|said|mention|discuss|think|decide|propose|comment|share|post|write)\b", re.IGNORECASE),
+    re.compile(
+        rf"\bwhat\s+did\s+{_NAME}\s+(?:say|said|mention|discuss|think|decide|propose|comment|share|post|write)\b",
+        re.IGNORECASE,
+    ),
     # "did X say/mention/..."
     re.compile(rf"\bdid\s+{_NAME}\s+(?:say|mention|discuss|propose|comment|share|post|write)\b", re.IGNORECASE),
     # "messages from X" / "message from X" / "post from X"
@@ -145,15 +208,42 @@ _CHANNEL_WEAK_PATTERNS: list = []
 # follow "in/from/to". These are stopwords or time anchors that look
 # slug-shaped after lowercasing.
 _CHANNEL_BLOCKLIST = {
-    "the", "a", "an", "any", "some", "this", "that", "those", "these",
-    "general",   # too generic; if it's a real channel, the user will say "#general"
-    "meeting", "call", "discussion", "thread", "channel", "chat",
-    "monday", "tuesday", "wednesday", "thursday", "friday",
-    "saturday", "sunday",
-    "today", "yesterday", "tomorrow",
-    "last", "next", "this",
-    "morning", "afternoon", "evening",
-    "week", "month", "year", "quarter",
+    "the",
+    "a",
+    "an",
+    "any",
+    "some",
+    "this",
+    "that",
+    "those",
+    "these",
+    "general",  # too generic; if it's a real channel, the user will say "#general"
+    "meeting",
+    "call",
+    "discussion",
+    "thread",
+    "channel",
+    "chat",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+    "today",
+    "yesterday",
+    "tomorrow",
+    "last",
+    "next",
+    "this",
+    "morning",
+    "afternoon",
+    "evening",
+    "week",
+    "month",
+    "year",
+    "quarter",
 }
 
 
@@ -210,10 +300,10 @@ def rewrite_query(
     wins. We still emit the *other* axis if it was inferred.
     """
     result: Dict[str, Any] = {
-        "inferred_person":          None,
-        "inferred_channel":         None,
-        "person_confidence":        None,
-        "channel_confidence":       None,
+        "inferred_person": None,
+        "inferred_channel": None,
+        "person_confidence": None,
+        "channel_confidence": None,
         "retrieval_biases_applied": [],
     }
     if not question or not question.strip():
@@ -227,9 +317,7 @@ def rewrite_query(
         if person:
             result["inferred_person"] = person
             result["person_confidence"] = confidence
-            result["retrieval_biases_applied"].append(
-                f"person:{confidence}"
-            )
+            result["retrieval_biases_applied"].append(f"person:{confidence}")
 
     # ---------- channel ----------
     if not (explicit_channel and explicit_channel.strip()):
@@ -237,9 +325,7 @@ def rewrite_query(
         if channel:
             result["inferred_channel"] = channel
             result["channel_confidence"] = confidence
-            result["retrieval_biases_applied"].append(
-                f"channel:{confidence}"
-            )
+            result["retrieval_biases_applied"].append(f"channel:{confidence}")
 
     return result
 

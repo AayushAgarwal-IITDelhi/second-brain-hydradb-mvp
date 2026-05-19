@@ -14,19 +14,86 @@ unit-testable.
 import re
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
-
 # Words too common to be useful as exact-match terms. Short list — we don't
 # need NLP-grade stopword removal, just enough to stop noise like "the" or
 # "what" from dominating the ranking.
 STOPWORDS: Set[str] = {
-    "a", "an", "and", "are", "as", "at", "be", "by", "do", "did", "for",
-    "from", "had", "has", "have", "how", "i", "if", "in", "into", "is",
-    "it", "its", "just", "me", "my", "no", "not", "of", "on", "or", "our",
-    "out", "should", "so", "some", "than", "that", "the", "their", "them",
-    "then", "there", "these", "they", "this", "to", "too", "us", "was",
-    "we", "were", "what", "when", "where", "which", "who", "whom", "why",
-    "will", "with", "would", "you", "your", "about", "any", "been", "but",
-    "can", "could", "did", "does", "doing", "done", "go", "going",
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "do",
+    "did",
+    "for",
+    "from",
+    "had",
+    "has",
+    "have",
+    "how",
+    "i",
+    "if",
+    "in",
+    "into",
+    "is",
+    "it",
+    "its",
+    "just",
+    "me",
+    "my",
+    "no",
+    "not",
+    "of",
+    "on",
+    "or",
+    "our",
+    "out",
+    "should",
+    "so",
+    "some",
+    "than",
+    "that",
+    "the",
+    "their",
+    "them",
+    "then",
+    "there",
+    "these",
+    "they",
+    "this",
+    "to",
+    "too",
+    "us",
+    "was",
+    "we",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "whom",
+    "why",
+    "will",
+    "with",
+    "would",
+    "you",
+    "your",
+    "about",
+    "any",
+    "been",
+    "but",
+    "can",
+    "could",
+    "did",
+    "does",
+    "doing",
+    "done",
+    "go",
+    "going",
 }
 
 # Tokens are alphanumeric + underscore + hyphen.
@@ -183,7 +250,8 @@ def rerank_chunks(
     for chunk in chunks_with_meta:
         chunk["_hits"] = count_keyword_hits(chunk.get("text", ""), terms)
         chunk["_bias"] = _metadata_bias_score(
-            chunk.get("source_card", {}), metadata_bias,
+            chunk.get("source_card", {}),
+            metadata_bias,
         )
     matched_count = sum(1 for c in chunks_with_meta if c["_hits"] > 0)
 
@@ -212,16 +280,10 @@ def rerank_chunks(
         return ranked[:top_k], 0
 
     if mode == "hybrid":
-        max_ts = max(
-            (c.get("timestamp_float") or 0.0) for c in chunks_with_meta
-        ) or 1.0
+        max_ts = max((c.get("timestamp_float") or 0.0) for c in chunks_with_meta) or 1.0
         ranked = sorted(
             chunks_with_meta,
-            key=lambda c: -(
-                c["_hits"] * 100
-                + c["_bias"] * 50
-                + (c.get("timestamp_float") or 0.0) / max_ts
-            ),
+            key=lambda c: -(c["_hits"] * 100 + c["_bias"] * 50 + (c.get("timestamp_float") or 0.0) / max_ts),
         )
         return ranked[:top_k], matched_count
 

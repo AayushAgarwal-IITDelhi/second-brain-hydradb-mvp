@@ -112,23 +112,18 @@ async def _run_check(check: HealthCheck) -> Tuple[str, HealthResult]:
     """Run one check within the timeout budget.  Never raises."""
     _log("health_check_started", check.name)
     try:
-        result = await asyncio.wait_for(
-            check.check(), timeout=CHECK_TIMEOUT_SECONDS
-        )
+        result = await asyncio.wait_for(check.check(), timeout=CHECK_TIMEOUT_SECONDS)
         _log("health_check_completed", check.name, status=result.status)
         return check.name, result
     except asyncio.TimeoutError:
-        _log("health_check_failed", check.name,
-             reason=f"timed out after {CHECK_TIMEOUT_SECONDS}s")
+        _log("health_check_failed", check.name, reason=f"timed out after {CHECK_TIMEOUT_SECONDS}s")
         return check.name, HealthResult(
             status=STATUS_ERROR,
             message=f"check timed out after {CHECK_TIMEOUT_SECONDS}s",
         )
     except Exception as exc:
         _log("health_check_failed", check.name, reason=str(exc)[:200])
-        return check.name, HealthResult(
-            status=STATUS_ERROR, message=str(exc)[:200]
-        )
+        return check.name, HealthResult(status=STATUS_ERROR, message=str(exc)[:200])
 
 
 # ---------------------------------------------------------------------------
@@ -179,9 +174,7 @@ class HydraHealthCheck(HealthCheck):
                 message="HYDRADB_API_KEY or HYDRADB_TENANT_ID not configured",
             )
 
-        base_url = os.getenv(
-            "HYDRADB_BASE_URL", "https://api.hydradb.com"
-        ).rstrip("/")
+        base_url = os.getenv("HYDRADB_BASE_URL", "https://api.hydradb.com").rstrip("/")
         sub_tenant_id = os.getenv("HYDRADB_SUB_TENANT_ID", "slack-second-brain")
         url = f"{base_url}/recall/full_recall"
         headers = {
@@ -197,24 +190,25 @@ class HydraHealthCheck(HealthCheck):
 
         start = time.monotonic()
         try:
-            resp = await asyncio.to_thread(
-                lambda: requests.post(url, headers=headers, json=body, timeout=2.5)
-            )
+            resp = await asyncio.to_thread(lambda: requests.post(url, headers=headers, json=body, timeout=2.5))
             latency_ms = (time.monotonic() - start) * 1000
 
             if resp.status_code == 401:
                 return HealthResult(
-                    status=STATUS_ERROR, latency_ms=latency_ms,
+                    status=STATUS_ERROR,
+                    latency_ms=latency_ms,
                     message="authentication failed",
                 )
             if resp.status_code == 403:
                 return HealthResult(
-                    status=STATUS_ERROR, latency_ms=latency_ms,
+                    status=STATUS_ERROR,
+                    latency_ms=latency_ms,
                     message="forbidden",
                 )
             if resp.status_code >= 500:
                 return HealthResult(
-                    status=STATUS_ERROR, latency_ms=latency_ms,
+                    status=STATUS_ERROR,
+                    latency_ms=latency_ms,
                     message=f"server error {resp.status_code}",
                 )
             return HealthResult(status=STATUS_OK, latency_ms=latency_ms)
@@ -222,19 +216,22 @@ class HydraHealthCheck(HealthCheck):
         except requests.exceptions.Timeout:
             latency_ms = (time.monotonic() - start) * 1000
             return HealthResult(
-                status=STATUS_ERROR, latency_ms=latency_ms,
+                status=STATUS_ERROR,
+                latency_ms=latency_ms,
                 message="request timed out",
             )
         except requests.exceptions.ConnectionError as exc:
             latency_ms = (time.monotonic() - start) * 1000
             return HealthResult(
-                status=STATUS_ERROR, latency_ms=latency_ms,
+                status=STATUS_ERROR,
+                latency_ms=latency_ms,
                 message=f"connection error: {exc}",
             )
         except Exception as exc:
             latency_ms = (time.monotonic() - start) * 1000
             return HealthResult(
-                status=STATUS_ERROR, latency_ms=latency_ms,
+                status=STATUS_ERROR,
+                latency_ms=latency_ms,
                 message=str(exc)[:200],
             )
 
@@ -251,20 +248,17 @@ class LLMHealthCheck(HealthCheck):
 
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
-            return HealthResult(
-                status=STATUS_ERROR, message="OPENAI_API_KEY not configured"
-            )
+            return HealthResult(status=STATUS_ERROR, message="OPENAI_API_KEY not configured")
 
         base_url = os.getenv("OPENAI_BASE_URL") or None
         model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
         start = time.monotonic()
         try:
+
             def _call() -> None:
                 client = (
-                    openai.OpenAI(api_key=api_key, base_url=base_url)
-                    if base_url
-                    else openai.OpenAI(api_key=api_key)
+                    openai.OpenAI(api_key=api_key, base_url=base_url) if base_url else openai.OpenAI(api_key=api_key)
                 )
                 client.chat.completions.create(
                     model=model,
@@ -280,31 +274,36 @@ class LLMHealthCheck(HealthCheck):
         except openai.AuthenticationError:
             latency_ms = (time.monotonic() - start) * 1000
             return HealthResult(
-                status=STATUS_ERROR, latency_ms=latency_ms,
+                status=STATUS_ERROR,
+                latency_ms=latency_ms,
                 message="authentication failed",
             )
         except openai.PermissionDeniedError:
             latency_ms = (time.monotonic() - start) * 1000
             return HealthResult(
-                status=STATUS_ERROR, latency_ms=latency_ms,
+                status=STATUS_ERROR,
+                latency_ms=latency_ms,
                 message="permission denied",
             )
         except openai.APITimeoutError:
             latency_ms = (time.monotonic() - start) * 1000
             return HealthResult(
-                status=STATUS_ERROR, latency_ms=latency_ms,
+                status=STATUS_ERROR,
+                latency_ms=latency_ms,
                 message="request timed out",
             )
         except openai.APIConnectionError as exc:
             latency_ms = (time.monotonic() - start) * 1000
             return HealthResult(
-                status=STATUS_ERROR, latency_ms=latency_ms,
+                status=STATUS_ERROR,
+                latency_ms=latency_ms,
                 message=f"connection error: {type(exc).__name__}",
             )
         except Exception as exc:
             latency_ms = (time.monotonic() - start) * 1000
             return HealthResult(
-                status=STATUS_ERROR, latency_ms=latency_ms,
+                status=STATUS_ERROR,
+                latency_ms=latency_ms,
                 message=type(exc).__name__,
             )
 
@@ -329,6 +328,7 @@ class SlackHealthCheck(HealthCheck):
 
         start = time.monotonic()
         try:
+
             def _call():
                 return WebClient(token=token).auth_test()
 
@@ -338,7 +338,8 @@ class SlackHealthCheck(HealthCheck):
             if not resp.get("ok"):
                 error = resp.get("error", "unknown")
                 return HealthResult(
-                    status=STATUS_WARNING, latency_ms=latency_ms,
+                    status=STATUS_WARNING,
+                    latency_ms=latency_ms,
                     message=f"auth.test failed: {error}",
                 )
             return HealthResult(status=STATUS_OK, latency_ms=latency_ms)
@@ -348,13 +349,15 @@ class SlackHealthCheck(HealthCheck):
             resp_data = getattr(exc, "response", None) or {}
             err = resp_data.get("error", str(exc)) if isinstance(resp_data, dict) else str(exc)
             return HealthResult(
-                status=STATUS_WARNING, latency_ms=latency_ms,
+                status=STATUS_WARNING,
+                latency_ms=latency_ms,
                 message=f"slack error: {err}",
             )
         except Exception as exc:
             latency_ms = (time.monotonic() - start) * 1000
             return HealthResult(
-                status=STATUS_WARNING, latency_ms=latency_ms,
+                status=STATUS_WARNING,
+                latency_ms=latency_ms,
                 message=str(exc)[:200],
             )
 

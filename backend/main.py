@@ -27,7 +27,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import (  # noqa: E402
-    BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, status,
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    status,
 )
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse  # noqa: E402
@@ -40,12 +46,13 @@ from health import router as health_router  # noqa: E402
 from llm import stream_grounded_answer  # noqa: E402
 from logging_config import configure_logging, get_logger  # noqa: E402
 from prompts import INSUFFICIENT_CONTEXT_ANSWER  # noqa: E402
-from query_cache import build_cache_key, get_cached, put as cache_put  # noqa: E402
+from query_cache import build_cache_key, get_cached  # noqa: E402
+from query_cache import put as cache_put  # noqa: E402
 from query_rewriter import rewrite_query  # noqa: E402
 from rate_limit import rate_limit_dependency  # noqa: E402
 from realtime_ingest import (  # noqa: E402
-    admin_status_snapshot,
     _event_already_seen,
+    admin_status_snapshot,
     process_slack_event,
 )
 from recall import (  # noqa: E402
@@ -107,8 +114,13 @@ app.add_middleware(RequestContextMiddleware)
 
 # ---------- Request validation ---------- #
 QueryMode = Literal[
-    "default", "summary", "decisions", "action_items", "who_said",
-    "exact", "hybrid",
+    "default",
+    "summary",
+    "decisions",
+    "action_items",
+    "who_said",
+    "exact",
+    "hybrid",
 ]
 DocumentType = Literal["message", "thread"]
 HistoryRole = Literal["user", "assistant"]
@@ -122,6 +134,7 @@ MAX_CONVERSATION_HISTORY = 6
 
 class ConversationMessage(BaseModel):
     """One turn of recent chat history sent by the frontend."""
+
     model_config = ConfigDict(str_strip_whitespace=True)
 
     role: HistoryRole = Field(
@@ -133,7 +146,7 @@ class ConversationMessage(BaseModel):
         min_length=1,
         max_length=10000,
         description="The turn's text. Long assistant answers are truncated "
-                    "downstream when formatted into the prompt.",
+        "downstream when formatted into the prompt.",
     )
 
 
@@ -144,8 +157,7 @@ class QueryRequest(BaseModel):
         ...,
         min_length=3,
         max_length=2000,
-        description="The user's natural-language question (3–2000 chars, "
-                    "leading/trailing whitespace is stripped).",
+        description="The user's natural-language question (3–2000 chars, " "leading/trailing whitespace is stripped).",
     )
     top_k: int = Field(
         5,
@@ -156,15 +168,17 @@ class QueryRequest(BaseModel):
     mode: QueryMode = Field(
         "default",
         description="Answer style + retrieval strategy. 'default' is a "
-                    "concise grounded answer; 'exact' prefers literal "
-                    "keyword matches; 'hybrid' combines semantic + keyword.",
+        "concise grounded answer; 'exact' prefers literal "
+        "keyword matches; 'hybrid' combines semantic + keyword.",
     )
     channel: Optional[str] = Field(
-        None, max_length=200,
+        None,
+        max_length=200,
         description="Optional channel-name filter (e.g. 'all-second-brain').",
     )
     user: Optional[str] = Field(
-        None, max_length=200,
+        None,
+        max_length=200,
         description="Optional user-name filter.",
     )
     document_type: Optional[DocumentType] = Field(
@@ -186,10 +200,11 @@ class QueryRequest(BaseModel):
     # "after May 10"). Parsed server-side; explicit start/end_timestamp
     # win where they overlap.
     date_query: Optional[str] = Field(
-        None, max_length=200,
+        None,
+        max_length=200,
         description="Natural-language date phrase. Examples: 'today', "
-                    "'last week', 'last 7 days', 'after May 10', "
-                    "'from May 1 to May 7'.",
+        "'last week', 'last 7 days', 'after May 10', "
+        "'from May 1 to May 7'.",
     )
     # Recent chat turns (oldest first). Used by the LLM to resolve
     # references like 'he' / 'that' / 'the earlier discussion'. Does NOT
@@ -199,8 +214,8 @@ class QueryRequest(BaseModel):
     conversation_history: Optional[List[ConversationMessage]] = Field(
         None,
         description="Recent chat turns (oldest first), up to "
-                    f"{MAX_CONVERSATION_HISTORY}. Anything beyond that is "
-                    "truncated server-side to the most recent turns.",
+        f"{MAX_CONVERSATION_HISTORY}. Anything beyond that is "
+        "truncated server-side to the most recent turns.",
     )
 
 
@@ -230,7 +245,7 @@ def _resolve_date_filters(req: QueryRequest) -> Dict[str, Any]:
         # User didn't send date_query at all. No debug info needed.
         return {
             "start_timestamp": explicit_start,
-            "end_timestamp":   explicit_end,
+            "end_timestamp": explicit_end,
             "date_query_debug": None,
         }
 
@@ -241,13 +256,13 @@ def _resolve_date_filters(req: QueryRequest) -> Dict[str, Any]:
 
     return {
         "start_timestamp": effective_start,
-        "end_timestamp":   effective_end,
+        "end_timestamp": effective_end,
         "date_query_debug": {
-            "phrase":         parsed["phrase"],
-            "matched":        parsed["matched"],
-            "note":           parsed["note"],
-            "applied_start":  parsed["start_timestamp"] if explicit_start is None else None,
-            "applied_end":    parsed["end_timestamp"] if explicit_end is None else None,
+            "phrase": parsed["phrase"],
+            "matched": parsed["matched"],
+            "note": parsed["note"],
+            "applied_start": parsed["start_timestamp"] if explicit_start is None else None,
+            "applied_end": parsed["end_timestamp"] if explicit_end is None else None,
         },
     }
 
@@ -271,20 +286,22 @@ def _cache_key_from_request(
     `metadata_bias` is also keyed because weak inference still changes
     the ranking order.
     """
-    return build_cache_key({
-        "question":        req.question,
-        "top_k":           req.top_k,
-        "mode":            req.mode,
-        # Use the EFFECTIVE filters (explicit OR strong-inferred) so an
-        # inferred filter cache-isolates from an unfiltered query.
-        "channel":         rewrite["effective_channel"],
-        "user":            rewrite["effective_user"],
-        "document_type":   req.document_type,
-        "start_timestamp": resolved["start_timestamp"],
-        "end_timestamp":   resolved["end_timestamp"],
-        # Weak inference: metadata_bias is a dict or None.
-        "metadata_bias":   rewrite["metadata_bias"],
-    })
+    return build_cache_key(
+        {
+            "question": req.question,
+            "top_k": req.top_k,
+            "mode": req.mode,
+            # Use the EFFECTIVE filters (explicit OR strong-inferred) so an
+            # inferred filter cache-isolates from an unfiltered query.
+            "channel": rewrite["effective_channel"],
+            "user": rewrite["effective_user"],
+            "document_type": req.document_type,
+            "start_timestamp": resolved["start_timestamp"],
+            "end_timestamp": resolved["end_timestamp"],
+            # Weak inference: metadata_bias is a dict or None.
+            "metadata_bias": rewrite["metadata_bias"],
+        }
+    )
 
 
 def _normalize_history(req: QueryRequest) -> List[Dict[str, str]]:
@@ -352,22 +369,22 @@ def _resolve_query_rewrite(req: QueryRequest) -> Dict[str, Any]:
     bias: Dict[str, str] = {}
 
     # Strong inference → hard filter (only when caller didn't set one).
-    if (rewrite["inferred_channel"]
-            and rewrite["channel_confidence"] == "strong"
-            and not (req.channel and req.channel.strip())):
+    if (
+        rewrite["inferred_channel"]
+        and rewrite["channel_confidence"] == "strong"
+        and not (req.channel and req.channel.strip())
+    ):
         effective_channel = rewrite["inferred_channel"]
-    elif (rewrite["inferred_channel"]
-            and rewrite["channel_confidence"] == "weak"
-            and not (req.channel and req.channel.strip())):
+    elif (
+        rewrite["inferred_channel"]
+        and rewrite["channel_confidence"] == "weak"
+        and not (req.channel and req.channel.strip())
+    ):
         bias["channel"] = rewrite["inferred_channel"]
 
-    if (rewrite["inferred_person"]
-            and rewrite["person_confidence"] == "strong"
-            and not (req.user and req.user.strip())):
+    if rewrite["inferred_person"] and rewrite["person_confidence"] == "strong" and not (req.user and req.user.strip()):
         effective_user = rewrite["inferred_person"]
-    elif (rewrite["inferred_person"]
-            and rewrite["person_confidence"] == "weak"
-            and not (req.user and req.user.strip())):
+    elif rewrite["inferred_person"] and rewrite["person_confidence"] == "weak" and not (req.user and req.user.strip()):
         bias["user"] = rewrite["inferred_person"]
 
     rewrite_debug = None
@@ -375,18 +392,18 @@ def _resolve_query_rewrite(req: QueryRequest) -> Dict[str, Any]:
         # Only attach the debug record when we actually inferred something —
         # otherwise the UI would have to special-case empty rewrite blobs.
         rewrite_debug = {
-            "inferred_person":          rewrite["inferred_person"],
-            "inferred_channel":         rewrite["inferred_channel"],
-            "person_confidence":        rewrite["person_confidence"],
-            "channel_confidence":       rewrite["channel_confidence"],
+            "inferred_person": rewrite["inferred_person"],
+            "inferred_channel": rewrite["inferred_channel"],
+            "person_confidence": rewrite["person_confidence"],
+            "channel_confidence": rewrite["channel_confidence"],
             "retrieval_biases_applied": rewrite["retrieval_biases_applied"],
         }
 
     return {
         "effective_channel": effective_channel,
-        "effective_user":    effective_user,
-        "metadata_bias":     bias or None,
-        "rewrite_debug":     rewrite_debug,
+        "effective_user": effective_user,
+        "metadata_bias": bias or None,
+        "rewrite_debug": rewrite_debug,
     }
 
 
@@ -394,9 +411,9 @@ def _resolve_query_rewrite(req: QueryRequest) -> Dict[str, Any]:
 @app.get("/")
 def root() -> Dict[str, str]:
     return {
-        "name":   "Second Brain HydraDB MVP",
+        "name": "Second Brain HydraDB MVP",
         "status": "ok",
-        "docs":   "/docs",
+        "docs": "/docs",
         "health": "/api/health",
         "liveness": "/api/health/live",
         "readiness": "/api/health/ready",
@@ -430,9 +447,7 @@ def query(req: QueryRequest) -> Dict[str, Any]:
     #     3. Stateless queries (no history) keep working through the cache
     #        exactly as before — no regression.
     use_cache = not history
-    cache_key = (
-        _cache_key_from_request(req, resolved, rewrite) if use_cache else None
-    )
+    cache_key = _cache_key_from_request(req, resolved, rewrite) if use_cache else None
 
     if use_cache:
         cached = get_cached(cache_key)
@@ -474,8 +489,7 @@ def query(req: QueryRequest) -> Dict[str, Any]:
     # was found) AND there's no conversation history. Don't cache the
     # fallback string either — letting it retry next time is harmless
     # and the answer might change after fresh ingestion.
-    if use_cache and result.get("answer") \
-            and result["answer"] != INSUFFICIENT_CONTEXT_ANSWER:
+    if use_cache and result.get("answer") and result["answer"] != INSUFFICIENT_CONTEXT_ANSWER:
         cache_put(cache_key, result)
     return result
 
@@ -516,9 +530,7 @@ def query_stream(req: QueryRequest, request: Request) -> StreamingResponse:
     # Same bypass rule as /api/query: when conversation_history is set,
     # don't use or write the cache. Stateless streams still cache.
     use_cache = not history
-    cache_key = (
-        _cache_key_from_request(req, resolved, rewrite) if use_cache else None
-    )
+    cache_key = _cache_key_from_request(req, resolved, rewrite) if use_cache else None
     cached = get_cached(cache_key) if use_cache else None
 
     # Snapshot the date_query + rewrite debug records once; both the
@@ -537,11 +549,14 @@ def query_stream(req: QueryRequest, request: Request) -> StreamingResponse:
                 cached_debug["date_query"] = date_query_debug
             if rewrite_debug is not None:
                 cached_debug["query_rewrite"] = rewrite_debug
-            yield _sse_event("done", {
-                "answer":  cached.get("answer", ""),
-                "sources": cached.get("sources", []),
-                "debug":   cached_debug,
-            })
+            yield _sse_event(
+                "done",
+                {
+                    "answer": cached.get("answer", ""),
+                    "sources": cached.get("sources", []),
+                    "debug": cached_debug,
+                },
+            )
             return
 
         # ----- Prepare context first (HydraDB recall + source build) ---
@@ -560,15 +575,22 @@ def query_stream(req: QueryRequest, request: Request) -> StreamingResponse:
                 metadata_bias=rewrite["metadata_bias"],
             )
         except AppError as e:
-            yield _sse_event("error", {
-                "detail": e.detail, "error_type": e.error_type,
-            })
+            yield _sse_event(
+                "error",
+                {
+                    "detail": e.detail,
+                    "error_type": e.error_type,
+                },
+            )
             return
         except Exception as e:  # noqa: BLE001
-            yield _sse_event("error", {
-                "detail": "Unexpected server error.",
-                "error_type": "internal_error",
-            })
+            yield _sse_event(
+                "error",
+                {
+                    "detail": "Unexpected server error.",
+                    "error_type": "internal_error",
+                },
+            )
             logger.error('query_stream_unexpected_error', extra={'error': type(e).__name__})
             return
 
@@ -583,11 +605,14 @@ def query_stream(req: QueryRequest, request: Request) -> StreamingResponse:
                 fallback_debug["query_rewrite"] = rewrite_debug
             if history:
                 fallback_debug["cache_bypassed"] = "conversation_history present"
-            yield _sse_event("done", {
-                "answer":  INSUFFICIENT_CONTEXT_ANSWER,
-                "sources": [],
-                "debug":   fallback_debug,
-            })
+            yield _sse_event(
+                "done",
+                {
+                    "answer": INSUFFICIENT_CONTEXT_ANSWER,
+                    "sources": [],
+                    "debug": fallback_debug,
+                },
+            )
             return
 
         # ----- Stream tokens from the LLM ------------------------------
@@ -605,15 +630,22 @@ def query_stream(req: QueryRequest, request: Request) -> StreamingResponse:
                 accumulated_parts.append(piece)
                 yield _sse_event("token", {"text": piece})
         except AppError as e:
-            yield _sse_event("error", {
-                "detail": e.detail, "error_type": e.error_type,
-            })
+            yield _sse_event(
+                "error",
+                {
+                    "detail": e.detail,
+                    "error_type": e.error_type,
+                },
+            )
             return
         except Exception as e:  # noqa: BLE001
-            yield _sse_event("error", {
-                "detail": "Unexpected LLM error.",
-                "error_type": "internal_error",
-            })
+            yield _sse_event(
+                "error",
+                {
+                    "detail": "Unexpected LLM error.",
+                    "error_type": "internal_error",
+                },
+            )
             logger.error('query_stream_llm_error', extra={'error': type(e).__name__})
             return
 
@@ -625,19 +657,19 @@ def query_stream(req: QueryRequest, request: Request) -> StreamingResponse:
             top_k=req.top_k,
         )
         debug = {
-            "chunks_returned":      prepared["chunks_count"],
-            "chunks_used":          len(prepared["sources"]),
-            "chunks_filtered_out":  prepared["filtered_out"],
+            "chunks_returned": prepared["chunks_count"],
+            "chunks_used": len(prepared["sources"]),
+            "chunks_filtered_out": prepared["filtered_out"],
             "sources_before_clean": finalized["sources_before"],
-            "sources_after_clean":  finalized["sources_after"],
-            "mode":                 req.mode,
-            "retrieval_mode":       prepared.get("retrieval_mode", req.mode),
-            "exact_matches_found":  prepared.get("exact_matches", 0),
-            "query_terms":          prepared.get("query_terms", []),
-            "top_k":                req.top_k,
-            "cache_hit":            False,
-            "history_used":         bool(history),
-            "history_turns":        len(history),
+            "sources_after_clean": finalized["sources_after"],
+            "mode": req.mode,
+            "retrieval_mode": prepared.get("retrieval_mode", req.mode),
+            "exact_matches_found": prepared.get("exact_matches", 0),
+            "query_terms": prepared.get("query_terms", []),
+            "top_k": req.top_k,
+            "cache_hit": False,
+            "history_used": bool(history),
+            "history_turns": len(history),
         }
         if date_query_debug is not None:
             debug["date_query"] = date_query_debug
@@ -646,17 +678,16 @@ def query_stream(req: QueryRequest, request: Request) -> StreamingResponse:
         if history:
             debug["cache_bypassed"] = "conversation_history present"
         full_payload = {
-            "answer":  finalized["answer"],
+            "answer": finalized["answer"],
             "sources": finalized["cleaned_sources"],
-            "debug":   debug,
+            "debug": debug,
         }
         yield _sse_event("done", full_payload)
 
         # Cache the finalized result for next identical request, same
         # rules as /api/query: only when stateless AND not the no-context
         # fallback.
-        if use_cache and full_payload["answer"] \
-                and full_payload["answer"] != INSUFFICIENT_CONTEXT_ANSWER:
+        if use_cache and full_payload["answer"] and full_payload["answer"] != INSUFFICIENT_CONTEXT_ANSWER:
             cache_put(cache_key, full_payload)
 
     return StreamingResponse(
@@ -680,9 +711,7 @@ async def slack_events(
     request: Request,
     background_tasks: BackgroundTasks,
     x_slack_signature: Optional[str] = Header(default=None, alias="X-Slack-Signature"),
-    x_slack_request_timestamp: Optional[str] = Header(
-        default=None, alias="X-Slack-Request-Timestamp"
-    ),
+    x_slack_request_timestamp: Optional[str] = Header(default=None, alias="X-Slack-Request-Timestamp"),
 ):
     # Read body BEFORE parsing so we can verify the signature over the
     # exact bytes Slack sent. Reparsing the JSON to bytes would change

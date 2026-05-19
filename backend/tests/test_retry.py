@@ -32,23 +32,24 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from retry import (
+    NON_RETRYABLE_STATUS_CODES,
+    RETRYABLE_STATUS_CODES,
     NonRetryableError,
     RetryExhausted,
     _compute_delay,
     _extract_status_code,
     _should_retry,
     retry,
-    RETRYABLE_STATUS_CODES,
-    NON_RETRYABLE_STATUS_CODES,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 class _FakeHTTPError(Exception):
     """Simulates an HTTP error with a status_code attribute."""
+
     def __init__(self, status_code: int):
         super().__init__(f"HTTP {status_code}")
         self.status_code = status_code
@@ -56,6 +57,7 @@ class _FakeHTTPError(Exception):
 
 class _FakeUpstreamError(Exception):
     """Simulates an AppError-style exception with upstream_status."""
+
     def __init__(self, upstream_status: Optional[int] = None):
         super().__init__("upstream error")
         self.upstream_status = upstream_status
@@ -91,6 +93,7 @@ def _make_failing_async(fail_times: int, exc_factory=None):
 # _compute_delay
 # ---------------------------------------------------------------------------
 
+
 class TestComputeDelay:
     def test_exponential_without_jitter(self):
         assert _compute_delay(1, 1.0, 30.0, 2.0, jitter=False) == pytest.approx(1.0)
@@ -114,6 +117,7 @@ class TestComputeDelay:
 # ---------------------------------------------------------------------------
 # _extract_status_code
 # ---------------------------------------------------------------------------
+
 
 class TestExtractStatusCode:
     def test_status_code_attr(self):
@@ -143,13 +147,12 @@ class TestExtractStatusCode:
 # _should_retry
 # ---------------------------------------------------------------------------
 
+
 class TestShouldRetry:
     _retryable_codes = frozenset(RETRYABLE_STATUS_CODES)
 
-    def _check(self, exc, retryable_exc=(ConnectionError,),
-               non_retryable_exc=()):
-        return _should_retry(exc, retryable_exc, self._retryable_codes,
-                             non_retryable_exc)
+    def _check(self, exc, retryable_exc=(ConnectionError,), non_retryable_exc=()):
+        return _should_retry(exc, retryable_exc, self._retryable_codes, non_retryable_exc)
 
     def test_connection_error_retried(self):
         assert self._check(ConnectionError("network")) is True
@@ -188,9 +191,9 @@ class TestShouldRetry:
     def test_explicit_non_retryable_exception(self):
         class MyError(Exception):
             pass
+
         exc = MyError("stop")
-        assert self._check(exc, retryable_exc=(Exception,),
-                           non_retryable_exc=(MyError,)) is False
+        assert self._check(exc, retryable_exc=(Exception,), non_retryable_exc=(MyError,)) is False
 
     def test_unknown_exception_not_in_retryable_list(self):
         assert self._check(RuntimeError("oops"), retryable_exc=()) is False
@@ -199,6 +202,7 @@ class TestShouldRetry:
 # ---------------------------------------------------------------------------
 # Sync retry decorator
 # ---------------------------------------------------------------------------
+
 
 class TestSyncRetry:
     def test_first_attempt_success(self):
@@ -210,8 +214,10 @@ class TestSyncRetry:
     def test_success_after_two_failures(self):
         fn, calls = _make_failing_sync(2)
         wrapped = retry(
-            service="test", max_attempts=3,
-            initial_delay=0.0, jitter=False,
+            service="test",
+            max_attempts=3,
+            initial_delay=0.0,
+            jitter=False,
         )(fn)
         assert wrapped() == "ok"
         assert calls[0] == 3
@@ -219,8 +225,10 @@ class TestSyncRetry:
     def test_exhausted_raises_retry_exhausted(self):
         fn, calls = _make_failing_sync(5)
         wrapped = retry(
-            service="test", max_attempts=3,
-            initial_delay=0.0, jitter=False,
+            service="test",
+            max_attempts=3,
+            initial_delay=0.0,
+            jitter=False,
         )(fn)
         with pytest.raises(RetryExhausted):
             wrapped()
@@ -278,8 +286,10 @@ class TestSyncRetry:
     def test_sleep_called_between_retries(self):
         fn, _ = _make_failing_sync(2)
         wrapped = retry(
-            service="test", max_attempts=3,
-            initial_delay=1.0, jitter=False,
+            service="test",
+            max_attempts=3,
+            initial_delay=1.0,
+            jitter=False,
         )(fn)
 
         sleep_calls = []
@@ -293,11 +303,17 @@ class TestSyncRetry:
     def test_non_retryable_exception_param(self):
         class Boom(Exception):
             pass
+
         call_count = [0]
 
-        @retry(service="test", max_attempts=3, initial_delay=0.0, jitter=False,
-               non_retryable_exceptions=(Boom,),
-               retryable_exceptions=(Exception,))
+        @retry(
+            service="test",
+            max_attempts=3,
+            initial_delay=0.0,
+            jitter=False,
+            non_retryable_exceptions=(Boom,),
+            retryable_exceptions=(Exception,),
+        )
         def fn():
             call_count[0] += 1
             raise Boom("no retry")
@@ -309,8 +325,9 @@ class TestSyncRetry:
     def test_upstream_status_401_not_retried(self):
         call_count = [0]
 
-        @retry(service="test", max_attempts=3, initial_delay=0.0, jitter=False,
-               retryable_exceptions=(_FakeUpstreamError,))
+        @retry(
+            service="test", max_attempts=3, initial_delay=0.0, jitter=False, retryable_exceptions=(_FakeUpstreamError,)
+        )
         def fn():
             call_count[0] += 1
             raise _FakeUpstreamError(upstream_status=401)
@@ -324,6 +341,7 @@ class TestSyncRetry:
 # Async retry decorator
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 class TestAsyncRetry:
     async def test_first_attempt_success(self):
@@ -335,8 +353,10 @@ class TestAsyncRetry:
     async def test_success_after_two_failures(self):
         fn, calls = _make_failing_async(2)
         wrapped = retry(
-            service="test", max_attempts=3,
-            initial_delay=0.0, jitter=False,
+            service="test",
+            max_attempts=3,
+            initial_delay=0.0,
+            jitter=False,
         )(fn)
         assert await wrapped() == "ok"
         assert calls[0] == 3
@@ -344,8 +364,10 @@ class TestAsyncRetry:
     async def test_exhausted_raises_retry_exhausted(self):
         fn, calls = _make_failing_async(5)
         wrapped = retry(
-            service="test", max_attempts=3,
-            initial_delay=0.0, jitter=False,
+            service="test",
+            max_attempts=3,
+            initial_delay=0.0,
+            jitter=False,
         )(fn)
         with pytest.raises(RetryExhausted):
             await wrapped()
@@ -378,8 +400,10 @@ class TestAsyncRetry:
     async def test_sleep_called_between_retries(self):
         fn, _ = _make_failing_async(1)
         wrapped = retry(
-            service="test", max_attempts=3,
-            initial_delay=1.0, jitter=False,
+            service="test",
+            max_attempts=3,
+            initial_delay=1.0,
+            jitter=False,
         )(fn)
 
         sleep_calls = []
@@ -410,6 +434,7 @@ class TestAsyncRetry:
 # ---------------------------------------------------------------------------
 # Structured logging
 # ---------------------------------------------------------------------------
+
 
 class TestRetryLogging:
     def _capture_logs(self, fn, *args, **kwargs):
@@ -501,8 +526,7 @@ class TestRetryLogging:
             return "ok"
 
         records, _ = self._capture_logs(fn)
-        retry_events = [r for r in records
-                        if r.get("event", "").startswith("retry_")]
+        retry_events = [r for r in records if r.get("event", "").startswith("retry_")]
         assert retry_events == []
 
     def test_log_contains_delay_seconds(self):
@@ -524,6 +548,7 @@ class TestRetryLogging:
 # Jitter distribution
 # ---------------------------------------------------------------------------
 
+
 class TestJitterBehavior:
     def test_jitter_produces_variance(self):
         """Running with jitter=True on the same attempt produces different delays."""
@@ -544,6 +569,7 @@ class TestJitterBehavior:
 # Streaming safety note (doc test)
 # ---------------------------------------------------------------------------
 
+
 class TestStreamingRestriction:
     """
     Streaming note: the retry decorator must only wrap the *initialisation*
@@ -556,8 +582,7 @@ class TestStreamingRestriction:
         """A non-streaming initialiser is retried safely."""
         call_count = [0]
 
-        @retry(service="stream-init", max_attempts=3,
-               initial_delay=0.0, jitter=False)
+        @retry(service="stream-init", max_attempts=3, initial_delay=0.0, jitter=False)
         def init_stream():
             call_count[0] += 1
             if call_count[0] < 2:

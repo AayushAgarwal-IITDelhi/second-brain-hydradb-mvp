@@ -26,7 +26,7 @@ import requests
 
 from errors import HydraDBError, UpstreamTimeoutError
 from logging_config import get_logger
-from retry import retry, RetryExhausted
+from retry import RetryExhausted, retry
 
 logger = get_logger(__name__)
 
@@ -142,16 +142,10 @@ class HydraDBClient:
         tenant_id: Optional[str] = None,
         sub_tenant_id: Optional[str] = None,
     ):
-        self.base_url = (
-            base_url
-            or os.getenv("HYDRADB_BASE_URL", "https://api.hydradb.com")
-        ).rstrip("/")
+        self.base_url = (base_url or os.getenv("HYDRADB_BASE_URL", "https://api.hydradb.com")).rstrip("/")
         self.api_key = api_key or os.getenv("HYDRADB_API_KEY")
         self.tenant_id = tenant_id or os.getenv("HYDRADB_TENANT_ID")
-        self.sub_tenant_id = (
-            sub_tenant_id
-            or os.getenv("HYDRADB_SUB_TENANT_ID", "slack-second-brain")
-        )
+        self.sub_tenant_id = sub_tenant_id or os.getenv("HYDRADB_SUB_TENANT_ID", "slack-second-brain")
 
         if not self.api_key:
             raise ValueError("HYDRADB_API_KEY is not set.")
@@ -201,12 +195,8 @@ class HydraDBClient:
         for item in files:
             filename = item["filename"]
             content = item["content"]
-            content_bytes = (
-                content.encode("utf-8") if isinstance(content, str) else content
-            )
-            multipart_files.append(
-                ("files", (filename, content_bytes, "text/markdown"))
-            )
+            content_bytes = content.encode("utf-8") if isinstance(content, str) else content
+            multipart_files.append(("files", (filename, content_bytes, "text/markdown")))
 
         # ------------------------------------------------------------------
         try:
@@ -221,10 +211,14 @@ class HydraDBClient:
             return {}
 
         level = logging.DEBUG if response.status_code < 400 else logging.WARNING
-        logger.log(level, 'hydradb_upload_response', extra={
-            'http_status': response.status_code,
-            'file_count': len(files),
-        })
+        logger.log(
+            level,
+            'hydradb_upload_response',
+            extra={
+                'http_status': response.status_code,
+                'file_count': len(files),
+            },
+        )
 
         if response.status_code >= 400:
             return {}
@@ -239,21 +233,25 @@ class HydraDBClient:
         if isinstance(results, list):
             for i, r in enumerate(results):
                 status_str = (r.get("status") or "").lower() or "unknown"
-                logger.debug('hydradb_upload_result', extra={
-                    'result_index': i,
-                    'status': status_str,
-                    'has_error': bool(r.get("error")),
-                })
+                logger.debug(
+                    'hydradb_upload_result',
+                    extra={
+                        'result_index': i,
+                        'status': status_str,
+                        'has_error': bool(r.get("error")),
+                    },
+                )
 
         ok, bad = summarize_upload_response(payload, batch_size=len(files))
-        source = (
-            "server-reported"
-            if ("success_count" in payload or "failed_count" in payload)
-            else "derived"
+        source = "server-reported" if ("success_count" in payload or "failed_count" in payload) else "derived"
+        logger.info(
+            'hydradb_upload_batch_summary',
+            extra={
+                'ok': ok,
+                'failed': bad,
+                'count_source': source,
+            },
         )
-        logger.info('hydradb_upload_batch_summary', extra={
-            'ok': ok, 'failed': bad, 'count_source': source,
-        })
 
         return payload
 
@@ -319,10 +317,13 @@ class HydraDBClient:
         logger.debug('hydradb_recall_response', extra={'http_status': response.status_code})
 
         if response.status_code >= 400:
-            logger.warning('hydradb_recall_error', extra={
-                'http_status': response.status_code,
-                'top_k_field': RECALL_TOP_K_FIELD,
-            })
+            logger.warning(
+                'hydradb_recall_error',
+                extra={
+                    'http_status': response.status_code,
+                    'top_k_field': RECALL_TOP_K_FIELD,
+                },
+            )
             raise HydraDBError(
                 detail=f"Knowledge backend returned HTTP {response.status_code}.",
                 log_context=f"full_recall HTTP {response.status_code} body={response.text[:400]}",

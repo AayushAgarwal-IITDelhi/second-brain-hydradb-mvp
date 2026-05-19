@@ -53,9 +53,7 @@ class TestIngestionPipeline:
         assert len(result["files"]) == 1
 
         mock_hydra = MagicMock()
-        mock_hydra.upload_knowledge.return_value = _hydra_success(
-            result["files"][0]["filename"]
-        )
+        mock_hydra.upload_knowledge.return_value = _hydra_success(result["files"][0]["filename"])
         stats = upload_in_batches(mock_hydra, result["files"], state)
 
         assert stats["successes"] == 1
@@ -209,6 +207,7 @@ class TestNormalizationFidelity:
 
     def test_message_file_contains_all_header_fields(self):
         from ingestion.ingest_slack import build_message_file
+
         slack = _mock_slack_wrapper()
         msg = {"ts": "1000000001.000000", "user": "U001", "text": "content here"}
         result = build_message_file(msg, "C123", "general", slack)
@@ -221,6 +220,7 @@ class TestNormalizationFidelity:
 
     def test_thread_file_contains_parent_and_replies(self):
         from ingestion.ingest_slack import build_thread_file
+
         slack = _mock_slack_wrapper()
         parent = {"ts": "100.0", "user": "U001", "text": "parent"}
         replies = [
@@ -239,6 +239,7 @@ class TestNormalizationFidelity:
         the same filename. This can cause HydraDB to overwrite one with the other.
         """
         from ingestion.ingest_slack import build_message_file, build_thread_file
+
         slack = _mock_slack_wrapper()
         ts = "1000000001.000000"
         msg = {"ts": ts, "user": "U001", "text": "standalone message"}
@@ -250,8 +251,6 @@ class TestNormalizationFidelity:
 
         # Filenames must differ: build_message_file uses _msg_ and
         # build_thread_file uses _thread_ so HydraDB uploads never collide.
-        assert msg_file["filename"] != thread_file["filename"], (
-            f"Filename collision: both are {msg_file['filename']!r}"
-        )
+        assert msg_file["filename"] != thread_file["filename"], f"Filename collision: both are {msg_file['filename']!r}"
         assert "_msg_" in msg_file["filename"]
         assert "_thread_" in thread_file["filename"]

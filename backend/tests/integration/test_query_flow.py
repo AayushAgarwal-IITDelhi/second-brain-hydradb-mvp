@@ -45,8 +45,9 @@ class TestFullQueryPipeline:
         ]
         hydra_resp = _hydra_response(chunks)
 
-        with patch("hydradb_client.requests.post") as mock_post, \
-             patch("recall.generate_grounded_answer", side_effect=_fake_llm_answer):
+        with patch("hydradb_client.requests.post") as mock_post, patch(
+            "recall.generate_grounded_answer", side_effect=_fake_llm_answer
+        ):
             mock_post.return_value = MagicMock(
                 status_code=200,
                 json=lambda: hydra_resp,
@@ -67,8 +68,7 @@ class TestFullQueryPipeline:
         assert body["answer"] != INSUFFICIENT
 
     def test_empty_hydra_response_returns_fallback(self, client):
-        with patch("hydradb_client.requests.post") as mock_post, \
-             patch("recall.generate_grounded_answer"):
+        with patch("hydradb_client.requests.post") as mock_post, patch("recall.generate_grounded_answer"):
             mock_post.return_value = MagicMock(
                 status_code=200,
                 json=lambda: {"chunks": []},
@@ -89,8 +89,9 @@ class TestFullQueryPipeline:
             _chunk("general message", "doc-1", "slack:C1:1.0", channel="general"),
             _chunk("product message", "doc-2", "slack:C1:2.0", channel="product"),
         ]
-        with patch("hydradb_client.requests.post") as mock_post, \
-             patch("recall.generate_grounded_answer", return_value="The answer [1]."):
+        with patch("hydradb_client.requests.post") as mock_post, patch(
+            "recall.generate_grounded_answer", return_value="The answer [1]."
+        ):
             mock_post.return_value = MagicMock(
                 status_code=200,
                 json=lambda: {"chunks": chunks},
@@ -113,8 +114,9 @@ class TestFullQueryPipeline:
             _chunk("generic info", "doc-1", "slack:C1:1.0"),
             _chunk("sprint deadline is Friday", "doc-2", "slack:C1:2.0"),
         ]
-        with patch("hydradb_client.requests.post") as mock_post, \
-             patch("recall.generate_grounded_answer", return_value="deadline Friday [1]."):
+        with patch("hydradb_client.requests.post") as mock_post, patch(
+            "recall.generate_grounded_answer", return_value="deadline Friday [1]."
+        ):
             mock_post.return_value = MagicMock(
                 status_code=200,
                 json=lambda: {"chunks": chunks},
@@ -129,8 +131,8 @@ class TestFullQueryPipeline:
 
     def test_hydradb_error_surfaces_502(self, client):
         from errors import HydraDBError
-        with patch("hydradb_client.HydraDBClient.full_recall",
-                   side_effect=HydraDBError("HydraDB is down")):
+
+        with patch("hydradb_client.HydraDBClient.full_recall", side_effect=HydraDBError("HydraDB is down")):
             r = client.post(
                 "/api/query",
                 json={"question": "what happened?"},
@@ -142,9 +144,11 @@ class TestFullQueryPipeline:
 
     def test_llm_error_surfaces_502(self, client):
         from errors import LLMError
+
         chunks = [_chunk("some text", "doc-1", "slack:C1:1.0")]
-        with patch("hydradb_client.requests.post") as mock_post, \
-             patch("recall.generate_grounded_answer", side_effect=LLMError("LLM down")):
+        with patch("hydradb_client.requests.post") as mock_post, patch(
+            "recall.generate_grounded_answer", side_effect=LLMError("LLM down")
+        ):
             mock_post.return_value = MagicMock(
                 status_code=200,
                 json=lambda: {"chunks": chunks},
@@ -160,8 +164,8 @@ class TestFullQueryPipeline:
 
     def test_timeout_surfaces_504(self, client):
         from errors import UpstreamTimeoutError
-        with patch("hydradb_client.HydraDBClient.full_recall",
-                   side_effect=UpstreamTimeoutError("timed out")):
+
+        with patch("hydradb_client.HydraDBClient.full_recall", side_effect=UpstreamTimeoutError("timed out")):
             r = client.post(
                 "/api/query",
                 json={"question": "what happened?"},
@@ -170,8 +174,9 @@ class TestFullQueryPipeline:
         assert r.status_code == 504
 
     def test_debug_block_contains_mode(self, client):
-        with patch("hydradb_client.requests.post") as mock_post, \
-             patch("recall.generate_grounded_answer", return_value="answer [1]."):
+        with patch("hydradb_client.requests.post") as mock_post, patch(
+            "recall.generate_grounded_answer", return_value="answer [1]."
+        ):
             mock_post.return_value = MagicMock(
                 status_code=200,
                 json=lambda: {"chunks": [_chunk("content", "d1", "k1")]},
@@ -186,8 +191,9 @@ class TestFullQueryPipeline:
         assert debug.get("mode") == "summary"
 
     def test_query_rewrite_debug_attached(self, client):
-        with patch("hydradb_client.requests.post") as mock_post, \
-             patch("recall.generate_grounded_answer", return_value="answer"):
+        with patch("hydradb_client.requests.post") as mock_post, patch(
+            "recall.generate_grounded_answer", return_value="answer"
+        ):
             mock_post.return_value = MagicMock(
                 status_code=200,
                 json=lambda: {"chunks": []},
@@ -254,8 +260,9 @@ class TestCitationHygiene:
     def test_invalid_citation_stripped_from_final_answer(self, client):
         chunks = [_chunk("text", "doc-1", "k1")]
         # LLM references [99] which doesn't exist in sources
-        with patch("hydradb_client.requests.post") as mock_post, \
-             patch("recall.generate_grounded_answer", return_value="See [1] and also [99]."):
+        with patch("hydradb_client.requests.post") as mock_post, patch(
+            "recall.generate_grounded_answer", return_value="See [1] and also [99]."
+        ):
             mock_post.return_value = MagicMock(
                 status_code=200,
                 json=lambda: {"chunks": chunks},

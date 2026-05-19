@@ -22,7 +22,6 @@ from fastapi import Request
 
 from errors import RateLimitedError
 
-
 WINDOW_SECONDS = 5 * 60  # 5 minutes
 
 

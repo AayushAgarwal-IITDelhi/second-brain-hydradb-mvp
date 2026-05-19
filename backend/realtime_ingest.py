@@ -44,9 +44,7 @@ logger = get_logger(__name__)
 # Config
 # ---------------------------------------------------------------------- #
 def _realtime_enabled() -> bool:
-    return os.getenv("REALTIME_INGEST_ENABLED", "true").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
+    return os.getenv("REALTIME_INGEST_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _allowed_channel_ids() -> Set[str]:
@@ -63,8 +61,8 @@ STATE_PATH = _BACKEND_DIR / "data" / "ingestion_state.json"
 # ---------------------------------------------------------------------- #
 # Idempotency: dedupe Slack event retries (~3 retries within 1 hour)
 # ---------------------------------------------------------------------- #
-_SEEN_EVENT_TTL = 60 * 60   # 1 hour matches Slack's retry window
-_SEEN_EVENT_MAX = 5000      # cap memory
+_SEEN_EVENT_TTL = 60 * 60  # 1 hour matches Slack's retry window
+_SEEN_EVENT_MAX = 5000  # cap memory
 _seen_event_ids: Dict[str, float] = {}
 _seen_lock = threading.Lock()
 
@@ -265,7 +263,8 @@ def _ingest_thread(
     """
     # Pull the full thread from Slack so the doc reflects current state.
     replies = slack.fetch_thread_replies(
-        channel_id=channel_id, thread_ts=thread_ts,
+        channel_id=channel_id,
+        thread_ts=thread_ts,
     )
     if not replies:
         logger.debug('realtime_thread_no_replies', extra={'thread_ts': thread_ts})
@@ -278,11 +277,14 @@ def _ingest_thread(
 
     prepared = build_thread_file(parent, replies, channel_id, channel_name, slack)
     stable_key = prepared["stable_key"]
-    logger.info('realtime_uploading', extra={
-        'stable_key': stable_key,
-        'doc_type': 'thread',
-        'reply_count': len(replies),
-    })
+    logger.info(
+        'realtime_uploading',
+        extra={
+            'stable_key': stable_key,
+            'doc_type': 'thread',
+            'reply_count': len(replies),
+        },
+    )
 
     response = hydra.upload_knowledge([prepared])
     ok, _bad = summarize_upload_response(
@@ -318,10 +320,8 @@ def admin_status_snapshot(scheduler_enabled: bool) -> Dict[str, Any]:
     state = IngestionState(STATE_PATH)
     return {
         "realtime_ingest_enabled": _realtime_enabled(),
-        "scheduler_enabled":        scheduler_enabled,
-        "last_ingested_at":         state.get_last_ingested_at(),
-        "total_docs":               state.total_docs(),
-        "channels_tracked":         sum(
-            1 for k in state.channels.keys() if k != "_meta"
-        ),
+        "scheduler_enabled": scheduler_enabled,
+        "last_ingested_at": state.get_last_ingested_at(),
+        "total_docs": state.total_docs(),
+        "channels_tracked": sum(1 for k in state.channels.keys() if k != "_meta"),
     }

@@ -29,11 +29,9 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: black (format check)
-        continue-on-error: true
         run: black --check .
 
       - name: isort (import order check)
-        continue-on-error: true
         run: isort --check-only .
 
       - name: flake8 (error-level lint)

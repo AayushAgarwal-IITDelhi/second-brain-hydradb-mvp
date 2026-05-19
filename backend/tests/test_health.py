@@ -30,14 +30,18 @@ import json
 import logging
 import logging.handlers
 from typing import Any, Dict
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
-from fastapi.testclient import TestClient
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from health import (
     CHECK_TIMEOUT_SECONDS,
+    STATUS_ERROR,
+    STATUS_NOT_CONFIGURED,
+    STATUS_OK,
+    STATUS_WARNING,
     DatabaseHealthCheckPlaceholder,
     HealthCheck,
     HealthResult,
@@ -45,16 +49,11 @@ from health import (
     LLMHealthCheck,
     SchedulerHealthCheck,
     SlackHealthCheck,
-    STATUS_ERROR,
-    STATUS_NOT_CONFIGURED,
-    STATUS_OK,
-    STATUS_WARNING,
     _aggregate_status,
     _run_check,
     register_health_check,
     router,
 )
-
 
 # ---------------------------------------------------------------------------
 # Minimal FastAPI app for route testing
@@ -68,6 +67,7 @@ _client = TestClient(_app, raise_server_exceptions=False)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 class _ConstantCheck(HealthCheck):
     """Health check that always returns a fixed result."""
@@ -96,6 +96,7 @@ class _SlowCheck(HealthCheck):
 # Liveness endpoint
 # ---------------------------------------------------------------------------
 
+
 class TestLiveness:
     def test_always_200(self):
         resp = _client.get("/api/health/live")
@@ -115,6 +116,7 @@ class TestLiveness:
 # _aggregate_status helper
 # ---------------------------------------------------------------------------
 
+
 class TestAggregateStatus:
     def _checks_and_results(self, specs):
         checks = []
@@ -126,55 +128,68 @@ class TestAggregateStatus:
         return checks, results
 
     def test_all_ok_is_healthy(self):
-        checks, results = self._checks_and_results([
-            ("hydradb", STATUS_OK, True),
-            ("llm",     STATUS_OK, True),
-            ("slack",   STATUS_OK, False),
-        ])
+        checks, results = self._checks_and_results(
+            [
+                ("hydradb", STATUS_OK, True),
+                ("llm", STATUS_OK, True),
+                ("slack", STATUS_OK, False),
+            ]
+        )
         assert _aggregate_status(checks, results) == "healthy"
 
     def test_required_error_is_unhealthy(self):
-        checks, results = self._checks_and_results([
-            ("hydradb", STATUS_ERROR, True),
-            ("llm",     STATUS_OK,    True),
-        ])
+        checks, results = self._checks_and_results(
+            [
+                ("hydradb", STATUS_ERROR, True),
+                ("llm", STATUS_OK, True),
+            ]
+        )
         assert _aggregate_status(checks, results) == "unhealthy"
 
     def test_optional_error_is_degraded(self):
-        checks, results = self._checks_and_results([
-            ("hydradb", STATUS_OK,    True),
-            ("llm",     STATUS_OK,    True),
-            ("slack",   STATUS_ERROR, False),
-        ])
+        checks, results = self._checks_and_results(
+            [
+                ("hydradb", STATUS_OK, True),
+                ("llm", STATUS_OK, True),
+                ("slack", STATUS_ERROR, False),
+            ]
+        )
         assert _aggregate_status(checks, results) == "degraded"
 
     def test_optional_warning_is_degraded(self):
-        checks, results = self._checks_and_results([
-            ("hydradb", STATUS_OK,      True),
-            ("llm",     STATUS_OK,      True),
-            ("slack",   STATUS_WARNING, False),
-        ])
+        checks, results = self._checks_and_results(
+            [
+                ("hydradb", STATUS_OK, True),
+                ("llm", STATUS_OK, True),
+                ("slack", STATUS_WARNING, False),
+            ]
+        )
         assert _aggregate_status(checks, results) == "degraded"
 
     def test_not_configured_is_neutral(self):
-        checks, results = self._checks_and_results([
-            ("hydradb",  STATUS_OK,             True),
-            ("llm",      STATUS_OK,             True),
-            ("database", STATUS_NOT_CONFIGURED, False),
-        ])
+        checks, results = self._checks_and_results(
+            [
+                ("hydradb", STATUS_OK, True),
+                ("llm", STATUS_OK, True),
+                ("database", STATUS_NOT_CONFIGURED, False),
+            ]
+        )
         assert _aggregate_status(checks, results) == "healthy"
 
     def test_required_error_trumps_optional_warning(self):
-        checks, results = self._checks_and_results([
-            ("hydradb", STATUS_ERROR,   True),
-            ("slack",   STATUS_WARNING, False),
-        ])
+        checks, results = self._checks_and_results(
+            [
+                ("hydradb", STATUS_ERROR, True),
+                ("slack", STATUS_WARNING, False),
+            ]
+        )
         assert _aggregate_status(checks, results) == "unhealthy"
 
 
 # ---------------------------------------------------------------------------
 # _run_check: timeout and exception safety
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 class TestRunCheck:
@@ -207,6 +222,7 @@ class TestRunCheck:
 # Readiness endpoint
 # ---------------------------------------------------------------------------
 
+
 class TestReadiness:
     def _patch_registry(self, checks):
         return patch("health._get_registry", return_value=checks)
@@ -214,7 +230,7 @@ class TestReadiness:
     def test_200_when_required_ok(self):
         checks = [
             _ConstantCheck("hydradb", HealthResult(STATUS_OK), required=True),
-            _ConstantCheck("llm",     HealthResult(STATUS_OK), required=True),
+            _ConstantCheck("llm", HealthResult(STATUS_OK), required=True),
         ]
         with self._patch_registry(checks):
             resp = _client.get("/api/health/ready")
@@ -227,7 +243,7 @@ class TestReadiness:
     def test_503_when_required_fails(self):
         checks = [
             _ConstantCheck("hydradb", HealthResult(STATUS_ERROR), required=True),
-            _ConstantCheck("llm",     HealthResult(STATUS_OK),    required=True),
+            _ConstantCheck("llm", HealthResult(STATUS_OK), required=True),
         ]
         with self._patch_registry(checks):
             resp = _client.get("/api/health/ready")
@@ -237,9 +253,9 @@ class TestReadiness:
     def test_200_when_optional_fails(self):
         """Optional failures must not affect readiness status code."""
         checks = [
-            _ConstantCheck("hydradb", HealthResult(STATUS_OK),    required=True),
-            _ConstantCheck("llm",     HealthResult(STATUS_OK),    required=True),
-            _ConstantCheck("slack",   HealthResult(STATUS_ERROR), required=False),
+            _ConstantCheck("hydradb", HealthResult(STATUS_OK), required=True),
+            _ConstantCheck("llm", HealthResult(STATUS_OK), required=True),
+            _ConstantCheck("slack", HealthResult(STATUS_ERROR), required=False),
         ]
         # readiness only runs required checks; slack (optional) is excluded
         required_only = [c for c in checks if c.required]
@@ -278,6 +294,7 @@ class TestReadiness:
 # Detailed /api/health endpoint
 # ---------------------------------------------------------------------------
 
+
 class TestDetailedHealth:
     def _patch_registry(self, checks):
         return patch("health._get_registry", return_value=checks)
@@ -293,8 +310,8 @@ class TestDetailedHealth:
     def test_status_healthy_all_ok(self):
         checks = [
             _ConstantCheck("hydradb", HealthResult(STATUS_OK), True),
-            _ConstantCheck("llm",     HealthResult(STATUS_OK), True),
-            _ConstantCheck("slack",   HealthResult(STATUS_OK), False),
+            _ConstantCheck("llm", HealthResult(STATUS_OK), True),
+            _ConstantCheck("slack", HealthResult(STATUS_OK), False),
         ]
         with self._patch_registry(checks):
             body = _client.get("/api/health").json()
@@ -302,9 +319,9 @@ class TestDetailedHealth:
 
     def test_status_degraded_optional_fails(self):
         checks = [
-            _ConstantCheck("hydradb", HealthResult(STATUS_OK),      True),
-            _ConstantCheck("llm",     HealthResult(STATUS_OK),      True),
-            _ConstantCheck("slack",   HealthResult(STATUS_WARNING), False),
+            _ConstantCheck("hydradb", HealthResult(STATUS_OK), True),
+            _ConstantCheck("llm", HealthResult(STATUS_OK), True),
+            _ConstantCheck("slack", HealthResult(STATUS_WARNING), False),
         ]
         with self._patch_registry(checks):
             body = _client.get("/api/health").json()
@@ -313,7 +330,7 @@ class TestDetailedHealth:
     def test_status_unhealthy_required_fails(self):
         checks = [
             _ConstantCheck("hydradb", HealthResult(STATUS_ERROR), True),
-            _ConstantCheck("llm",     HealthResult(STATUS_OK),    True),
+            _ConstantCheck("llm", HealthResult(STATUS_OK), True),
         ]
         with self._patch_registry(checks):
             body = _client.get("/api/health").json()
@@ -327,9 +344,9 @@ class TestDetailedHealth:
 
     def test_checks_key_present_for_all_services(self):
         checks = [
-            _ConstantCheck("hydradb",  HealthResult(STATUS_OK),             True),
-            _ConstantCheck("llm",      HealthResult(STATUS_OK),             True),
-            _ConstantCheck("slack",    HealthResult(STATUS_WARNING),        False),
+            _ConstantCheck("hydradb", HealthResult(STATUS_OK), True),
+            _ConstantCheck("llm", HealthResult(STATUS_OK), True),
+            _ConstantCheck("slack", HealthResult(STATUS_WARNING), False),
             _ConstantCheck("database", HealthResult(STATUS_NOT_CONFIGURED), False),
         ]
         with self._patch_registry(checks):
@@ -355,15 +372,19 @@ class TestDetailedHealth:
 # Individual check unit tests (mocked external calls)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 class TestHydraHealthCheck:
     async def test_ok_on_200(self):
         mock_resp = MagicMock(status_code=200)
         with patch("requests.post", return_value=mock_resp):
-            with patch.dict("os.environ", {
-                "HYDRADB_API_KEY": "test-key",
-                "HYDRADB_TENANT_ID": "test-tenant",
-            }):
+            with patch.dict(
+                "os.environ",
+                {
+                    "HYDRADB_API_KEY": "test-key",
+                    "HYDRADB_TENANT_ID": "test-tenant",
+                },
+            ):
                 result = await HydraHealthCheck().check()
         assert result.status == STATUS_OK
         assert result.latency_ms is not None
@@ -371,10 +392,13 @@ class TestHydraHealthCheck:
     async def test_error_on_401(self):
         mock_resp = MagicMock(status_code=401)
         with patch("requests.post", return_value=mock_resp):
-            with patch.dict("os.environ", {
-                "HYDRADB_API_KEY": "bad-key",
-                "HYDRADB_TENANT_ID": "t",
-            }):
+            with patch.dict(
+                "os.environ",
+                {
+                    "HYDRADB_API_KEY": "bad-key",
+                    "HYDRADB_TENANT_ID": "t",
+                },
+            ):
                 result = await HydraHealthCheck().check()
         assert result.status == STATUS_ERROR
         assert "authentication" in (result.message or "")
@@ -382,20 +406,27 @@ class TestHydraHealthCheck:
     async def test_error_on_500(self):
         mock_resp = MagicMock(status_code=500)
         with patch("requests.post", return_value=mock_resp):
-            with patch.dict("os.environ", {
-                "HYDRADB_API_KEY": "key",
-                "HYDRADB_TENANT_ID": "t",
-            }):
+            with patch.dict(
+                "os.environ",
+                {
+                    "HYDRADB_API_KEY": "key",
+                    "HYDRADB_TENANT_ID": "t",
+                },
+            ):
                 result = await HydraHealthCheck().check()
         assert result.status == STATUS_ERROR
 
     async def test_error_on_connection_error(self):
         import requests as req_mod
+
         with patch("requests.post", side_effect=req_mod.exceptions.ConnectionError("refused")):
-            with patch.dict("os.environ", {
-                "HYDRADB_API_KEY": "key",
-                "HYDRADB_TENANT_ID": "t",
-            }):
+            with patch.dict(
+                "os.environ",
+                {
+                    "HYDRADB_API_KEY": "key",
+                    "HYDRADB_TENANT_ID": "t",
+                },
+            ):
                 result = await HydraHealthCheck().check()
         assert result.status == STATUS_ERROR
         assert "connection" in (result.message or "").lower()
@@ -408,11 +439,15 @@ class TestHydraHealthCheck:
 
     async def test_error_on_timeout(self):
         import requests as req_mod
+
         with patch("requests.post", side_effect=req_mod.exceptions.Timeout()):
-            with patch.dict("os.environ", {
-                "HYDRADB_API_KEY": "key",
-                "HYDRADB_TENANT_ID": "t",
-            }):
+            with patch.dict(
+                "os.environ",
+                {
+                    "HYDRADB_API_KEY": "key",
+                    "HYDRADB_TENANT_ID": "t",
+                },
+            ):
                 result = await HydraHealthCheck().check()
         assert result.status == STATUS_ERROR
         assert "timed out" in (result.message or "")
@@ -454,9 +489,7 @@ class TestLLMHealthCheck:
 
         with patch("openai.OpenAI") as MockClient:
             instance = MockClient.return_value
-            instance.chat.completions.create.side_effect = oai.APIConnectionError(
-                request=MagicMock()
-            )
+            instance.chat.completions.create.side_effect = oai.APIConnectionError(request=MagicMock())
             with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}):
                 result = await LLMHealthCheck().check()
         assert result.status == STATUS_ERROR
@@ -490,9 +523,7 @@ class TestSlackHealthCheck:
 
         with patch("slack_sdk.WebClient") as MockWC:
             instance = MockWC.return_value
-            instance.auth_test.side_effect = SlackApiError(
-                message="invalid_auth", response=mock_response
-            )
+            instance.auth_test.side_effect = SlackApiError(message="invalid_auth", response=mock_response)
             with patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-bad"}):
                 result = await SlackHealthCheck().check()
         assert result.status == STATUS_WARNING
@@ -544,6 +575,7 @@ class TestDatabasePlaceholder:
 # Future service registration
 # ---------------------------------------------------------------------------
 
+
 class TestRegistration:
     def test_registered_check_appears_in_detailed_health(self):
         class _FutureCheck(HealthCheck):
@@ -559,6 +591,7 @@ class TestRegistration:
 
         # Build a registry that includes all + our new one
         from health import _get_registry
+
         registry = _get_registry()
         names = [c.name for c in registry]
         assert "future_service" in names
@@ -585,6 +618,7 @@ class TestRegistration:
 # ---------------------------------------------------------------------------
 # Structured log output from health checks
 # ---------------------------------------------------------------------------
+
 
 class TestHealthLogging:
     def _capture_health_logs(self, check: HealthCheck):

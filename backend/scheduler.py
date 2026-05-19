@@ -24,7 +24,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from ingestion.ingest_slack import main as run_ingestion
 from logging_config import get_logger
-from retry import retry, RetryExhausted
+from retry import RetryExhausted, retry
 
 logger = get_logger(__name__)
 
@@ -45,15 +45,11 @@ JOB_ID = "second-brain-ingestion"
 
 
 def auto_ingest_enabled() -> bool:
-    return os.getenv("AUTO_INGEST", "").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
+    return os.getenv("AUTO_INGEST", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def run_on_startup_enabled() -> bool:
-    return os.getenv("AUTO_INGEST_RUN_ON_STARTUP", "").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
+    return os.getenv("AUTO_INGEST_RUN_ON_STARTUP", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def interval_minutes() -> int:
@@ -106,8 +102,8 @@ def start_scheduler() -> None:
         trigger="interval",
         minutes=minutes,
         id=JOB_ID,
-        max_instances=1,        # never run two ingestions in parallel
-        coalesce=True,           # if we fall behind, run once not N times
+        max_instances=1,  # never run two ingestions in parallel
+        coalesce=True,  # if we fall behind, run once not N times
         replace_existing=True,
     )
     _scheduler.start()

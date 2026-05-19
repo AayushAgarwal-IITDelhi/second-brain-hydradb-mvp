@@ -31,13 +31,12 @@ import openai
 from openai import APITimeoutError, OpenAI
 
 from errors import LLMError, UpstreamTimeoutError
-from retry import RetryExhausted
 from prompts import (
     INSUFFICIENT_CONTEXT_ANSWER,
     format_conversation_history,
     system_prompt_for_mode,
 )
-from retry import retry
+from retry import RetryExhausted, retry
 
 
 @retry(
@@ -138,22 +137,20 @@ def generate_grounded_answer(
             model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_message},
+                {"role": "user", "content": user_message},
             ],
             temperature=0.1,
             max_tokens=max_tokens,
         )
     except APITimeoutError as e:
-        raise UpstreamTimeoutError(
-            log_context=f"LLM timeout: {type(e).__name__}"
-        )
+        raise UpstreamTimeoutError(log_context=f"LLM timeout: {type(e).__name__}")
     except RetryExhausted as e:
         # Retries exhausted — preserve the timeout signal if that was the root cause.
         if isinstance(e.__cause__, APITimeoutError):
-            raise UpstreamTimeoutError(
-                log_context=f"LLM timeout after retries: {type(e.__cause__).__name__}"
-            ) from e
-        raise LLMError(log_context=f"LLM call failed after retries: {type(e.__cause__).__name__ if e.__cause__ else type(e).__name__}")
+            raise UpstreamTimeoutError(log_context=f"LLM timeout after retries: {type(e.__cause__).__name__}") from e
+        raise LLMError(
+            log_context=f"LLM call failed after retries: {type(e.__cause__).__name__ if e.__cause__ else type(e).__name__}"
+        )
     except Exception as e:  # noqa: BLE001 -- surface any SDK error to the API
         # Log only the exception class name — never the API key, prompt,
         # or context. The user-facing detail is generic by design.
@@ -204,16 +201,14 @@ def stream_grounded_answer(
             model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_message},
+                {"role": "user", "content": user_message},
             ],
             temperature=0.1,
             max_tokens=max_tokens,
             stream=True,
         )
     except APITimeoutError as e:
-        raise UpstreamTimeoutError(
-            log_context=f"LLM stream timeout: {type(e).__name__}"
-        )
+        raise UpstreamTimeoutError(log_context=f"LLM stream timeout: {type(e).__name__}")
     except Exception as e:  # noqa: BLE001
         raise LLMError(log_context=f"LLM stream open failed: {type(e).__name__}")
 
@@ -227,8 +222,6 @@ def stream_grounded_answer(
             if piece:
                 yield piece
     except APITimeoutError as e:
-        raise UpstreamTimeoutError(
-            log_context=f"LLM stream timeout: {type(e).__name__}"
-        )
+        raise UpstreamTimeoutError(log_context=f"LLM stream timeout: {type(e).__name__}")
     except Exception as e:  # noqa: BLE001
         raise LLMError(log_context=f"LLM stream iter failed: {type(e).__name__}")

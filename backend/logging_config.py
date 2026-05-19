@@ -30,12 +30,33 @@ _workspace_id: ContextVar[Optional[str]] = ContextVar('workspace_id', default=No
 # ---------------------------------------------------------------------- #
 # JSON formatter
 # ---------------------------------------------------------------------- #
-_STDLIB_ATTRS = frozenset({
-    'args', 'asctime', 'created', 'exc_info', 'exc_text', 'filename',
-    'funcName', 'levelname', 'levelno', 'lineno', 'message', 'module',
-    'msecs', 'msg', 'name', 'pathname', 'process', 'processName',
-    'relativeCreated', 'stack_info', 'taskName', 'thread', 'threadName',
-})
+_STDLIB_ATTRS = frozenset(
+    {
+        'args',
+        'asctime',
+        'created',
+        'exc_info',
+        'exc_text',
+        'filename',
+        'funcName',
+        'levelname',
+        'levelno',
+        'lineno',
+        'message',
+        'module',
+        'msecs',
+        'msg',
+        'name',
+        'pathname',
+        'process',
+        'processName',
+        'relativeCreated',
+        'stack_info',
+        'taskName',
+        'thread',
+        'threadName',
+    }
+)
 
 
 class _JsonFormatter(logging.Formatter):
@@ -55,10 +76,7 @@ class _JsonFormatter(logging.Formatter):
             'workspace_id': _workspace_id.get(),
         }
 
-        extra = {
-            k: v for k, v in record.__dict__.items()
-            if k not in _STDLIB_ATTRS and not k.startswith('_')
-        }
+        extra = {k: v for k, v in record.__dict__.items() if k not in _STDLIB_ATTRS and not k.startswith('_')}
         if extra:
             entry['extra'] = extra
 
@@ -83,8 +101,10 @@ def configure_logging(level: str = 'INFO') -> None:
     this more than once will not add duplicate handlers.
     """
     root = logging.getLogger()
-    if any(isinstance(h, logging.StreamHandler) and isinstance(getattr(h, 'formatter', None), _JsonFormatter)
-           for h in root.handlers):
+    if any(
+        isinstance(h, logging.StreamHandler) and isinstance(getattr(h, 'formatter', None), _JsonFormatter)
+        for h in root.handlers
+    ):
         return  # already configured
 
     handler = logging.StreamHandler()

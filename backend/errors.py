@@ -32,6 +32,7 @@ class AppError(Exception):
         error_type      -> short machine-readable tag for the UI to switch on
         default_detail  -> user-facing message when caller doesn't pass one
     """
+
     status_code: int = 500
     error_type: str = "internal_error"
     default_detail: str = "Something went wrong."

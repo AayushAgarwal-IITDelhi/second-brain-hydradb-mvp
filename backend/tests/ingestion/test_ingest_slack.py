@@ -3,7 +3,7 @@
 import os
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -32,16 +32,19 @@ def _mock_slack():
 class TestParseChannelIds:
     def test_parses_comma_separated(self):
         from ingestion.ingest_slack import parse_channel_ids
+
         with patch.dict(os.environ, {"SLACK_CHANNEL_IDS": "C1,C2,C3"}):
             assert parse_channel_ids() == ["C1", "C2", "C3"]
 
     def test_strips_whitespace(self):
         from ingestion.ingest_slack import parse_channel_ids
+
         with patch.dict(os.environ, {"SLACK_CHANNEL_IDS": " C1 , C2 "}):
             assert parse_channel_ids() == ["C1", "C2"]
 
     def test_empty_returns_empty_list(self):
         from ingestion.ingest_slack import parse_channel_ids
+
         with patch.dict(os.environ, {"SLACK_CHANNEL_IDS": ""}):
             assert parse_channel_ids() == []
 
@@ -51,12 +54,14 @@ class TestForceReingestEnabled:
     @pytest.mark.parametrize("val", ["true", "1", "yes", "on"])
     def test_truthy_values(self, val):
         from ingestion.ingest_slack import force_reingest_enabled
+
         with patch.dict(os.environ, {"FORCE_REINGEST": val}):
             assert force_reingest_enabled() is True
 
     @pytest.mark.parametrize("val", ["false", "0", "no", "off", ""])
     def test_falsy_values(self, val):
         from ingestion.ingest_slack import force_reingest_enabled
+
         with patch.dict(os.environ, {"FORCE_REINGEST": val}):
             assert force_reingest_enabled() is False
 
@@ -65,10 +70,12 @@ class TestForceReingestEnabled:
 class TestMakeSnippet:
     def test_short_text_unchanged(self):
         from ingestion.ingest_slack import _make_snippet
+
         assert _make_snippet("hello") == "hello"
 
     def test_long_text_truncated_with_ellipsis(self):
         from ingestion.ingest_slack import _make_snippet
+
         text = "a" * 300
         result = _make_snippet(text)
         assert result.endswith("...")
@@ -76,15 +83,18 @@ class TestMakeSnippet:
 
     def test_empty_text_returns_empty(self):
         from ingestion.ingest_slack import _make_snippet
+
         assert _make_snippet("") == ""
 
     def test_newlines_collapsed(self):
         from ingestion.ingest_slack import _make_snippet
+
         result = _make_snippet("line1\nline2\nline3")
         assert "\n" not in result
 
     def test_custom_limit(self):
         from ingestion.ingest_slack import _make_snippet
+
         result = _make_snippet("x" * 100, limit=50)
         assert result.endswith("...")
 
@@ -93,24 +103,29 @@ class TestMakeSnippet:
 class TestSafeFilenamePart:
     def test_alphanumeric_unchanged(self):
         from ingestion.ingest_slack import _safe_filename_part
+
         assert _safe_filename_part("hello123") == "hello123"
 
     def test_spaces_replaced(self):
         from ingestion.ingest_slack import _safe_filename_part
+
         result = _safe_filename_part("all second brain")
         assert " " not in result
 
     def test_hyphens_kept(self):
         from ingestion.ingest_slack import _safe_filename_part
+
         assert _safe_filename_part("all-second-brain") == "all-second-brain"
 
     def test_slashes_replaced(self):
         from ingestion.ingest_slack import _safe_filename_part
+
         result = _safe_filename_part("a/b")
         assert "/" not in result
 
     def test_empty_string_returns_unknown(self):
         from ingestion.ingest_slack import _safe_filename_part
+
         assert _safe_filename_part("") == "unknown"
 
 
@@ -118,14 +133,17 @@ class TestSafeFilenamePart:
 class TestTsForFilename:
     def test_strips_fractional_part(self):
         from ingestion.ingest_slack import _ts_for_filename
+
         assert _ts_for_filename("1778775842.876209") == "1778775842"
 
     def test_empty_returns_unknown(self):
         from ingestion.ingest_slack import _ts_for_filename
+
         assert _ts_for_filename("") == "unknown"
 
     def test_no_dot_returned_unchanged(self):
         from ingestion.ingest_slack import _ts_for_filename
+
         assert _ts_for_filename("1778775842") == "1778775842"
 
 
@@ -133,6 +151,7 @@ class TestTsForFilename:
 class TestBuildMessageFile:
     def _build(self, **kwargs):
         from ingestion.ingest_slack import build_message_file
+
         msg = {
             "ts": "1000000001.000000",
             "user": "U001",
@@ -181,6 +200,7 @@ class TestBuildMessageFile:
 class TestBuildThreadFile:
     def _build(self, replies=None):
         from ingestion.ingest_slack import build_thread_file
+
         parent = {"ts": "100.0", "user": "U001", "text": "parent message"}
         replies = replies or [
             {"ts": "100.0", "user": "U001", "text": "parent message"},  # Slack includes parent
@@ -219,10 +239,12 @@ class TestBuildThreadFile:
 class TestProcessChannel:
     def _state(self, tmp_state_path):
         from ingestion.ingestion_state import IngestionState
+
         return IngestionState(tmp_state_path)
 
     def test_no_messages_returns_empty_files(self, tmp_state_path):
         from ingestion.ingest_slack import process_channel
+
         slack = _mock_slack()
         slack.fetch_channel_messages.return_value = []
         result = process_channel(slack, "C123", self._state(tmp_state_path), force=False)
@@ -230,6 +252,7 @@ class TestProcessChannel:
 
     def test_standalone_message_included(self, tmp_state_path):
         from ingestion.ingest_slack import process_channel
+
         slack = _mock_slack()
         slack.fetch_channel_messages.return_value = [
             _msg("100.0", "hello team"),
@@ -239,6 +262,7 @@ class TestProcessChannel:
 
     def test_thread_parent_fetches_replies(self, tmp_state_path):
         from ingestion.ingest_slack import process_channel
+
         slack = _mock_slack()
         parent = _msg("100.0", "parent", reply_count=2, thread_ts="100.0")
         slack.fetch_channel_messages.return_value = [parent]
@@ -252,6 +276,7 @@ class TestProcessChannel:
 
     def test_thread_reply_skipped(self, tmp_state_path):
         from ingestion.ingest_slack import process_channel
+
         slack = _mock_slack()
         slack.fetch_channel_messages.return_value = [
             _msg("200.0", "reply", thread_ts="100.0"),  # reply, not parent
@@ -261,6 +286,7 @@ class TestProcessChannel:
 
     def test_noise_message_skipped(self, tmp_state_path):
         from ingestion.ingest_slack import process_channel
+
         slack = _mock_slack()
         slack.fetch_channel_messages.return_value = [
             _msg("100.0", "", subtype="channel_join"),
@@ -271,6 +297,7 @@ class TestProcessChannel:
     def test_already_uploaded_skipped(self, tmp_state_path):
         from ingestion.ingest_slack import process_channel
         from ingestion.ingestion_state import IngestionState
+
         state = IngestionState(tmp_state_path)
         state.mark_uploaded("slack:C123:100.0", "f.md", "C123", "general")
         state.save()
@@ -284,6 +311,7 @@ class TestProcessChannel:
     def test_force_reingest_ignores_existing(self, tmp_state_path):
         from ingestion.ingest_slack import process_channel
         from ingestion.ingestion_state import IngestionState
+
         state = IngestionState(tmp_state_path)
         state.mark_uploaded("slack:C123:100.0", "f.md", "C123", "general")
         state.save()
@@ -298,29 +326,30 @@ class TestProcessChannel:
 # ── _record_successful_uploads ────────────────────────────────────────────
 class TestRecordSuccessfulUploads:
     def _batch(self):
-        return [{
-            "filename": "file1.md",
-            "content": "content",
-            "stable_key": "slack:C1:100.0",
-            "channel_id": "C1",
-            "channel_name": "general",
-            "ts": "100.0",
-            "thread_ts": None,
-            "user_name": "Alice",
-            "timestamp": "100.0",
-            "snippet": "hello",
-            "permalink": "https://slack.com/p",
-            "document_type": "message",
-        }]
+        return [
+            {
+                "filename": "file1.md",
+                "content": "content",
+                "stable_key": "slack:C1:100.0",
+                "channel_id": "C1",
+                "channel_name": "general",
+                "ts": "100.0",
+                "thread_ts": None,
+                "user_name": "Alice",
+                "timestamp": "100.0",
+                "snippet": "hello",
+                "permalink": "https://slack.com/p",
+                "document_type": "message",
+            }
+        ]
 
     def test_records_per_file_results(self, tmp_state_path):
         from ingestion.ingest_slack import _record_successful_uploads
         from ingestion.ingestion_state import IngestionState
+
         state = IngestionState(tmp_state_path)
         batch = self._batch()
-        response = {
-            "results": [{"filename": "file1.md", "status": "queued", "source_id": "doc-abc"}]
-        }
+        response = {"results": [{"filename": "file1.md", "status": "queued", "source_id": "doc-abc"}]}
         recorded = _record_successful_uploads(state, batch, response)
         assert recorded == 1
         assert state.has("slack:C1:100.0")
@@ -329,11 +358,10 @@ class TestRecordSuccessfulUploads:
     def test_failed_result_not_recorded(self, tmp_state_path):
         from ingestion.ingest_slack import _record_successful_uploads
         from ingestion.ingestion_state import IngestionState
+
         state = IngestionState(tmp_state_path)
         batch = self._batch()
-        response = {
-            "results": [{"filename": "file1.md", "status": "failed", "error": "oops"}]
-        }
+        response = {"results": [{"filename": "file1.md", "status": "failed", "error": "oops"}]}
         recorded = _record_successful_uploads(state, batch, response)
         assert recorded == 0
         assert not state.has("slack:C1:100.0")
@@ -341,6 +369,7 @@ class TestRecordSuccessfulUploads:
     def test_fallback_when_no_results_key(self, tmp_state_path):
         from ingestion.ingest_slack import _record_successful_uploads
         from ingestion.ingestion_state import IngestionState
+
         state = IngestionState(tmp_state_path)
         batch = self._batch()
         # Response without 'results' but with success_count
@@ -353,13 +382,16 @@ class TestRecordSuccessfulUploads:
 class TestFetchChannelName:
     def test_returns_channel_name(self):
         from ingestion.ingest_slack import fetch_channel_name
+
         slack = _mock_slack()
         slack.client.conversations_info.return_value = {"channel": {"name": "product"}}
         assert fetch_channel_name(slack, "C123") == "product"
 
     def test_falls_back_to_channel_id_on_error(self):
-        from ingestion.ingest_slack import fetch_channel_name
         from slack_sdk.errors import SlackApiError
+
+        from ingestion.ingest_slack import fetch_channel_name
+
         slack = _mock_slack()
         slack.client.conversations_info.side_effect = SlackApiError(
             message="not_in_channel",
