@@ -372,10 +372,16 @@ def _build_source_card(
     if entry is None:
         # Graceful fallback: keep the old minimal shape so callers can still
         # render something even if state is missing or doesn't know the doc.
+        # Also promote stable_key and channel from the raw chunk so that
+        # dedupe_by_stable_key and _source_passes_filters work correctly even
+        # without a state-file entry. (BUG-003 / BUG-004 fix)
         return {
-            "index":  index,
-            "source": minimal_source,
-            "score":  score,
+            "index":      index,
+            "source":     minimal_source,
+            "score":      score,
+            "stable_key": candidate_stable_key,
+            "channel":    _get_path(chunk, ("metadata", "channel"))
+                          if isinstance(chunk, dict) else None,
         }
 
     # Rich source card backed by ingestion state.

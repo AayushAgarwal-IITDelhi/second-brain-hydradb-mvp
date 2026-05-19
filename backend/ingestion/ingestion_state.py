@@ -40,11 +40,13 @@ with an empty channels dict, which means the next run will fetch full
 history (one-time cost) before incremental kicks in.
 """
 
+import fcntl
 import json
 import os
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Generator, Optional
 
 
 STATE_VERSION = 2
@@ -227,3 +229,36 @@ class IngestionState:
     def total_docs(self) -> int:
         """How many docs we've successfully recorded."""
         return len(self.entries)
+
+    # ----- cross-process locking ---------------------------------------- #
+    @classmethod
+    @contextmanager
+    def locked(cls, path: Path) -> Generator["IngestionState", None, None]:
+        """
+        Exclusive cross-process read-modify-save context manager.
+
+        Acquires a POSIX advisory lock on a `<path>.lock` sidecar file,
+        loads a fresh IngestionState from disk inside the lock, yields it
+        for in-memory mutations, then saves and releases the lock.
+
+        Usage::
+
+            with IngestionState.locked(STATE_PATH) as state:
+                state.mark_uploaded(...)
+                # save() is called automatically on context exit
+
+        Note: fcntl is POSIX-only (Linux / macOS). This is acceptable for
+        a Docker/Linux deployment. On Windows, replace fcntl.flock with
+        msvcrt.locking or use a third-party cross-platform lock library.
+        """
+        path = Path(path)
+        lock_path = path.with_suffix(".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                state = cls(path)   # fresh load while we hold the lock
+                yield state
+                state.save()
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)

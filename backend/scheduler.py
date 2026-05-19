@@ -18,7 +18,7 @@ Notes:
 
 import os
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -57,7 +57,7 @@ def _job_wrapper() -> None:
     never kills the scheduler thread — APScheduler would otherwise
     stop scheduling the job.
     """
-    started_at = datetime.utcnow().isoformat()
+    started_at = datetime.now(timezone.utc).isoformat()
     print(f"[scheduler] Ingestion job starting at {started_at} UTC")
     try:
         run_ingestion()
