@@ -32,7 +32,7 @@ jobs:
 
       - name: Run pytest with coverage
         env:
-          APP_API_KEY: ci-dummy-app-key
+          APP_API_KEY: test-secret-key
           HYDRADB_API_KEY: ci-dummy-hydradb-key
           HYDRADB_TENANT_ID: ci-dummy-tenant
           OPENAI_API_KEY: ci-dummy-openai-key
