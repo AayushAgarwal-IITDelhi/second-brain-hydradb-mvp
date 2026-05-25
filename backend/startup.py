@@ -24,6 +24,19 @@ REQUIRED_ENV_VARS = (
     "HYDRADB_API_KEY",
     "HYDRADB_TENANT_ID",
     "OPENAI_API_KEY",  # also used for OpenRouter and other OpenAI-compatible providers
+    # --- Supabase (Phase 1 multi-user) ---------------------------------
+    "SUPABASE_URL",
+    "SUPABASE_JWT_SECRET",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    # --- Slack Connect (Phase 3 per-workspace Slack OAuth) -------------
+    # SLACK_BOT_TOKEN / SLACK_CHANNEL_IDS are still honored by the
+    # prototype CLI ingestion (ingestion/ingest_slack.py) and the
+    # realtime webhook so existing tests pass. New per-workspace
+    # routes use the OAuth flow below instead.
+    "SLACK_CLIENT_ID",
+    "SLACK_CLIENT_SECRET",
+    "SLACK_REDIRECT_URI",
+    "SLACK_OAUTH_STATE_SECRET",
 )
 
 

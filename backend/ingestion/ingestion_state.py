@@ -40,7 +40,10 @@ with an empty channels dict, which means the next run will fetch full
 history (one-time cost) before incremental kicks in.
 """
 
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 import json
 import logging
 import os
@@ -257,10 +260,13 @@ class IngestionState:
         lock_path = path.with_suffix(".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open("a") as lf:
-            fcntl.flock(lf, fcntl.LOCK_EX)
+            if fcntl:
+                fcntl.flock(lf, fcntl.LOCK_EX)
+
             try:
                 state = cls(path)   # fresh load while we hold the lock
                 yield state
                 state.save()
             finally:
-                fcntl.flock(lf, fcntl.LOCK_UN)
+                if fcntl:
+                    fcntl.flock(lf, fcntl.LOCK_UN)

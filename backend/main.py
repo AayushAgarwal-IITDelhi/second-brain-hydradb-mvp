@@ -2,14 +2,41 @@
 FastAPI app for the Second Brain MVP.
 
 Endpoints:
-    GET  /                    -> service info card             (public)
-    GET  /api/health          -> {"status": "ok", ...}         (public)
-    POST /api/query           -> {"answer", "sources", ...}    (X-API-Key + rate limited)
-    POST /api/query/stream    -> Server-Sent Events            (X-API-Key + rate limited)
-    GET  /api/admin/status    -> ingestion status snapshot     (X-API-Key)
-    POST /slack/events        -> Slack Events API webhook      (Slack signature)
+    GET    /                                              -> service info card             (public)
+    GET    /api/health                                    -> {"status": "ok", ...}         (public)
+    POST   /api/query                                     -> {"answer", "sources", ...}    (Supabase JWT + Workspace)
+    POST   /api/query/stream                              -> Server-Sent Events            (Supabase JWT + Workspace)
+    GET    /api/me                                        -> {"id", "email"}               (Supabase JWT)
+    GET    /api/me/workspaces                             -> [{"id","name","slug","role"}] (Supabase JWT)
+    GET    /api/chat/sessions                             -> [{...sessions...}]            (Supabase JWT + Workspace)
+    POST   /api/chat/sessions                             -> created session row           (Supabase JWT + Workspace)
+    GET    /api/chat/sessions/{id}/messages               -> [{...messages...}]            (Supabase JWT + Workspace)
+    POST   /api/chat/sessions/{id}/messages               -> created message row           (Supabase JWT + Workspace)
+    GET    /api/saved-answers                             -> [{...saved answers...}]       (Supabase JWT + Workspace)
+    POST   /api/saved-answers                             -> created saved answer row      (Supabase JWT + Workspace)
+    DELETE /api/saved-answers/{id}                        -> {"id","deleted":true}         (Supabase JWT + Workspace)
+    GET    /api/slack/connect-url                         -> {"url": "..."}                (Supabase JWT + Workspace)
+    GET    /api/slack/oauth/callback                      -> redirect to frontend          (signed state token)
+    GET    /api/slack/channels                            -> {"connected", "channels"}     (Supabase JWT + Workspace)
+    POST   /api/slack/channels                            -> {"selected_count"}            (Supabase JWT + Workspace)
+    POST   /api/slack/ingest                              -> {"status": "started"}         (Supabase JWT + Workspace)
+    GET    /api/admin/status                              -> ingestion status snapshot     (X-API-Key, legacy)
+    POST   /slack/events                                  -> Slack Events API webhook      (Slack signature)
 
-The frontend MUST send `X-API-Key: <APP_API_KEY>` on every protected call.
+User-facing routes require:
+    Authorization: Bearer <supabase_jwt>
+    X-Workspace-Id: <uuid of an active workspace the user is a member of>
+
+The admin/internal `/api/admin/status` route is still gated by the
+shared APP_API_KEY (X-API-Key) — moving it to Supabase admin-role is
+deferred.
+
+The /slack/oauth/callback route is browser-redirected by Slack itself,
+so it cannot require an Authorization header. Instead the state
+parameter is a signed token binding the OAuth attempt to a specific
+workspace + user; the handler verifies that signature before storing
+the installation.
+
 The /slack/events endpoint is public but authenticated via Slack's
 HMAC-SHA256 request signature — see slack_signature.py.
 """
@@ -32,6 +59,12 @@ from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field  # noqa: E402
 
 from auth import require_api_key  # noqa: E402
+from auth_supabase import (  # noqa: E402
+    SupabaseUser,
+    WorkspaceContext,
+    require_user,
+    require_workspace,
+)
 from date_utils import parse_date_query  # noqa: E402
 from errors import AppError, app_error_handler  # noqa: E402
 from llm import stream_grounded_answer  # noqa: E402
@@ -54,6 +87,32 @@ from request_context import RequestContextMiddleware  # noqa: E402
 from scheduler import auto_ingest_enabled, start_scheduler, stop_scheduler  # noqa: E402
 from slack_signature import verify_slack_signature  # noqa: E402
 from startup import validate_required_env  # noqa: E402
+from supabase_client import (  # noqa: E402
+    create_chat_message,
+    create_chat_session,
+    create_saved_answer,
+    delete_saved_answer,
+    get_slack_installation,
+    get_slack_installation_public,
+    list_chat_messages,
+    list_chat_sessions,
+    list_saved_answers,
+    list_selected_channel_ids,
+    list_user_workspaces,
+    list_workspace_channels,
+    set_selected_channels,
+    upsert_slack_channels,
+    upsert_slack_installation,
+)
+from slack_oauth import (  # noqa: E402
+    build_connect_url,
+    exchange_code,
+    installation_from_oauth_response,
+    list_slack_channels,
+    run_workspace_ingest,
+    slack_oauth_configured,
+    verify_oauth_state,
+)
 
 configure_logging(level=os.getenv('LOG_LEVEL', 'INFO'))
 logger = get_logger(__name__)
@@ -92,7 +151,12 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "X-API-Key"],
+    allow_headers=[
+        "Content-Type",
+        "X-API-Key",
+        "Authorization",
+        "X-Workspace-Id",
+    ],
 )
 app.add_middleware(RequestContextMiddleware)
 
@@ -401,16 +465,21 @@ def health() -> Dict[str, str]:
 # ---------- Protected routes ---------- #
 @app.post(
     "/api/query",
-    dependencies=[Depends(require_api_key), Depends(rate_limit_dependency)],
+    dependencies=[Depends(rate_limit_dependency)],
 )
-def query(req: QueryRequest) -> Dict[str, Any]:
+def query(
+    req: QueryRequest,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
     """
     Retrieve Slack context from HydraDB, ask the cloud LLM for a grounded
     answer, and return it along with the source list.
 
     Cached responses are flagged via debug.cache_hit=true.
 
-    Requires header:  X-API-Key: <APP_API_KEY>
+    Requires headers:
+        Authorization: Bearer <supabase_jwt>
+        X-Workspace-Id: <uuid>
     """
     resolved = _resolve_date_filters(req)
     history = _normalize_history(req)
@@ -488,9 +557,13 @@ def _sse_event(event: str, data: Any) -> bytes:
 
 @app.post(
     "/api/query/stream",
-    dependencies=[Depends(require_api_key), Depends(rate_limit_dependency)],
+    dependencies=[Depends(rate_limit_dependency)],
 )
-def query_stream(req: QueryRequest, request: Request) -> StreamingResponse:
+def query_stream(
+    req: QueryRequest,
+    request: Request,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> StreamingResponse:
     """
     Same request schema as POST /api/query, but the answer is streamed
     via Server-Sent Events. Event types:
@@ -733,6 +806,39 @@ async def slack_events(
     return JSONResponse(content={"ok": True})
 
 
+# ---------- Phase 2 request models (chat history + saved answers) ---------- #
+class ChatSessionCreate(BaseModel):
+    """Body for POST /api/chat/sessions."""
+    model_config = ConfigDict(extra="forbid")
+    title: Optional[str] = Field(default=None, max_length=200)
+
+
+class ChatMessageCreate(BaseModel):
+    """Body for POST /api/chat/sessions/{session_id}/messages."""
+    model_config = ConfigDict(extra="forbid")
+    role:    Literal["user", "assistant"]
+    content: str = Field(default="", max_length=200_000)
+    sources: Optional[List[Dict[str, Any]]] = None
+
+
+class SavedAnswerCreate(BaseModel):
+    """Body for POST /api/saved-answers."""
+    model_config = ConfigDict(extra="forbid")
+    question: str = Field(default="", max_length=5000)
+    answer:   str = Field(default="", max_length=200_000)
+    sources:  Optional[List[Dict[str, Any]]] = None
+    mode:     Optional[str] = Field(default=None, max_length=64)
+    filters:  Optional[Dict[str, Any]] = None
+    debug:    Optional[Dict[str, Any]] = None
+
+
+# ---------- Phase 3 request models (Slack Connect) ---------- #
+class SlackChannelSelection(BaseModel):
+    """Body for POST /api/slack/channels."""
+    model_config = ConfigDict(extra="forbid")
+    selected_channel_ids: List[str] = Field(default_factory=list)
+
+
 # ---------- Admin status (light, read-only) ---------- #
 @app.get(
     "/api/admin/status",
@@ -744,3 +850,418 @@ def admin_status() -> Dict[str, Any]:
     Does NOT expose any per-document content — only counters and flags.
     """
     return admin_status_snapshot(scheduler_enabled=auto_ingest_enabled())
+
+
+# ---------- User profile + workspaces (Phase 1 multi-user) ---------- #
+@app.get("/api/me")
+def me(user: SupabaseUser = Depends(require_user)) -> Dict[str, Any]:
+    """
+    Return the JWT-verified caller's identity. Useful for the frontend
+    to confirm auth without fetching the workspaces list.
+    """
+    return {"id": user.id, "email": user.email}
+
+
+@app.get("/api/me/workspaces")
+def my_workspaces(
+    user: SupabaseUser = Depends(require_user),
+) -> List[Dict[str, Any]]:
+    """
+    Return the workspaces the caller is a member of, with their role.
+    The frontend uses this to populate the workspace switcher and to
+    decide which X-Workspace-Id to send on subsequent /api/query calls.
+    """
+    return list_user_workspaces(user_id=user.id)
+
+
+# ---------- Chat sessions (Phase 2) ---------- #
+# Sessions are personal-within-workspace: shared organization but
+# private threads. Messages live under sessions and are read-scoped by
+# the same rule. All routes require Supabase JWT + X-Workspace-Id —
+# enforced once by the require_workspace dependency.
+
+@app.get("/api/chat/sessions")
+def chat_sessions_list(
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> List[Dict[str, Any]]:
+    """Return the caller's chat sessions in this workspace, newest first."""
+    return list_chat_sessions(
+        workspace_id=workspace.workspace_id,
+        user_id=workspace.user.id,
+    )
+
+
+@app.post("/api/chat/sessions", status_code=status.HTTP_201_CREATED)
+def chat_sessions_create(
+    req: ChatSessionCreate,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """Create a new chat session in the caller's workspace."""
+    row = create_chat_session(
+        workspace_id=workspace.workspace_id,
+        user_id=workspace.user.id,
+        title=req.title or "New chat",
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not create chat session.",
+        )
+    return row
+
+
+@app.get("/api/chat/sessions/{session_id}/messages")
+def chat_session_messages_list(
+    session_id: str,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> List[Dict[str, Any]]:
+    """
+    Return the messages in a session, oldest first.
+
+    Scoped to the caller's own session inside the active workspace; an
+    unknown / forbidden session_id returns an empty list rather than a
+    404 so it can't be used for existence-probing.
+    """
+    return list_chat_messages(
+        session_id=session_id,
+        workspace_id=workspace.workspace_id,
+        user_id=workspace.user.id,
+    )
+
+
+@app.post(
+    "/api/chat/sessions/{session_id}/messages",
+    status_code=status.HTTP_201_CREATED,
+)
+def chat_session_messages_create(
+    session_id: str,
+    req: ChatMessageCreate,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """Append a user / assistant message to a session the caller owns."""
+    row = create_chat_message(
+        session_id=session_id,
+        workspace_id=workspace.workspace_id,
+        user_id=workspace.user.id,
+        role=req.role,
+        content=req.content,
+        sources=req.sources,
+    )
+    if row is None:
+        # Distinguish "session doesn't belong to caller" from real DB
+        # failure isn't worth a probe-able 404 — both map to the same
+        # client-visible refusal.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not append message to session.",
+        )
+    return row
+
+
+# ---------- Saved answers (Phase 2) ---------- #
+
+@app.get("/api/saved-answers")
+def saved_answers_list(
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> List[Dict[str, Any]]:
+    """Return the caller's saved answers in this workspace, newest first."""
+    return list_saved_answers(
+        workspace_id=workspace.workspace_id,
+        user_id=workspace.user.id,
+    )
+
+
+@app.post("/api/saved-answers", status_code=status.HTTP_201_CREATED)
+def saved_answers_create(
+    req: SavedAnswerCreate,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """Save an assistant answer to the caller's bookmarks."""
+    row = create_saved_answer(
+        workspace_id=workspace.workspace_id,
+        user_id=workspace.user.id,
+        question=req.question,
+        answer=req.answer,
+        sources=req.sources,
+        mode=req.mode,
+        filters=req.filters,
+        debug=req.debug,
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not save answer.",
+        )
+    return row
+
+
+@app.delete("/api/saved-answers/{saved_id}")
+def saved_answers_delete(
+    saved_id: str,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """Delete a saved answer the caller owns."""
+    removed = delete_saved_answer(
+        saved_id=saved_id,
+        workspace_id=workspace.workspace_id,
+        user_id=workspace.user.id,
+    )
+    if not removed:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Saved answer not found.",
+        )
+    return {"id": saved_id, "deleted": True}
+
+
+# ---------- Slack Connect (Phase 3) ---------- #
+# Per-workspace Slack OAuth. The bot token Slack returns is stored in
+# Supabase (slack_installations.bot_token) and never echoed back to
+# the frontend. The frontend only needs to know that Slack is connected
+# (team name + when), then can list channels and toggle which ones to
+# ingest.
+
+def _frontend_base_url() -> str:
+    """
+    Where the OAuth callback should redirect after success/failure.
+    Falls back to the first allowed CORS origin (which is where the
+    frontend dev server runs) so a missing FRONTEND_BASE_URL doesn't
+    bounce the user to localhost:8000.
+    """
+    explicit = (os.getenv("FRONTEND_BASE_URL") or "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    if ALLOWED_ORIGINS:
+        return ALLOWED_ORIGINS[0].rstrip("/")
+    return "http://localhost:5173"
+
+
+@app.get("/api/slack/connect-url")
+def slack_connect_url(
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, str]:
+    """
+    Return a one-shot Slack OAuth authorize URL the frontend should
+    redirect the user to. The URL embeds a signed state token binding
+    this attempt to the caller's workspace + user.
+
+    503 if Slack OAuth isn't configured in the env — the frontend uses
+    this status to render a "Slack integration is disabled" message
+    rather than a broken Connect button.
+    """
+    if not slack_oauth_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Slack OAuth is not configured on the server.",
+        )
+    try:
+        url = build_connect_url(
+            workspace_id=workspace.workspace_id,
+            user_id=workspace.user.id,
+        )
+    except RuntimeError as e:
+        # SLACK_OAUTH_STATE_SECRET missing — 503, not 500, so the
+        # client message is consistent with "OAuth disabled".
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(e),
+        )
+    return {"url": url}
+
+
+@app.get("/api/slack/oauth/callback")
+def slack_oauth_callback(
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+):
+    """
+    Slack redirects the user's browser here after they approve (or
+    deny) the install. We cannot require an Authorization header on
+    this route — Slack's redirect doesn't carry one. Instead we:
+
+      1. Verify the state token's HMAC signature + expiry. The token
+         was minted by /api/slack/connect-url, which DID require
+         workspace auth, so a valid state binds this callback to a
+         specific (workspace_id, user_id).
+      2. Exchange the code for a bot token via Slack's oauth.v2.access.
+      3. Upsert the installation into slack_installations.
+      4. Redirect the user back to the frontend with a short status
+         query string so the UI can show a toast.
+
+    All failure modes redirect with `?slack_connect=error&reason=...`
+    so the frontend can surface a clean message instead of a JSON
+    blob in the address bar.
+    """
+    frontend = _frontend_base_url()
+
+    if error:
+        # User canceled or Slack returned an error.
+        return _redirect_with_status(frontend, "error", error)
+    if not code or not state:
+        return _redirect_with_status(frontend, "error", "missing_params")
+
+    payload = verify_oauth_state(state)
+    if not payload:
+        return _redirect_with_status(frontend, "error", "bad_state")
+
+    data = exchange_code(code)
+    if not data:
+        return _redirect_with_status(frontend, "error", "exchange_failed")
+
+    row = installation_from_oauth_response(data)
+    if not row.get("slack_team_id") or not row.get("bot_token"):
+        return _redirect_with_status(frontend, "error", "incomplete_install")
+
+    saved = upsert_slack_installation(
+        workspace_id=payload["workspace_id"],
+        slack_team_id=row["slack_team_id"],
+        slack_team_name=row["slack_team_name"],
+        bot_user_id=row["bot_user_id"],
+        bot_token=row["bot_token"],
+        scopes=row["scopes"],
+    )
+    if not saved:
+        return _redirect_with_status(frontend, "error", "persist_failed")
+
+    return _redirect_with_status(frontend, "ok", row["slack_team_name"] or "")
+
+
+def _redirect_with_status(frontend: str, result: str, reason: str):
+    """
+    Build the post-callback redirect URL the user's browser lands on.
+    `reason` is included verbatim — never holds untrusted unbounded
+    input, since on success it's a Slack team name (already validated
+    by Slack) and on failure it's a short fixed code we choose.
+    """
+    from fastapi.responses import RedirectResponse  # noqa: PLC0415
+    qs = urlencode_safely({"slack_connect": result, "reason": reason})
+    return RedirectResponse(url=f"{frontend}/?{qs}", status_code=302)
+
+
+def urlencode_safely(d: Dict[str, str]) -> str:
+    """
+    Tiny urlencode wrapper that drops empty/None values so the final
+    URL stays tidy. We don't want `&reason=` cluttering the query
+    string on a successful connect where reason happens to be blank.
+    """
+    from urllib.parse import urlencode  # noqa: PLC0415
+    cleaned = {k: v for k, v in d.items() if v not in (None, "")}
+    return urlencode(cleaned)
+
+
+@app.get("/api/slack/channels")
+def slack_channels_list(
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Return the current Slack-channel picker state for this workspace.
+
+    If Slack isn't connected yet, returns `connected: false` and an
+    empty channel list — the frontend uses that to show the Connect
+    button instead of a picker.
+
+    If Slack IS connected, we refresh the channel list from Slack's
+    API (upserting into slack_channels) BEFORE reading it back so the
+    user always sees the current state of their Slack workspace.
+    Selection state is preserved across the refresh — only `name` and
+    `is_archived` get updated.
+    """
+    install = get_slack_installation(workspace_id=workspace.workspace_id)
+    if not install:
+        return {
+            "connected": False,
+            "team_name": "",
+            "channels":  [],
+        }
+
+    bot_token = (install.get("bot_token") or "").strip()
+    if bot_token:
+        try:
+            fresh = list_slack_channels(bot_token)
+        except Exception:  # noqa: BLE001
+            fresh = []
+        if fresh:
+            upsert_slack_channels(
+                workspace_id=workspace.workspace_id,
+                channels=fresh,
+            )
+
+    rows = list_workspace_channels(workspace_id=workspace.workspace_id)
+    return {
+        "connected": True,
+        "team_name": install.get("slack_team_name") or "",
+        "channels":  rows,
+    }
+
+
+@app.post("/api/slack/channels")
+def slack_channels_save(
+    req: SlackChannelSelection,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Replace the workspace's selected-channel set. Channels not present
+    in the request are flipped to is_selected=false; channels listed
+    are flipped to is_selected=true. We do NOT allow inserting brand
+    new channel rows here — the rows must already exist (created by
+    the previous GET, which refreshes from Slack).
+    """
+    ok = set_selected_channels(
+        workspace_id=workspace.workspace_id,
+        selected_ids=req.selected_channel_ids,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not update channel selection.",
+        )
+    return {"selected_count": len(req.selected_channel_ids)}
+
+
+@app.post("/api/slack/ingest", status_code=status.HTTP_202_ACCEPTED)
+def slack_ingest(
+    background_tasks: BackgroundTasks,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Kick off an ingestion run for this workspace's selected channels.
+    Returns immediately with 202; the actual work happens in a
+    BackgroundTask so the request doesn't block on Slack/HydraDB I/O.
+
+    The runner re-uses the existing ingestion primitives — same chunk
+    layout, same dedupe state file. Moving state into Supabase is
+    explicitly out of scope for Phase 3.
+    """
+    install = get_slack_installation(workspace_id=workspace.workspace_id)
+    if not install:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Slack is not connected for this workspace.",
+        )
+    bot_token = (install.get("bot_token") or "").strip()
+    if not bot_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Stored Slack installation is missing a bot token.",
+        )
+
+    channel_ids = list_selected_channel_ids(
+        workspace_id=workspace.workspace_id,
+    )
+    if not channel_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No channels selected for ingestion.",
+        )
+
+    background_tasks.add_task(
+        run_workspace_ingest,
+        workspace_id=workspace.workspace_id,
+        bot_token=bot_token,
+        channel_ids=channel_ids,
+    )
+    return {
+        "status":           "started",
+        "channels_queued":  len(channel_ids),
+    }

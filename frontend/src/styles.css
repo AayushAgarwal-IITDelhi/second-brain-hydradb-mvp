@@ -1398,3 +1398,255 @@ body {
   flex-wrap: wrap;
   margin-top: 4px;
 }
+/* ============================================================ */
+/* Phase 1: Supabase auth shell + workspace switcher             */
+/* ============================================================ */
+
+.auth-shell {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg, #fafafa);
+}
+
+.auth-shell__card {
+  width: 100%;
+  max-width: 360px;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #e5e5e5);
+  border-radius: 12px;
+  padding: 28px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.04);
+}
+
+.auth-shell__title {
+  margin: 0 0 4px;
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.auth-shell__muted {
+  margin: 0 0 8px;
+  color: var(--text-muted, #666);
+  font-size: 14px;
+}
+
+.auth-shell__label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text, #222);
+}
+
+.auth-shell__label input {
+  font-size: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border, #d4d4d4);
+  border-radius: 8px;
+  background: var(--input-bg, #fff);
+  color: var(--text, #222);
+}
+
+.auth-shell__label input:focus {
+  outline: none;
+  border-color: var(--accent, #2563eb);
+}
+
+.auth-shell__submit {
+  margin-top: 4px;
+}
+
+.auth-shell__error {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: #b91c1c;
+  background: #fee2e2;
+  border-radius: 8px;
+}
+
+.auth-shell__info {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: #166534;
+  background: #dcfce7;
+  border-radius: 8px;
+}
+
+.auth-shell__link {
+  background: none;
+  border: none;
+  color: var(--accent, #2563eb);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 4px;
+  align-self: center;
+}
+
+.auth-shell__link:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* Workspace switcher floats in the top-right outside App.jsx */
+.ws-switcher {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  z-index: 100;
+}
+
+.ws-switcher__select {
+  font-size: 13px;
+  padding: 6px 10px;
+  border: 1px solid var(--border, #d4d4d4);
+  border-radius: 8px;
+  background: var(--surface, #fff);
+  color: var(--text, #222);
+}
+
+.ws-switcher__signout {
+  font-size: 13px;
+  padding: 6px 12px;
+  border: 1px solid var(--border, #d4d4d4);
+  border-radius: 8px;
+  background: var(--surface, #fff);
+  color: var(--text, #222);
+  cursor: pointer;
+}
+
+.ws-switcher__signout:hover {
+  background: var(--surface-hover, #f4f4f4);
+}
+
+/* ============================================================ */
+/* Phase 3: Slack settings panel                                 */
+/* ============================================================ */
+.slack-settings {
+  margin: 12px 16px 0;
+  padding: 16px 18px;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #e5e5e5);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.slack-settings__header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.slack-settings__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text, #222);
+}
+
+.slack-settings__hint {
+  font-size: 13px;
+  color: var(--text-muted, #666);
+}
+
+.slack-settings__muted {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted, #666);
+}
+
+.slack-settings__info {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: #166534;
+  background: #dcfce7;
+  border-radius: 8px;
+}
+
+.slack-settings__error {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: #b91c1c;
+  background: #fee2e2;
+  border-radius: 8px;
+}
+
+.slack-settings__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.slack-settings__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.slack-settings__row {
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+
+.slack-settings__row:hover {
+  background: var(--surface-hover, #f4f4f4);
+}
+
+.slack-settings__row--archived {
+  opacity: 0.7;
+}
+
+.slack-settings__check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text, #222);
+  cursor: pointer;
+}
+
+.slack-settings__check input[type="checkbox"] {
+  cursor: pointer;
+}
+
+.slack-settings__name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.slack-settings__tag {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--surface-hover, #f4f4f4);
+  color: var(--text-muted, #666);
+}
+
+.slack-settings__archived {
+  font-size: 13px;
+}
+
+.slack-settings__archived summary {
+  cursor: pointer;
+  color: var(--text-muted, #666);
+  padding: 4px 0;
+}

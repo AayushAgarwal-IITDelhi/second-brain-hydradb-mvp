@@ -7,3 +7,7 @@ openai>=1.30.0
 apscheduler>=3.10.0
 cachetools>=5.3.0
 dateparser>=1.2.0
+
+# --- Phase 1: Supabase multi-user auth ---
+supabase>=2.4.0
+PyJWT>=2.8.0

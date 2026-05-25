@@ -1,4 +1,13 @@
-"""Tests for auth.py — API key authentication."""
+"""
+Tests for auth.py — X-API-Key authentication.
+
+In Phase 1 (multi-user via Supabase), `/api/query` and `/api/query/stream`
+moved to Supabase JWT auth. The legacy X-API-Key path is kept ONLY for
+the internal `/api/admin/status` route. These tests now exercise that
+route, preserving end-to-end coverage of the require_api_key dependency.
+
+Tests for the Supabase JWT path live in tests/test_supabase_auth.py.
+"""
 
 import os
 from unittest.mock import patch
@@ -6,41 +15,31 @@ from unittest.mock import patch
 import pytest
 
 
-# ── Unit tests for require_api_key ────────────────────────────────────────
 class TestRequireApiKey:
     def test_valid_key_passes(self, client, auth_headers):
-        resp = client.get("/api/health", headers=auth_headers)
-        # /api/health is public but we exercise the auth path via /api/query below
+        resp = client.get("/api/admin/status", headers=auth_headers)
         assert resp.status_code == 200
 
     def test_missing_key_returns_401(self, client):
-        resp = client.post(
-            "/api/query",
-            json={"question": "what happened?"},
-        )
+        resp = client.get("/api/admin/status")
         assert resp.status_code == 401
 
     def test_wrong_key_returns_401(self, client):
-        resp = client.post(
-            "/api/query",
-            json={"question": "what happened?"},
+        resp = client.get(
+            "/api/admin/status",
             headers={"X-API-Key": "wrong-key"},
         )
         assert resp.status_code == 401
 
     def test_empty_key_returns_401(self, client):
-        resp = client.post(
-            "/api/query",
-            json={"question": "what happened?"},
+        resp = client.get(
+            "/api/admin/status",
             headers={"X-API-Key": ""},
         )
         assert resp.status_code == 401
 
     def test_correct_response_shape_on_401(self, client):
-        resp = client.post(
-            "/api/query",
-            json={"question": "what happened?"},
-        )
+        resp = client.get("/api/admin/status")
         assert resp.status_code == 401
         body = resp.json()
         assert "detail" in body
@@ -48,9 +47,8 @@ class TestRequireApiKey:
     def test_unconfigured_api_key_fails_closed(self, client):
         """When APP_API_KEY is blank, ALL requests must be rejected."""
         with patch.dict(os.environ, {"APP_API_KEY": ""}):
-            resp = client.post(
-                "/api/query",
-                json={"question": "what happened?"},
+            resp = client.get(
+                "/api/admin/status",
                 headers={"X-API-Key": ""},
             )
         assert resp.status_code == 401
@@ -61,7 +59,6 @@ class TestRequireApiKey:
         assert client.get("/api/health").status_code == 200
 
 
-# ── Unit-level tests for auth helper functions ────────────────────────────
 class TestAuthHelpers:
     def test_expected_api_key_returns_none_when_unset(self):
         from auth import _expected_api_key

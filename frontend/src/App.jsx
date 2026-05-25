@@ -2,7 +2,17 @@ import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { ApiError, getAdminStatus, streamQuery } from "./api.js";
+import {
+  ApiError,
+  createChatMessage,
+  createChatSession,
+  createSavedAnswer,
+  deleteSavedAnswer,
+  getAdminStatus,
+  listSavedAnswers,
+  streamQuery,
+} from "./api.js";
+import SlackSettings from "./slack/SlackSettings.jsx";
 
 const MODES = [
   { value: "default",      label: "Default — concise answer" },
@@ -543,14 +553,51 @@ export default function App() {
 
   // Saved answers — full assistant answers the user has bookmarked.
   // Distinct from `history` (which only stores user-side params).
+  //
+  // Phase 2: backend is the source of truth. localStorage stays as a
+  // fallback for offline / backend-down so the panel still works.
   const [savedAnswers, setSavedAnswers] = useState(() => loadSavedAnswers());
   const [savedPanelOpen, setSavedPanelOpen] = useState(false);
   // When non-null, the saved-view overlay renders this item full-screen.
   const [viewingSaved, setViewingSaved] = useState(null);
 
   useEffect(() => {
+    // Always mirror to localStorage so the next session has something
+    // to render before the backend round-trip completes.
     saveSavedAnswers(savedAnswers);
   }, [savedAnswers]);
+
+  // Fetch saved answers from the backend on mount and whenever the
+  // chat is cleared (cheap signal that the user just landed). Silent
+  // on failure — the localStorage fallback is already in state.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const rows = await listSavedAnswers();
+        if (cancelled || !Array.isArray(rows)) return;
+        // Backend rows have a different shape (filters is jsonb, debug
+        // is jsonb, timestamps are ISO strings). Reconcile to the
+        // existing local shape so the panel renderer doesn't need
+        // changes. created_at -> timestamp(ms).
+        const reshaped = rows.map((r) => ({
+          id:        r.id,
+          timestamp: r.created_at ? Date.parse(r.created_at) : Date.now(),
+          question:  r.question || "",
+          answer:    r.answer   || "",
+          sources:   Array.isArray(r.sources) ? r.sources : [],
+          mode:      r.mode || "default",
+          filters:   r.filters || {},
+          debug:     r.debug || null,
+        }));
+        setSavedAnswers(reshaped);
+      } catch {
+        // Backend unreachable / 401 / etc. — keep the local fallback.
+      }
+    })();
+    return () => { cancelled = true; };
+    // We deliberately do NOT depend on savedAnswers — that would loop.
+  }, []);
 
   // Theme — "light" or "dark". On first load we read the saved
   // preference if any; otherwise we honor prefers-color-scheme.
@@ -569,6 +616,56 @@ export default function App() {
 
   // Latest in-flight stream's AbortController so the user can cancel.
   const activeStreamRef = useRef(null);
+
+  // Phase 2: backend chat session id for the current conversation. We
+  // lazily create a session on the FIRST submit and reuse the same id
+  // for subsequent turns until the user clears the chat. Holds null
+  // while no session has been created yet (or after a clear). On
+  // backend failures we leave it null and silently skip the mirror —
+  // the localStorage-backed `history` panel keeps working either way.
+  const currentSessionIdRef = useRef(null);
+
+  /**
+   * Make sure we have a chat session id for the current conversation.
+   * Creates one on the backend on first call, then reuses it for the
+   * rest of the conversation. Returns null on backend failure — the
+   * caller treats that as "skip the mirror".
+   */
+  async function ensureChatSession(firstQuestion) {
+    if (currentSessionIdRef.current) return currentSessionIdRef.current;
+    // Title = the first question, trimmed to fit. The backend caps it
+    // again at 200 chars defensively.
+    const titleSource = (firstQuestion || "").trim();
+    const title = titleSource ? titleSource.slice(0, 200) : "New chat";
+    try {
+      const row = await createChatSession(title);
+      if (row && row.id) {
+        currentSessionIdRef.current = row.id;
+        return row.id;
+      }
+    } catch {
+      // Fall through — caller skips the mirror.
+    }
+    return null;
+  }
+
+  /**
+   * Mirror a chat turn into chat_messages. Best-effort: failures are
+   * swallowed so they don't disturb the streaming UX. `sessionId` is
+   * passed in (rather than read from the ref) so we can capture it
+   * once and chain user+assistant writes through the same value even
+   * if the user clears the chat mid-flight.
+   */
+  function mirrorChatMessage(sessionId, role, content, sources) {
+    if (!sessionId) return;
+    const trimmed = (content || "").trim();
+    if (!trimmed) return;
+    createChatMessage(sessionId, {
+      role,
+      content: trimmed,
+      sources: Array.isArray(sources) ? sources : undefined,
+    }).catch(() => { /* ignore */ });
+  }
 
   // Auto-scroll to bottom on any timeline change.
   const bottomRef = useRef(null);
@@ -657,6 +754,15 @@ export default function App() {
       startDate, endDate, dateQuery,
     }));
 
+    // Phase 2: mirror this turn into chat_sessions / chat_messages.
+    // Best-effort — failures don't block the actual query. We capture
+    // the session id locally so the assistant callback can chain into
+    // the SAME session even if the user clears the chat mid-stream.
+    const sessionPromise = ensureChatSession(trimmed);
+    sessionPromise.then((sid) => {
+      mirrorChatMessage(sid, "user", trimmed, null);
+    });
+
     const controller = new AbortController();
     activeStreamRef.current = controller;
 
@@ -674,6 +780,12 @@ export default function App() {
               answer: answer || "",
               sources: Array.isArray(sources) ? sources : [],
               debug: debug || null,
+            });
+            // Mirror the assistant turn. We re-await sessionPromise so
+            // if the session create raced the stream, we still chain
+            // into the right session.
+            sessionPromise.then((sid) => {
+              mirrorChatMessage(sid, "assistant", answer || "", sources);
             });
           },
           onError: (err) => {
@@ -744,6 +856,8 @@ export default function App() {
     }
     setEntries([]);
     setSubmitting(false);
+    // Clearing the chat starts a fresh conversation server-side too.
+    currentSessionIdRef.current = null;
   }
 
   // -------- Query history handlers --------
@@ -795,6 +909,14 @@ export default function App() {
    * assistant entry) along with the user bubble that preceded it. We
    * mark the entry with the new saved item's id so the Save button can
    * toggle to "Saved" without re-querying storage.
+   *
+   * Phase 2: we ALSO POST to /api/saved-answers. Optimistic UI — the
+   * item appears immediately with a temporary client-side id; if the
+   * backend accepts it, we swap the temp id for the server-assigned
+   * one (and update the assistant entry's savedId so the Save button
+   * stays in sync). If the backend fails, the item stays in the panel
+   * (graceful degradation) and the next page-load reconcile will
+   * remove it when the server-side list returns without it.
    */
   function handleSaveAnswer(entryIndex) {
     const entry = entries[entryIndex];
@@ -819,6 +941,28 @@ export default function App() {
     setEntries((current) => current.map((e, i) =>
       i === entryIndex ? { ...e, savedId: item.id } : e
     ));
+
+    // Mirror to backend (best-effort).
+    createSavedAnswer({
+      question: item.question,
+      answer:   item.answer,
+      sources:  item.sources,
+      mode:     item.mode,
+      filters:  item.filters,
+      debug:    item.debug,
+    }).then((row) => {
+      if (!row || !row.id || row.id === item.id) return;
+      // Swap the optimistic id for the real one returned by the server.
+      setSavedAnswers((prev) =>
+        prev.map((it) => (it.id === item.id ? { ...it, id: row.id } : it))
+      );
+      setEntries((current) => current.map((e, i) =>
+        i === entryIndex ? { ...e, savedId: row.id } : e
+      ));
+    }).catch(() => {
+      // Stay quiet — the item is already in the panel and will reconcile
+      // on the next backend fetch.
+    });
   }
 
   function handleUnsaveAnswer(entryIndex) {
@@ -829,6 +973,9 @@ export default function App() {
     setEntries((current) => current.map((e, i) =>
       i === entryIndex ? { ...e, savedId: null } : e
     ));
+    // Best-effort backend delete. 404 just means it was never persisted
+    // (e.g. saved while offline) — we don't surface it.
+    deleteSavedAnswer(sid).catch(() => { /* ignore */ });
   }
 
   function handleDeleteSavedItem(id) {
@@ -843,20 +990,33 @@ export default function App() {
     setEntries((current) => current.map((e) =>
       e.savedId === id ? { ...e, savedId: null } : e
     ));
+    deleteSavedAnswer(id).catch(() => { /* ignore */ });
   }
 
   function handleClearSavedAnswers() {
+    // Capture the ids BEFORE we wipe state so we know what to delete
+    // on the backend. We deliberately fire and forget — even if some
+    // deletes fail the panel is empty and the next backend reconcile
+    // will surface anything that's left.
+    const idsToDelete = savedAnswers.map((it) => it.id);
     setSavedAnswers([]);
     setViewingSaved(null);
     setEntries((current) => current.map((e) =>
       e.savedId ? { ...e, savedId: null } : e
     ));
+    idsToDelete.forEach((id) => {
+      deleteSavedAnswer(id).catch(() => { /* ignore */ });
+    });
   }
 
   function handleOpenSavedItem(item) {
     setViewingSaved(item);
     setSavedPanelOpen(false);
   }
+
+  // Phase 3: Slack settings panel. Toggle is in the header alongside
+  // History / Saved so the rest of the layout doesn't have to move.
+  const [slackPanelOpen, setSlackPanelOpen] = useState(false);
 
   return (
     <div className="app">
@@ -902,6 +1062,17 @@ export default function App() {
               <span className="btn__count">{savedAnswers.length}</span>
             )}
           </button>
+          <button
+            type="button"
+            className={`btn btn--ghost ${slackPanelOpen ? "btn--active" : ""}`}
+            onClick={() => setSlackPanelOpen((open) => !open)}
+            aria-expanded={slackPanelOpen}
+            aria-controls="slack-settings-panel"
+            disabled={submitting}
+            title="Connect Slack and pick channels to ingest"
+          >
+            Slack
+          </button>
           <ArmedButton
             onConfirm={handleClearChat}
             label="Clear chat"
@@ -931,6 +1102,8 @@ export default function App() {
           onClearAll={handleClearSavedAnswers}
         />
       )}
+
+      {slackPanelOpen && <SlackSettings />}
 
       {viewingSaved && (
         <SavedAnswerOverlay
