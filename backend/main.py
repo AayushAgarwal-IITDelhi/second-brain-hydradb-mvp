@@ -153,7 +153,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    # DELETE is needed for /api/saved-answers/{id}. PATCH is included for
+    # forward-compat; PUT and HEAD are too. OPTIONS is what CORS uses
+    # for the preflight itself.
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
     allow_headers=[
         "Content-Type",
         "X-API-Key",
@@ -462,7 +465,31 @@ def root() -> Dict[str, str]:
 
 @app.get("/api/health")
 def health() -> Dict[str, str]:
-    return {"status": "ok", "service": "second-brain-api"}
+    """
+    Liveness probe for load balancers (Render, Railway) + uptime
+    monitors. Intentionally cheap: no DB calls, no third-party
+    reach-out. Returns 200 as long as the process can serve HTTP.
+
+    Production hosts can poll this every few seconds without budget
+    concerns. Use /api/admin/status (X-API-Key gated) for richer
+    ingestion telemetry.
+    """
+    return {
+        "status":      "ok",
+        "service":     "second-brain-api",
+        # ENVIRONMENT lets dashboards distinguish prod vs preview vs
+        # local. Blank when unset rather than guessing.
+        "environment": (os.getenv("ENVIRONMENT") or "").strip(),
+        # APP_VERSION is set by the host's build step (e.g. Render's
+        # RENDER_GIT_COMMIT, Railway's RAILWAY_GIT_COMMIT_SHA). Falling
+        # back to "dev" makes local responses obvious in logs.
+        "version": (
+            os.getenv("APP_VERSION")
+            or os.getenv("RENDER_GIT_COMMIT")
+            or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+            or "dev"
+        ).strip(),
+    }
 
 
 # ---------- Protected routes ---------- #
