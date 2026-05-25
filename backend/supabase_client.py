@@ -729,3 +729,220 @@ def set_selected_channels(
         )
         return False
     return True
+
+# =====================================================================
+# Phase 4: per-workspace HydraDB sub-tenant isolation.
+# =====================================================================
+# Sub-tenants are stamped at signup time by the handle_new_user trigger
+# (see phase4_hydradb_workspace_isolation.sql). The helpers below
+# expose that field to the Python side and provide a lazy-create path
+# for any pre-Phase-4 rows that may still have a NULL/blank value
+# (defense in depth — the migration backfills them, but the lazy path
+# means a fresh deploy CAN'T mis-route an ingest if anything goes
+# sideways).
+
+
+def _derived_sub_tenant_id(workspace_id: str) -> str:
+    """
+    Python-side mirror of the SQL derive_hydradb_sub_tenant_id() helper.
+    Stays in sync with phase4_hydradb_workspace_isolation.sql — if you
+    change the format there, change it here too.
+    """
+    if not workspace_id:
+        return ""
+    return "ws_" + workspace_id.replace("-", "")[:12]
+
+
+def get_workspace_sub_tenant_id(*, workspace_id: str) -> Optional[str]:
+    """
+    Return the workspace's hydradb_sub_tenant_id, or None if the row
+    doesn't exist or has no sub-tenant. Falls through to
+    ensure_workspace_sub_tenant on a blank value — see that function
+    for the lazy-create behavior.
+    """
+    if not workspace_id:
+        return None
+    try:
+        client = get_supabase()
+        resp = (
+            client.table("workspaces")
+            .select("hydradb_sub_tenant_id")
+            .eq("id", workspace_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_get_sub_tenant_failed',
+            extra={'workspace_id': workspace_id, 'error': type(e).__name__},
+        )
+        return None
+    rows = getattr(resp, "data", None) or []
+    if not rows:
+        return None
+    value = (rows[0].get("hydradb_sub_tenant_id") or "").strip()
+    return value or None
+
+
+def ensure_workspace_sub_tenant(*, workspace_id: str) -> Optional[str]:
+    """
+    Make sure the workspace has a hydradb_sub_tenant_id and return it.
+
+    Order of operations:
+      1. SELECT the current value.
+      2. If non-empty, return it (the common case after Phase 4
+         migration + trigger updates).
+      3. If empty, compute the deterministic derived value, write it
+         back, and return it.
+
+    Returns None on any DB error. Callers MUST handle None — they
+    typically refuse the operation rather than fall back to the global
+    env sub-tenant, which would leak data across workspaces.
+    """
+    existing = get_workspace_sub_tenant_id(workspace_id=workspace_id)
+    if existing:
+        return existing
+
+    derived = _derived_sub_tenant_id(workspace_id)
+    if not derived:
+        return None
+    try:
+        client = get_supabase()
+        client.table("workspaces").update(
+            {"hydradb_sub_tenant_id": derived}
+        ).eq("id", workspace_id).execute()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_ensure_sub_tenant_write_failed',
+            extra={'workspace_id': workspace_id, 'error': type(e).__name__,
+                   'derived': derived},
+        )
+        return None
+    logger.info(
+        'workspace_sub_tenant_lazy_created',
+        extra={'workspace_id': workspace_id, 'sub_tenant_id': derived},
+    )
+    return derived
+
+
+def mark_workspace_synced(
+    *, workspace_id: str, sync_at: Optional[str] = None,
+) -> bool:
+    """
+    Stamp the workspace's hydradb_last_sync_at to `sync_at` (ISO 8601
+    string) or to the DB's now() if omitted. Called after a successful
+    ingestion pass so operators can see which workspaces are warm.
+
+    Returns True on success, False on any DB error. Failures are best-
+    effort — a missed timestamp update never blocks ingestion.
+    """
+    if not workspace_id:
+        return False
+    payload = {
+        "hydradb_last_sync_at": sync_at if sync_at else "now()",
+    }
+    try:
+        client = get_supabase()
+        client.table("workspaces").update(payload).eq(
+            "id", workspace_id,
+        ).execute()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_mark_workspace_synced_failed',
+            extra={'workspace_id': workspace_id, 'error': type(e).__name__},
+        )
+        return False
+    return True
+
+
+def list_active_workspaces_with_slack() -> List[Dict[str, Any]]:
+    """
+    Return every workspace with hydradb_status='active' that ALSO has a
+    Slack installation row. Used by the scheduler to iterate workspaces
+    for the periodic ingest.
+
+    Shape:
+        [
+            {
+                "workspace_id":          str,
+                "hydradb_sub_tenant_id": str,
+                "bot_token":             str,
+                "channel_ids":           List[str],   # selected only
+            },
+            ...
+        ]
+
+    A workspace with no selected channels is INCLUDED in the result
+    (with channel_ids=[]) so the scheduler can log "skipped — no
+    channels selected" rather than silently dropping it. The scheduler
+    decides whether to ingest based on len(channel_ids) > 0.
+    """
+    try:
+        client = get_supabase()
+        # Pull workspaces + their installation + their selected channels
+        # in three queries (PostgREST embeds would work too but the
+        # service-role client makes plain queries cheaper to reason
+        # about).
+        ws_resp = (
+            client.table("workspaces")
+            .select("id, hydradb_sub_tenant_id, hydradb_status")
+            .eq("hydradb_status", "active")
+            .execute()
+        )
+        all_workspaces = getattr(ws_resp, "data", None) or []
+
+        if not all_workspaces:
+            return []
+
+        # Pull every installation in one shot then index by workspace.
+        # We deliberately fetch ALL installations (not filtered to the
+        # active workspace ids above) — the Slack installations table
+        # is small and a single round-trip beats N queries.
+        inst_resp = (
+            client.table("slack_installations")
+            .select("workspace_id, bot_token")
+            .execute()
+        )
+        installations = {
+            (row.get("workspace_id") or ""): (row.get("bot_token") or "")
+            for row in (getattr(inst_resp, "data", None) or [])
+        }
+
+        # Same for the selected channels.
+        chan_resp = (
+            client.table("slack_channels")
+            .select("workspace_id, slack_channel_id")
+            .eq("is_selected", True)
+            .execute()
+        )
+        channels_by_ws: Dict[str, List[str]] = {}
+        for row in (getattr(chan_resp, "data", None) or []):
+            ws = row.get("workspace_id") or ""
+            cid = (row.get("slack_channel_id") or "").strip()
+            if not ws or not cid:
+                continue
+            channels_by_ws.setdefault(ws, []).append(cid)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_list_active_workspaces_failed',
+            extra={'error': type(e).__name__},
+        )
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for ws in all_workspaces:
+        wid = ws.get("id")
+        token = installations.get(wid)
+        sub_tenant = (ws.get("hydradb_sub_tenant_id") or "").strip()
+        if not wid or not token or not sub_tenant:
+            # Skip workspaces without Slack connected or without a
+            # materialized sub-tenant. The scheduler doesn't need to
+            # know they exist.
+            continue
+        out.append({
+            "workspace_id":          wid,
+            "hydradb_sub_tenant_id": sub_tenant,
+            "bot_token":             token,
+            "channel_ids":           channels_by_ws.get(wid, []),
+        })
+    return out

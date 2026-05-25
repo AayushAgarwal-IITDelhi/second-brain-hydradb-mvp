@@ -591,6 +591,7 @@ def prepare_recall_context(
     start_timestamp: Any = None,
     end_timestamp: Any = None,
     metadata_bias: Optional[Dict[str, str]] = None,
+    hydradb_sub_tenant_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run HydraDB recall and build the LLM-ready context + parallel sources.
@@ -637,7 +638,13 @@ def prepare_recall_context(
         rerank_chunks,
     )
 
-    hydra = HydraDBClient()
+    # Phase 4: workspace-isolated HydraDB. When a caller passes a
+    # sub-tenant id we use it explicitly; otherwise the client falls
+    # back to its env default (HYDRADB_SUB_TENANT_ID) — that path is
+    # only used by the legacy CLI ingestion + the existing test
+    # mocks, never by user-facing routes.
+    hydra = HydraDBClient(sub_tenant_id=hydradb_sub_tenant_id) \
+        if hydradb_sub_tenant_id else HydraDBClient()
     raw_response = hydra.full_recall(query=question, top_k=top_k)
     chunks = _extract_chunks(raw_response)
     debug_on = _debug_recall_enabled()
@@ -791,6 +798,7 @@ def answer_question(
     end_timestamp: Any = None,
     conversation_history: Optional[List[Any]] = None,
     metadata_bias: Optional[Dict[str, str]] = None,
+    hydradb_sub_tenant_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     End-to-end recall + grounded answer.
@@ -844,6 +852,7 @@ def answer_question(
         start_timestamp=start_timestamp,
         end_timestamp=end_timestamp,
         metadata_bias=metadata_bias,
+        hydradb_sub_tenant_id=hydradb_sub_tenant_id,
     )
 
     if not prepared["ready"]:

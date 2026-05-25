@@ -174,6 +174,11 @@ class TestRunIngest:
         ), patch(
             "main.list_selected_channel_ids", return_value=["C1", "C2"],
         ), patch(
+            # Phase 4: the route resolves the workspace's HydraDB
+            # sub-tenant before scheduling the runner. Patch this so
+            # the test doesn't hit Supabase.
+            "main.ensure_workspace_sub_tenant", return_value="ws_test_abc",
+        ), patch(
             "main.run_workspace_ingest", return_value={},
         ) as mock_runner:
             r = client.post("/api/slack/ingest", headers=jwt_auth_headers)
@@ -185,9 +190,11 @@ class TestRunIngest:
         # its lifespan, so the runner WILL have been called.
         mock_runner.assert_called_once()
         _, kwargs = mock_runner.call_args
-        assert kwargs["workspace_id"] == TEST_WS_ID
-        assert kwargs["bot_token"]    == "xoxb-test"
-        assert kwargs["channel_ids"]  == ["C1", "C2"]
+        assert kwargs["workspace_id"]          == TEST_WS_ID
+        assert kwargs["bot_token"]             == "xoxb-test"
+        assert kwargs["channel_ids"]           == ["C1", "C2"]
+        # Phase 4: the resolved sub_tenant_id must be forwarded.
+        assert kwargs["hydradb_sub_tenant_id"] == "ws_test_abc"
 
     def test_no_installation_returns_400(self, client, jwt_auth_headers):
         with patch("main.get_slack_installation", return_value=None):
@@ -211,6 +218,26 @@ class TestRunIngest:
         ):
             r = client.post("/api/slack/ingest", headers=jwt_auth_headers)
         assert r.status_code == 400
+
+    def test_sub_tenant_lookup_failure_returns_502(
+        self, client, jwt_auth_headers,
+    ):
+        # Phase 4: if ensure_workspace_sub_tenant returns None we
+        # refuse rather than fall back to the env default -- that
+        # would leak data into the shared HydraDB bucket.
+        with patch(
+            "main.get_slack_installation",
+            return_value={"bot_token": "xoxb-test"},
+        ), patch(
+            "main.list_selected_channel_ids", return_value=["C1"],
+        ), patch(
+            "main.ensure_workspace_sub_tenant", return_value=None,
+        ), patch(
+            "main.run_workspace_ingest",
+        ) as mock_runner:
+            r = client.post("/api/slack/ingest", headers=jwt_auth_headers)
+        assert r.status_code == 502
+        mock_runner.assert_not_called()
 
     def test_requires_auth(self, client):
         r = client.post("/api/slack/ingest")

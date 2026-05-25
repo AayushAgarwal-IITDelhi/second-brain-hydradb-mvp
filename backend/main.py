@@ -92,14 +92,17 @@ from supabase_client import (  # noqa: E402
     create_chat_session,
     create_saved_answer,
     delete_saved_answer,
+    ensure_workspace_sub_tenant,
     get_slack_installation,
     get_slack_installation_public,
+    get_workspace_sub_tenant_id,
     list_chat_messages,
     list_chat_sessions,
     list_saved_answers,
     list_selected_channel_ids,
     list_user_workspaces,
     list_workspace_channels,
+    mark_workspace_synced,
     set_selected_channels,
     upsert_slack_channels,
     upsert_slack_installation,
@@ -517,6 +520,13 @@ def query(
         # Weak inference becomes a ranking bias (matching chunks float up
         # but non-matching chunks aren't dropped).
         metadata_bias=rewrite["metadata_bias"],
+        # Phase 4: route this query to the workspace's HydraDB
+        # sub-tenant. ensure_workspace_sub_tenant materializes the row
+        # value on the fly for any pre-Phase-4 workspace that missed
+        # the migration backfill.
+        hydradb_sub_tenant_id=ensure_workspace_sub_tenant(
+            workspace_id=workspace.workspace_id,
+        ),
     )
 
     # Mark non-cached on the way out so the UI can render a "fresh" badge
@@ -626,6 +636,10 @@ def query_stream(
                 start_timestamp=resolved["start_timestamp"],
                 end_timestamp=resolved["end_timestamp"],
                 metadata_bias=rewrite["metadata_bias"],
+                # Phase 4: workspace-isolated recall.
+                hydradb_sub_tenant_id=ensure_workspace_sub_tenant(
+                    workspace_id=workspace.workspace_id,
+                ),
             )
         except AppError as e:
             yield _sse_event("error", {
@@ -1255,11 +1269,26 @@ def slack_ingest(
             detail="No channels selected for ingestion.",
         )
 
+    # Phase 4: resolve (or lazy-create) the workspace's HydraDB
+    # sub-tenant before scheduling the background task. A blank value
+    # here means a DB error occurred — we refuse rather than fall back
+    # to the global sub-tenant, which would leak this workspace's
+    # Slack content into the shared bucket.
+    sub_tenant = ensure_workspace_sub_tenant(
+        workspace_id=workspace.workspace_id,
+    )
+    if not sub_tenant:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not resolve workspace HydraDB tenant.",
+        )
+
     background_tasks.add_task(
         run_workspace_ingest,
         workspace_id=workspace.workspace_id,
         bot_token=bot_token,
         channel_ids=channel_ids,
+        hydradb_sub_tenant_id=sub_tenant,
     )
     return {
         "status":           "started",
