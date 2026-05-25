@@ -1,10 +1,29 @@
 """
 Realtime Slack event -> HydraDB pipeline.
 
+Phase 5 update: workspace-aware.
+
 Called from main.py's /slack/events handler as a FastAPI BackgroundTask
-after we've already returned 200 to Slack. Re-uses the existing builders
-from ingestion.ingest_slack so the document format and stable-key dedupe
-are identical to the polling path.
+after we've already returned 200 to Slack. The handler passes the FULL
+Slack payload (not just the inner event) so we can read the team_id
+and route to the right workspace.
+
+Routing:
+    payload["team_id"]
+        -> slack_installations row     (supabase_client.get_slack_installation_by_team_id)
+        -> workspace_id + bot_token
+        -> hydradb_sub_tenant_id       (supabase_client.ensure_workspace_sub_tenant)
+        -> is_channel_selected_for_workspace(...)
+        -> ingest using the workspace's bot_token + sub_tenant_id
+
+Events from a Slack team we don't have an installation for are silently
+ignored. Events from selected-but-archived or unselected channels are
+ignored. We DO NOT fall back to the env default SLACK_BOT_TOKEN or
+SLACK_CHANNEL_IDS for realtime events.
+
+Re-uses the existing builders from ingestion.ingest_slack so the
+document format and stable-key dedupe are identical to the polling
+path.
 
 Concurrency notes:
 - Slack delivers events one at a time per channel but globally many can
@@ -20,7 +39,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional
 
 from hydradb_client import HydraDBClient, summarize_upload_response
 from ingestion.ingest_slack import (
@@ -36,6 +55,11 @@ from ingestion.ingestion_state import (
 from ingestion.normalize import is_noise
 from ingestion.slack_client import SlackClientWrapper
 from logging_config import get_logger
+from supabase_client import (
+    ensure_workspace_sub_tenant,
+    get_slack_installation_by_team_id,
+    is_channel_selected_for_workspace,
+)
 
 logger = get_logger(__name__)
 
@@ -47,12 +71,6 @@ def _realtime_enabled() -> bool:
     return os.getenv("REALTIME_INGEST_ENABLED", "true").strip().lower() in (
         "1", "true", "yes", "on"
     )
-
-
-def _allowed_channel_ids() -> Set[str]:
-    """Channels whose events we'll act on. Empty = ingest all channels."""
-    raw = os.getenv("SLACK_CHANNEL_IDS", "")
-    return {cid.strip() for cid in raw.split(",") if cid.strip()}
 
 
 # Path to the same state file the polling CLI uses.
@@ -78,7 +96,7 @@ def _event_already_seen(event_id: str) -> bool:
         return False
     now = time.monotonic()
     with _seen_lock:
-        # Drop stale entries lazily — cheaper than a background sweeper.
+        # Drop stale entries lazily -- cheaper than a background sweeper.
         if len(_seen_event_ids) > _SEEN_EVENT_MAX:
             cutoff = now - _SEEN_EVENT_TTL
             for k, t in list(_seen_event_ids.items()):
@@ -92,30 +110,39 @@ def _event_already_seen(event_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------- #
-# Bot identity (so we can ignore our own bot's messages)
+# Bot identity cache (per workspace, keyed by bot_token)
 # ---------------------------------------------------------------------- #
-_bot_user_id: Optional[str] = None
+# Phase 4/5 isolation: each workspace has its own Slack app installation
+# with its own bot user_id. We cache one entry per bot_token so the
+# common case (auth.test on first event per workspace, then in-process
+# hit thereafter) doesn't double-call Slack.
+_bot_user_id_by_token: Dict[str, str] = {}
 _bot_user_id_lock = threading.Lock()
 
 
-def _resolve_bot_user_id(slack: SlackClientWrapper) -> Optional[str]:
+def _resolve_bot_user_id(slack: SlackClientWrapper, bot_token: str) -> Optional[str]:
     """
-    Cache the bot's own user_id from auth.test. Called once per process.
-    If the call fails we return None and fall back to the bot_id-based
-    filter alone (still catches the common case).
+    Resolve and cache the bot's own user_id for the given bot_token.
+    Returns None on failure -- the caller falls back to the bot_id
+    field on the event (which still catches the common case).
     """
-    global _bot_user_id
     with _bot_user_id_lock:
-        if _bot_user_id is not None:
-            return _bot_user_id or None
+        cached = _bot_user_id_by_token.get(bot_token)
+        if cached is not None:
+            return cached or None
         try:
             resp = slack.client.auth_test()
             uid = resp.get("user_id") or ""
-            _bot_user_id = uid if isinstance(uid, str) else ""
+            if not isinstance(uid, str):
+                uid = ""
         except Exception as e:  # noqa: BLE001
-            logger.warning('realtime_auth_test_failed', extra={'error': type(e).__name__})
-            _bot_user_id = ""
-    return _bot_user_id or None
+            logger.warning(
+                'realtime_auth_test_failed',
+                extra={'error': type(e).__name__},
+            )
+            uid = ""
+        _bot_user_id_by_token[bot_token] = uid
+    return uid or None
 
 
 # ---------------------------------------------------------------------- #
@@ -125,65 +152,186 @@ _state_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------- #
-# Public entry point: handle one Slack event payload
+# Public entry point: handle one Slack payload (full envelope)
 # ---------------------------------------------------------------------- #
-def process_slack_event(event: Dict[str, Any]) -> None:
+def process_slack_event(payload: Dict[str, Any]) -> None:
     """
-    Handle one inner Slack event (`payload["event"]`). Safe to call from
-    a BackgroundTask. Catches everything so a single bad event never
-    crashes the webhook worker.
+    Handle one Slack event payload (the full envelope from /slack/events).
+
+    Phase 5: the FULL payload is passed in (not just `payload["event"]`)
+    so we can read `team_id` and route to the workspace that owns this
+    Slack installation. We do NOT fall back to the env default
+    SLACK_BOT_TOKEN or SLACK_CHANNEL_IDS for realtime events.
+
+    Safe to call from a BackgroundTask. Catches everything so a single
+    bad event never crashes the webhook worker.
     """
     if not _realtime_enabled():
         logger.debug('realtime_disabled')
         return
 
+    if not isinstance(payload, dict):
+        logger.debug('realtime_payload_not_dict')
+        return
+
     try:
-        _process_slack_event_inner(event)
+        _process_slack_payload_inner(payload)
     except Exception as e:  # noqa: BLE001
-        logger.error('realtime_event_handler_failed', extra={'error': type(e).__name__})
+        logger.error(
+            'realtime_event_handler_failed',
+            extra={'error': type(e).__name__},
+        )
 
 
-def _process_slack_event_inner(event: Dict[str, Any]) -> None:
+def _resolve_team_id(payload: Dict[str, Any]) -> str:
+    """
+    Find the Slack team_id in the event envelope.
+
+    Order of preference:
+      1. payload["team_id"]                    (single-workspace install)
+      2. payload["authorizations"][0]["team_id"]
+         (Slack Connect / shared channels — preferred when present)
+      3. payload["event"]["team"]              (some message events)
+
+    The Slack-recommended path is `authorizations[0].team_id` when it's
+    present (it identifies the team THIS event is for, even if other
+    teams can also see the channel). We fall back to the older fields
+    for backwards compatibility with older Slack payloads.
+    """
+    auths = payload.get("authorizations")
+    if isinstance(auths, list) and auths:
+        first = auths[0] or {}
+        if isinstance(first, dict):
+            tid = (first.get("team_id") or "").strip()
+            if tid:
+                return tid
+
+    tid = (payload.get("team_id") or "").strip()
+    if tid:
+        return tid
+
+    event = payload.get("event") or {}
+    if isinstance(event, dict):
+        return (event.get("team") or "").strip()
+    return ""
+
+
+def _process_slack_payload_inner(payload: Dict[str, Any]) -> None:
+    event = payload.get("event") or {}
+    if not isinstance(event, dict):
+        return
+
     event_type = event.get("type")
     if event_type != "message":
-        logger.debug('realtime_event_ignored', extra={'event_type': event_type})
+        logger.debug(
+            'realtime_event_ignored',
+            extra={'event_type': event_type},
+        )
         return
 
+    # Filter out edits, deletes, joins/leaves, bot messages, and
+    # anything ingestion.normalize flags as noise. This matches what
+    # the polling path does in process_channel.
     subtype = event.get("subtype")
-    if subtype == "message_changed" or subtype == "message_deleted":
-        logger.debug('realtime_event_ignored', extra={'subtype': subtype})
-        return
-    if subtype == "bot_message":
-        logger.debug('realtime_event_ignored', extra={'subtype': 'bot_message'})
+    if subtype in ("message_changed", "message_deleted", "bot_message",
+                   "channel_join", "channel_leave"):
+        logger.debug(
+            'realtime_event_ignored',
+            extra={'subtype': subtype},
+        )
         return
     if is_noise(event):
-        logger.debug('realtime_event_ignored', extra={'reason': 'noise', 'subtype': subtype})
+        logger.debug(
+            'realtime_event_ignored',
+            extra={'reason': 'noise', 'subtype': subtype},
+        )
         return
 
-    channel_id = event.get("channel")
+    channel_id = (event.get("channel") or "").strip()
     if not channel_id:
         logger.debug('realtime_event_no_channel')
         return
 
-    allowed = _allowed_channel_ids()
-    if allowed and channel_id not in allowed:
-        logger.debug('realtime_channel_not_allowed', extra={'channel_id': channel_id})
+    # ----- Workspace routing -----
+    # team_id -> installation -> workspace_id + bot_token + sub_tenant.
+    # Without a known installation, drop the event silently. A Slack app
+    # can be installed in multiple Slack workspaces; we only act on the
+    # ones we have a row for.
+    team_id = _resolve_team_id(payload)
+    if not team_id:
+        logger.debug('realtime_event_no_team_id')
         return
 
-    # ----- Build clients -----
-    slack = SlackClientWrapper()
-    hydra = HydraDBClient()
+    installation = get_slack_installation_by_team_id(slack_team_id=team_id)
+    if not installation:
+        logger.debug(
+            'realtime_unknown_team',
+            extra={'team_id': team_id},
+        )
+        return
+
+    workspace_id = (installation.get("workspace_id") or "").strip()
+    bot_token    = (installation.get("bot_token")    or "").strip()
+    if not workspace_id or not bot_token:
+        logger.warning(
+            'realtime_installation_incomplete',
+            extra={'team_id': team_id,
+                   'has_workspace_id': bool(workspace_id),
+                   'has_bot_token':    bool(bot_token)},
+        )
+        return
+
+    # ----- Channel-selection gate -----
+    # The user must have explicitly opted this channel in via the Slack
+    # settings panel. Unselected channels are dropped before we touch
+    # the Slack API.
+    if not is_channel_selected_for_workspace(
+        workspace_id=workspace_id,
+        slack_channel_id=channel_id,
+    ):
+        logger.debug(
+            'realtime_channel_not_selected',
+            extra={'workspace_id': workspace_id,
+                   'channel_id':   channel_id},
+        )
+        return
+
+    # ----- Resolve workspace HydraDB sub-tenant -----
+    sub_tenant = ensure_workspace_sub_tenant(workspace_id=workspace_id)
+    if not sub_tenant:
+        logger.warning(
+            'realtime_no_sub_tenant',
+            extra={'workspace_id': workspace_id},
+        )
+        return
+
+    # ----- Build per-workspace clients -----
+    # Each workspace has its own Slack bot token AND its own HydraDB
+    # sub-tenant. Constructing them per-event is cheap; the alternative
+    # (process-wide caching keyed by token) would only help under
+    # sustained load, which Phase 5 doesn't target.
+    slack = SlackClientWrapper(token=bot_token)
+    hydra = HydraDBClient(sub_tenant_id=sub_tenant)
 
     # ----- Bot-loop guard -----
-    bot_user_id = _resolve_bot_user_id(slack)
+    bot_user_id = _resolve_bot_user_id(slack, bot_token)
     if event.get("bot_id"):
-        logger.debug('realtime_event_ignored', extra={'reason': 'bot_id_set'})
+        logger.debug(
+            'realtime_event_ignored',
+            extra={'reason': 'bot_id_set'},
+        )
         return
     if bot_user_id and event.get("user") == bot_user_id:
-        logger.debug('realtime_event_ignored', extra={'reason': 'own_bot_user'})
+        logger.debug(
+            'realtime_event_ignored',
+            extra={'reason': 'own_bot_user'},
+        )
         return
     if not (event.get("text") or "").strip():
-        logger.debug('realtime_event_ignored', extra={'reason': 'empty_text'})
+        logger.debug(
+            'realtime_event_ignored',
+            extra={'reason': 'empty_text'},
+        )
         return
 
     channel_name = fetch_channel_name(slack, channel_id)
@@ -192,7 +340,7 @@ def _process_slack_event_inner(event: Dict[str, Any]) -> None:
     # A message belongs to a thread if `thread_ts` is set AND differs
     # from its own `ts`. A thread parent appears as a normal message
     # event the first time it's posted (no thread_ts). When someone
-    # replies, the reply has thread_ts != ts — we then re-upload the
+    # replies, the reply has thread_ts != ts -- we then re-upload the
     # whole thread doc (parent + all replies) so the stored markdown
     # always represents the current thread state.
     ts = event.get("ts") or ""
@@ -200,9 +348,13 @@ def _process_slack_event_inner(event: Dict[str, Any]) -> None:
     is_reply = bool(thread_ts) and thread_ts != ts
 
     if is_reply:
-        _ingest_thread(slack, hydra, channel_id, channel_name, thread_ts, event)
+        _ingest_thread(
+            slack, hydra, channel_id, channel_name, thread_ts, event,
+        )
     else:
-        _ingest_standalone(slack, hydra, channel_id, channel_name, event)
+        _ingest_standalone(
+            slack, hydra, channel_id, channel_name, event,
+        )
 
 
 # ---------------------------------------------------------------------- #
@@ -222,11 +374,17 @@ def _ingest_standalone(
     with _state_lock:
         state = IngestionState(STATE_PATH)
         if state.has(stable_key):
-            logger.debug('realtime_already_ingested', extra={'stable_key': stable_key})
+            logger.debug(
+                'realtime_already_ingested',
+                extra={'stable_key': stable_key},
+            )
             return
 
     prepared = build_message_file(message, channel_id, channel_name, slack)
-    logger.info('realtime_uploading', extra={'stable_key': stable_key, 'doc_type': 'message'})
+    logger.info(
+        'realtime_uploading',
+        extra={'stable_key': stable_key, 'doc_type': 'message'},
+    )
 
     response = hydra.upload_knowledge([prepared])
     ok, _bad = summarize_upload_response(
@@ -234,7 +392,10 @@ def _ingest_standalone(
         batch_size=1,
     )
     if ok < 1:
-        logger.warning('realtime_upload_failed', extra={'stable_key': stable_key})
+        logger.warning(
+            'realtime_upload_failed',
+            extra={'stable_key': stable_key},
+        )
         return
 
     with _state_lock:
@@ -268,7 +429,10 @@ def _ingest_thread(
         channel_id=channel_id, thread_ts=thread_ts,
     )
     if not replies:
-        logger.debug('realtime_thread_no_replies', extra={'thread_ts': thread_ts})
+        logger.debug(
+            'realtime_thread_no_replies',
+            extra={'thread_ts': thread_ts},
+        )
         return
 
     parent = replies[0]
@@ -278,11 +442,14 @@ def _ingest_thread(
 
     prepared = build_thread_file(parent, replies, channel_id, channel_name, slack)
     stable_key = prepared["stable_key"]
-    logger.info('realtime_uploading', extra={
-        'stable_key': stable_key,
-        'doc_type': 'thread',
-        'reply_count': len(replies),
-    })
+    logger.info(
+        'realtime_uploading',
+        extra={
+            'stable_key': stable_key,
+            'doc_type': 'thread',
+            'reply_count': len(replies),
+        },
+    )
 
     response = hydra.upload_knowledge([prepared])
     ok, _bad = summarize_upload_response(
@@ -290,7 +457,10 @@ def _ingest_thread(
         batch_size=1,
     )
     if ok < 1:
-        logger.warning('realtime_upload_failed', extra={'stable_key': stable_key})
+        logger.warning(
+            'realtime_upload_failed',
+            extra={'stable_key': stable_key},
+        )
         return
 
     with _state_lock:

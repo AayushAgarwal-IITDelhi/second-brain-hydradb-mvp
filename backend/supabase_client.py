@@ -946,3 +946,91 @@ def list_active_workspaces_with_slack() -> List[Dict[str, Any]]:
             "channel_ids":           channels_by_ws.get(wid, []),
         })
     return out
+
+# =====================================================================
+# Phase 5: workspace-aware realtime Slack Events ingestion.
+# =====================================================================
+# Two helpers the /slack/events handler needs:
+#
+#   1. get_slack_installation_by_team_id — given Slack's team_id from
+#      the event payload, find which workspace owns that Slack
+#      installation. This is how we map a webhook hit to a workspace
+#      WITHOUT trusting any client-supplied workspace id.
+#
+#   2. is_channel_selected_for_workspace — given (workspace_id,
+#      channel_id), return True iff that channel is marked is_selected
+#      in slack_channels. Lets us drop events from channels the user
+#      hasn't opted into without an extra round-trip per event.
+
+
+def get_slack_installation_by_team_id(
+    *, slack_team_id: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Return the installation row for a Slack team, including bot_token.
+    Used by the realtime webhook to map team_id -> workspace_id.
+
+    Returns None if no installation matches — the caller treats that
+    as "Slack workspace not connected here" and silently drops the
+    event (Slack apps can be installed in multiple Slack workspaces;
+    we just ignore events from teams we don't know about).
+    """
+    if not slack_team_id:
+        return None
+    try:
+        client = get_supabase()
+        resp = (
+            client.table("slack_installations")
+            .select("*")
+            .eq("slack_team_id", slack_team_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_get_installation_by_team_failed',
+            extra={'slack_team_id': slack_team_id,
+                   'error': type(e).__name__},
+        )
+        return None
+    rows = getattr(resp, "data", None) or []
+    return rows[0] if rows else None
+
+
+def is_channel_selected_for_workspace(
+    *, workspace_id: str, slack_channel_id: str,
+) -> bool:
+    """
+    True iff slack_channels has a row for (workspace_id, channel_id)
+    with is_selected=True.
+
+    A missing row (i.e. the user has never refreshed channels, or this
+    is a brand-new channel) reads as "not selected" so we err on the
+    side of NOT ingesting random channels. Once the user opens the
+    Slack settings panel the channel list refreshes and they can opt
+    it in.
+    """
+    if not workspace_id or not slack_channel_id:
+        return False
+    try:
+        client = get_supabase()
+        resp = (
+            client.table("slack_channels")
+            .select("is_selected")
+            .eq("workspace_id", workspace_id)
+            .eq("slack_channel_id", slack_channel_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_is_channel_selected_failed',
+            extra={'workspace_id': workspace_id,
+                   'slack_channel_id': slack_channel_id,
+                   'error': type(e).__name__},
+        )
+        return False
+    rows = getattr(resp, "data", None) or []
+    if not rows:
+        return False
+    return bool(rows[0].get("is_selected"))

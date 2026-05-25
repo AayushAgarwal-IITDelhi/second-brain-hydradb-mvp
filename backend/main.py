@@ -809,10 +809,12 @@ async def slack_events(
             logger.debug('slack_events_duplicate', extra={'event_id': event_id})
             return JSONResponse(content={"ok": True})
 
-        event = payload.get("event") or {}
-        # Dispatch ingestion in the background so Slack gets its 200 ack
-        # within 3 seconds even if HydraDB / Slack API calls are slow.
-        background_tasks.add_task(process_slack_event, event)
+        # Phase 5: pass the FULL payload (not just the inner event) so
+        # the realtime handler can read `team_id` / `authorizations`
+        # and route to the right workspace. The handler then resolves
+        # the workspace's bot_token + HydraDB sub_tenant_id internally
+        # — we never need workspace context on the webhook itself.
+        background_tasks.add_task(process_slack_event, payload)
         return JSONResponse(content={"ok": True})
 
     # Unknown top-level type. Ack 200 so Slack stops retrying.
