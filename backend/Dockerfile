@@ -9,11 +9,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # Install deps in a separate layer so source changes don't bust the cache.
-COPY backend/requirements.txt /app/requirements.txt
+COPY requirements.txt /app/requirements.txt
 RUN pip install -r /app/requirements.txt
 
 # Copy the rest of the backend.
-COPY backend /app
+COPY . /app
 
 # Run as non-root for safety. The data directory needs to be writable by
 # this user so the ingestion state file can be persisted.
@@ -32,4 +32,4 @@ sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout
 
 # Single process is fine for an MVP. Switch to "-w 4" with gunicorn
 # behind a real proxy when you outgrow it.
-CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "python -m uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
