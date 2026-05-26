@@ -95,19 +95,28 @@ from supabase_client import (  # noqa: E402
     create_chat_message,
     create_chat_session,
     create_saved_answer,
+    delete_gmail_connection,
     delete_saved_answer,
     ensure_workspace_sub_tenant,
+    get_gmail_connection,
+    get_gmail_connection_public,
     get_slack_installation,
     get_slack_installation_public,
     get_workspace_sub_tenant_id,
     list_chat_messages,
     list_chat_sessions,
+    list_gmail_connections_public,
+    list_gmail_labels,
     list_saved_answers,
     list_selected_channel_ids,
+    list_selected_gmail_label_ids,
     list_user_workspaces,
     list_workspace_channels,
     mark_workspace_synced,
     set_selected_channels,
+    set_selected_gmail_labels,
+    upsert_gmail_connection,
+    upsert_gmail_labels,
     upsert_slack_channels,
     upsert_slack_installation,
 )
@@ -119,6 +128,19 @@ from slack_oauth import (  # noqa: E402
     run_workspace_ingest,
     slack_oauth_configured,
     verify_oauth_state,
+)
+# Phase 8: Gmail connector. Aliased on import so the symbol names don't
+# clash with the Slack helpers above (both modules expose
+# build_connect_url, exchange_code, verify_oauth_state, etc.).
+from gmail_oauth import (  # noqa: E402
+    build_connect_url        as gmail_build_connect_url,
+    exchange_code            as gmail_exchange_code,
+    fetch_user_info          as gmail_fetch_user_info,
+    gmail_oauth_configured,
+    installation_from_token_response as gmail_installation_from_token_response,
+    list_labels              as list_gmail_labels_from_api,
+    run_workspace_gmail_ingest,
+    verify_oauth_state       as verify_gmail_oauth_state,
 )
 
 configure_logging(level=os.getenv('LOG_LEVEL', 'INFO'))
@@ -924,6 +946,20 @@ class SlackChannelSelection(BaseModel):
     selected_channel_ids: List[str] = Field(default_factory=list)
 
 
+# ---------- Phase 8: Gmail request models ---------- #
+class GmailLabelSelection(BaseModel):
+    """Body for POST /api/gmail/labels."""
+    model_config = ConfigDict(extra="forbid")
+    connection_id:      str
+    selected_label_ids: List[str] = Field(default_factory=list)
+
+
+class GmailIngestRequest(BaseModel):
+    """Body for POST /api/gmail/ingest."""
+    model_config = ConfigDict(extra="forbid")
+    connection_id: str
+
+
 # ---------- Admin status (light, read-only) ---------- #
 @app.get(
     "/api/admin/status",
@@ -1368,4 +1404,288 @@ def slack_ingest(
     return {
         "status":           "started",
         "channels_queued":  len(channel_ids),
+    }
+
+
+# =====================================================================
+# Phase 8: Gmail connector routes
+# =====================================================================
+# Mirrors the Slack route surface so the frontend can plug in with the
+# same mental model. Differences:
+#   - One workspace can host MULTIPLE Gmail connections (a personal +
+#     a shared mailbox, for instance). The Slack model is one
+#     installation per workspace.
+#   - Labels (Gmail's equivalent of channels) belong to a CONNECTION,
+#     not directly to the workspace. So the labels / ingest routes
+#     take a connection_id query/body param.
+#
+# All routes except the OAuth callback require auth + workspace.
+
+@app.get(
+    "/api/gmail/connect-url",
+    dependencies=[Depends(auth_rate_limit)],
+)
+def gmail_connect_url(
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, str]:
+    """
+    Build the Google OAuth URL the frontend should redirect the user
+    to. Returns 503 when Gmail OAuth env vars aren't configured -- the
+    connector is opt-in per deployment.
+    """
+    if not gmail_oauth_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Gmail OAuth is not configured on this server.",
+        )
+    url = gmail_build_connect_url(
+        workspace_id=workspace.workspace_id,
+        user_id=workspace.user.id,
+    )
+    return {"url": url}
+
+
+@app.get("/api/gmail/oauth/callback")
+def gmail_oauth_callback(
+    code:  Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+):
+    """
+    Google redirects the user's browser here after they approve or
+    deny consent. Cannot require an Authorization header -- Google's
+    redirect doesn't carry one. Instead we verify the HMAC-signed
+    state, which binds this callback to a specific (workspace_id,
+    user_id) minted by /api/gmail/connect-url.
+
+    All failures redirect with `?gmail_connect=error&reason=...` so
+    the frontend can surface a clean toast.
+    """
+    frontend = _frontend_base_url()
+
+    if error:
+        return _gmail_redirect_with_status(frontend, "error", error)
+    if not code or not state:
+        return _gmail_redirect_with_status(frontend, "error", "missing_params")
+
+    payload = verify_gmail_oauth_state(state)
+    if not payload:
+        return _gmail_redirect_with_status(frontend, "error", "bad_state")
+
+    token_resp = gmail_exchange_code(code)
+    if not token_resp:
+        return _gmail_redirect_with_status(frontend, "error", "exchange_failed")
+
+    user_info = gmail_fetch_user_info(token_resp.get("access_token") or "")
+    if not user_info:
+        return _gmail_redirect_with_status(frontend, "error", "userinfo_failed")
+
+    install = gmail_installation_from_token_response(token_resp, user_info)
+    if not install.get("google_user_id") or not install.get("email"):
+        return _gmail_redirect_with_status(frontend, "error", "incomplete_install")
+
+    saved = upsert_gmail_connection(
+        workspace_id=payload["workspace_id"],
+        google_user_id=install["google_user_id"],
+        email=install["email"],
+        access_token=install["access_token"],
+        refresh_token=install["refresh_token"],
+        token_expiry=install["token_expiry"],
+        scopes=install["scopes"],
+    )
+    if not saved:
+        return _gmail_redirect_with_status(frontend, "error", "persist_failed")
+
+    return _gmail_redirect_with_status(frontend, "ok", install["email"])
+
+
+def _gmail_redirect_with_status(frontend: str, result: str, reason: str):
+    """Same shape as the Slack callback redirect helper, separate
+    query-param name so a single frontend handler can dispatch by
+    connector."""
+    from fastapi.responses import RedirectResponse  # noqa: PLC0415
+    qs = urlencode_safely({"gmail_connect": result, "reason": reason})
+    return RedirectResponse(url=f"{frontend}/?{qs}", status_code=302)
+
+
+@app.get("/api/gmail/connections")
+def gmail_connections_list(
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    List every Gmail connection in this workspace. The PUBLIC
+    projection is used -- tokens are NEVER returned.
+    """
+    return {
+        "connections": list_gmail_connections_public(
+            workspace_id=workspace.workspace_id,
+        ),
+    }
+
+
+@app.delete("/api/gmail/connections/{connection_id}")
+def gmail_connection_delete(
+    connection_id: str,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, bool]:
+    """Delete a Gmail connection (cascades to labels + ingestion state)."""
+    ok = delete_gmail_connection(
+        connection_id=connection_id,
+        workspace_id=workspace.workspace_id,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Gmail connection not found.",
+        )
+    return {"deleted": True}
+
+
+@app.get("/api/gmail/labels")
+def gmail_labels_list(
+    connection_id: Optional[str] = None,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Return the label picker state for one Gmail connection.
+
+    Mirrors /api/slack/channels: refresh from Gmail (so newly-created
+    labels show up), upsert into Supabase preserving is_selected, then
+    return the stored rows. The refresh is best-effort -- a Gmail API
+    blip falls through to the previously-stored set.
+    """
+    if not connection_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing connection_id query parameter.",
+        )
+
+    connection = get_gmail_connection(
+        connection_id=connection_id, workspace_id=workspace.workspace_id,
+    )
+    if not connection:
+        # Defensive: return an empty set rather than 404 so a deleted
+        # connection on the picker side renders as "no labels".
+        return {"connected": False, "labels": []}
+
+    try:
+        live_labels = list_gmail_labels_from_api(connection)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "gmail_labels_refresh_failed",
+            extra={
+                "workspace_id":  workspace.workspace_id,
+                "connection_id": connection_id,
+                "error":         type(e).__name__,
+            },
+        )
+        live_labels = []
+
+    if live_labels:
+        upsert_gmail_labels(
+            workspace_id=workspace.workspace_id,
+            gmail_connection_id=connection_id,
+            labels=live_labels,
+        )
+
+    stored = list_gmail_labels(
+        workspace_id=workspace.workspace_id,
+        gmail_connection_id=connection_id,
+    )
+    return {"connected": True, "labels": stored}
+
+
+@app.post("/api/gmail/labels")
+def gmail_labels_save(
+    req: GmailLabelSelection,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """Replace the selected-label set for a Gmail connection."""
+    # Phase 8 multi-tenant safety: verify the connection actually
+    # belongs to THIS workspace before writing. set_selected_gmail_labels
+    # already filters by workspace_id, so a foreign connection_id would
+    # silently no-op -- but that's confusing UX AND it lets one
+    # workspace probe for the existence of another's connection IDs.
+    # 404 closes both leaks.
+    existing = get_gmail_connection_public(
+        connection_id=req.connection_id,
+        workspace_id=workspace.workspace_id,
+    )
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Gmail connection not found.",
+        )
+
+    ok = set_selected_gmail_labels(
+        workspace_id=workspace.workspace_id,
+        gmail_connection_id=req.connection_id,
+        selected_label_ids=req.selected_label_ids,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not persist Gmail label selection.",
+        )
+    return {"selected_count": len(req.selected_label_ids)}
+
+
+@app.post(
+    "/api/gmail/ingest",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(slack_ingest_rate_limit)],   # reuse "ingest" bucket
+)
+def gmail_ingest(
+    req: GmailIngestRequest,
+    background_tasks: BackgroundTasks,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Kick off a Gmail ingestion run for one connection's selected labels.
+    Returns immediately with 202; the actual work happens in a
+    BackgroundTask so the request doesn't block on Gmail / HydraDB I/O.
+    """
+    connection = get_gmail_connection(
+        connection_id=req.connection_id,
+        workspace_id=workspace.workspace_id,
+    )
+    if not connection:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Gmail connection not found.",
+        )
+
+    label_ids = list_selected_gmail_label_ids(
+        workspace_id=workspace.workspace_id,
+        gmail_connection_id=req.connection_id,
+    )
+    if not label_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No labels selected for ingestion.",
+        )
+
+    # Phase 4-style: resolve (or lazy-create) the workspace's HydraDB
+    # sub-tenant before kicking off. A blank value means a DB error
+    # occurred -- we refuse rather than fall back to the global tenant,
+    # which would leak emails into the shared HydraDB bucket.
+    sub_tenant = ensure_workspace_sub_tenant(
+        workspace_id=workspace.workspace_id,
+    )
+    if not sub_tenant:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not resolve workspace HydraDB tenant.",
+        )
+
+    background_tasks.add_task(
+        run_workspace_gmail_ingest,
+        workspace_id=workspace.workspace_id,
+        connection=connection,
+        label_ids=label_ids,
+        hydradb_sub_tenant_id=sub_tenant,
+    )
+    return {
+        "status":        "started",
+        "labels_queued": len(label_ids),
     }

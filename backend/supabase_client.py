@@ -1132,3 +1132,437 @@ def cleanup_slack_event_seen(*, retain_hours: int = 24) -> int:
         return int(data) if data is not None else 0
     except (TypeError, ValueError):
         return 0
+
+# =====================================================================
+# Phase 8: Gmail connector helpers.
+# =====================================================================
+# Mirror the Slack helpers above (upsert/get installation, label CRUD,
+# ingestion-state bookkeeping). Two variants of "read a connection":
+#
+#   get_gmail_connection         — full row INCLUDING tokens. Internal
+#                                  use only (gmail_oauth.py needs them).
+#   get_gmail_connection_public  — projection WITHOUT tokens. Safe to
+#                                  return from API routes.
+#
+# Token fields never leave the backend in any response body.
+
+
+_GMAIL_PUBLIC_FIELDS = (
+    "id", "workspace_id", "google_user_id", "email",
+    "scopes", "status", "created_at", "updated_at", "token_expiry",
+)
+
+
+def _gmail_public_projection(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip token fields. Used by every API-facing helper."""
+    out = {k: row.get(k) for k in _GMAIL_PUBLIC_FIELDS}
+    # `connected_at` is a nicer name for the frontend than the
+    # generic created_at; keep both so callers don't need to map.
+    out["connected_at"] = row.get("created_at")
+    return out
+
+
+def upsert_gmail_connection(
+    *,
+    workspace_id: str,
+    google_user_id: str,
+    email: str,
+    access_token: str,
+    refresh_token: str,
+    token_expiry: Optional[str],
+    scopes: str,
+    status: str = "active",
+) -> Optional[Dict[str, Any]]:
+    """
+    Insert or update a Gmail connection. Returns the full row
+    (INCLUDING tokens) so the caller can use it for the first ingest
+    without an extra read.
+
+    Reconnecting the same Google account in the same workspace updates
+    in place via the (workspace_id, google_user_id) UNIQUE constraint.
+
+    Notes:
+      - Google only re-issues a refresh_token when prompt=consent was
+        passed AND the user hasn't been here recently. If `refresh_token`
+        is blank on update, preserve the previously-stored one rather
+        than overwriting with empty.
+    """
+    if not workspace_id or not google_user_id:
+        return None
+
+    # Read the existing row (if any) so we can preserve refresh_token
+    # when Google didn't send a fresh one on reconnect.
+    existing: Optional[Dict[str, Any]] = None
+    try:
+        client = get_supabase()
+        sel = (
+            client.table("gmail_connections")
+            .select("*")
+            .eq("workspace_id", workspace_id)
+            .eq("google_user_id", google_user_id)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(sel, "data", None) or []
+        existing = rows[0] if rows else None
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_get_gmail_connection_for_upsert_failed',
+            extra={'error': type(e).__name__},
+        )
+
+    effective_refresh = (refresh_token or "").strip()
+    if not effective_refresh and existing:
+        effective_refresh = (existing.get("refresh_token") or "").strip()
+
+    payload: Dict[str, Any] = {
+        "workspace_id":    workspace_id,
+        "google_user_id":  google_user_id,
+        "email":           email or "",
+        "access_token":    access_token or "",
+        "refresh_token":   effective_refresh,
+        "scopes":          scopes or "",
+        "status":          status,
+    }
+    if token_expiry:
+        payload["token_expiry"] = token_expiry
+
+    try:
+        client = get_supabase()
+        resp = (
+            client.table("gmail_connections")
+            .upsert(payload, on_conflict="workspace_id,google_user_id")
+            .execute()
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_upsert_gmail_connection_failed',
+            extra={'workspace_id': workspace_id, 'error': type(e).__name__},
+        )
+        return None
+
+    rows = getattr(resp, "data", None) or []
+    return rows[0] if rows else None
+
+
+def get_gmail_connection(
+    *, connection_id: str, workspace_id: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Return the full Gmail connection row, tokens included. Server-side
+    callers only -- the API surface uses get_gmail_connection_public.
+    """
+    if not connection_id or not workspace_id:
+        return None
+    try:
+        client = get_supabase()
+        resp = (
+            client.table("gmail_connections")
+            .select("*")
+            .eq("id", connection_id)
+            .eq("workspace_id", workspace_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_get_gmail_connection_failed',
+            extra={'connection_id': connection_id, 'error': type(e).__name__},
+        )
+        return None
+    rows = getattr(resp, "data", None) or []
+    return rows[0] if rows else None
+
+
+def get_gmail_connection_public(
+    *, connection_id: str, workspace_id: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Public projection of a Gmail connection -- safe to return from
+    API routes. Token fields are stripped.
+    """
+    row = get_gmail_connection(
+        connection_id=connection_id, workspace_id=workspace_id,
+    )
+    if not row:
+        return None
+    return _gmail_public_projection(row)
+
+
+def list_gmail_connections_public(
+    *, workspace_id: str,
+) -> List[Dict[str, Any]]:
+    """List public projections for every Gmail connection in a workspace."""
+    if not workspace_id:
+        return []
+    try:
+        client = get_supabase()
+        resp = (
+            client.table("gmail_connections")
+            .select("*")
+            .eq("workspace_id", workspace_id)
+            .order("created_at")
+            .execute()
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_list_gmail_connections_failed',
+            extra={'workspace_id': workspace_id, 'error': type(e).__name__},
+        )
+        return []
+    rows = getattr(resp, "data", None) or []
+    return [_gmail_public_projection(r) for r in rows]
+
+
+def delete_gmail_connection(
+    *, connection_id: str, workspace_id: str,
+) -> bool:
+    """
+    Delete a Gmail connection (cascades to labels + ingestion state via
+    ON DELETE CASCADE). Returns True if a row was actually deleted.
+    """
+    if not connection_id or not workspace_id:
+        return False
+    try:
+        client = get_supabase()
+        resp = (
+            client.table("gmail_connections")
+            .delete()
+            .eq("id", connection_id)
+            .eq("workspace_id", workspace_id)
+            .execute()
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_delete_gmail_connection_failed',
+            extra={'connection_id': connection_id, 'error': type(e).__name__},
+        )
+        return False
+    rows = getattr(resp, "data", None) or []
+    return bool(rows)
+
+
+def update_gmail_connection_tokens(
+    *,
+    connection_id: str,
+    workspace_id: str,
+    access_token: str,
+    token_expiry: Optional[str] = None,
+) -> bool:
+    """
+    Persist a refreshed access_token (and its new expiry) back to the
+    connection row. Called by the ingestion runner after a successful
+    refresh_access_token call so the new token survives restarts.
+
+    workspace_id is REQUIRED for defense in depth -- a buggy caller
+    that somehow ended up holding another workspace's connection_id
+    must not be able to overwrite that workspace's tokens.
+    """
+    if not connection_id or not workspace_id or not access_token:
+        return False
+    payload: Dict[str, Any] = {"access_token": access_token}
+    if token_expiry:
+        payload["token_expiry"] = token_expiry
+    try:
+        client = get_supabase()
+        client.table("gmail_connections").update(payload).eq(
+            "id", connection_id,
+        ).eq("workspace_id", workspace_id).execute()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_update_gmail_tokens_failed',
+            extra={'connection_id': connection_id, 'error': type(e).__name__},
+        )
+        return False
+    return True
+
+
+# ---------- Gmail labels --------------------------------------------------
+
+def upsert_gmail_labels(
+    *,
+    workspace_id: str,
+    gmail_connection_id: str,
+    labels: List[Dict[str, Any]],
+) -> int:
+    """
+    Insert/refresh the label rows for a connection. is_selected is
+    PRESERVED on update via the unique key (gmail_connection_id, label_id)
+    -- the upsert specifies only label_id/name/type, never is_selected.
+
+    Returns the number of rows we sent (best effort -- the supabase
+    client doesn't always return updated_count reliably).
+    """
+    if not workspace_id or not gmail_connection_id or not labels:
+        return 0
+
+    rows: List[Dict[str, Any]] = []
+    for raw in labels:
+        lid = (raw.get("label_id") or "").strip()
+        if not lid:
+            continue
+        rows.append({
+            "workspace_id":         workspace_id,
+            "gmail_connection_id":  gmail_connection_id,
+            "label_id":             lid,
+            "name":                 (raw.get("name") or "").strip(),
+            "type":                 (raw.get("type") or "user").strip(),
+        })
+    if not rows:
+        return 0
+
+    try:
+        client = get_supabase()
+        client.table("gmail_labels").upsert(
+            rows, on_conflict="gmail_connection_id,label_id",
+        ).execute()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_upsert_gmail_labels_failed',
+            extra={'workspace_id': workspace_id, 'error': type(e).__name__},
+        )
+        return 0
+    return len(rows)
+
+
+def list_gmail_labels(
+    *, workspace_id: str, gmail_connection_id: str,
+) -> List[Dict[str, Any]]:
+    """Return every label row for a connection, including is_selected."""
+    if not workspace_id or not gmail_connection_id:
+        return []
+    try:
+        client = get_supabase()
+        resp = (
+            client.table("gmail_labels")
+            .select("label_id, name, type, is_selected")
+            .eq("workspace_id", workspace_id)
+            .eq("gmail_connection_id", gmail_connection_id)
+            .order("name")
+            .execute()
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_list_gmail_labels_failed',
+            extra={'workspace_id': workspace_id, 'error': type(e).__name__},
+        )
+        return []
+    return getattr(resp, "data", None) or []
+
+
+def set_selected_gmail_labels(
+    *,
+    workspace_id: str,
+    gmail_connection_id: str,
+    selected_label_ids: List[str],
+) -> bool:
+    """
+    Replace the selected-set for a Gmail connection. Mirrors
+    set_selected_channels.
+
+    Two updates (one for True, one for False) so the database stays
+    consistent with the new selection without us having to read first.
+    """
+    if not workspace_id or not gmail_connection_id:
+        return False
+    ids = [lid.strip() for lid in (selected_label_ids or []) if lid.strip()]
+
+    try:
+        client = get_supabase()
+        if ids:
+            client.table("gmail_labels").update(
+                {"is_selected": True},
+            ).eq("workspace_id", workspace_id).eq(
+                "gmail_connection_id", gmail_connection_id,
+            ).in_("label_id", ids).execute()
+            client.table("gmail_labels").update(
+                {"is_selected": False},
+            ).eq("workspace_id", workspace_id).eq(
+                "gmail_connection_id", gmail_connection_id,
+            ).not_.in_("label_id", ids).execute()
+        else:
+            client.table("gmail_labels").update(
+                {"is_selected": False},
+            ).eq("workspace_id", workspace_id).eq(
+                "gmail_connection_id", gmail_connection_id,
+            ).execute()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_set_selected_gmail_labels_failed',
+            extra={
+                'workspace_id': workspace_id,
+                'error': type(e).__name__,
+                'selected_count': len(ids),
+            },
+        )
+        return False
+    return True
+
+
+def list_selected_gmail_label_ids(
+    *, workspace_id: str, gmail_connection_id: str,
+) -> List[str]:
+    """Return the currently-selected label IDs for a Gmail connection."""
+    if not workspace_id or not gmail_connection_id:
+        return []
+    try:
+        client = get_supabase()
+        resp = (
+            client.table("gmail_labels")
+            .select("label_id")
+            .eq("workspace_id", workspace_id)
+            .eq("gmail_connection_id", gmail_connection_id)
+            .eq("is_selected", True)
+            .execute()
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_list_selected_gmail_labels_failed',
+            extra={'workspace_id': workspace_id, 'error': type(e).__name__},
+        )
+        return []
+    rows = getattr(resp, "data", None) or []
+    return [(r.get("label_id") or "").strip() for r in rows if r.get("label_id")]
+
+
+# ---------- Gmail ingestion state ----------------------------------------
+
+def upsert_gmail_ingestion_state(
+    *,
+    workspace_id: str,
+    gmail_connection_id: str,
+    label_id: str,
+    last_history_id: Optional[str] = None,
+) -> bool:
+    """
+    Stamp ingestion progress for a (connection, label). last_synced_at
+    is set to now() server-side via the trigger; last_history_id is
+    only written when explicitly passed (None preserves the prior value).
+    """
+    if not workspace_id or not gmail_connection_id or not label_id:
+        return False
+    payload: Dict[str, Any] = {
+        "workspace_id":        workspace_id,
+        "gmail_connection_id": gmail_connection_id,
+        "label_id":            label_id,
+        "last_synced_at":      "now()",
+    }
+    if last_history_id:
+        payload["last_history_id"] = last_history_id
+    try:
+        client = get_supabase()
+        client.table("gmail_ingestion_state").upsert(
+            payload, on_conflict="gmail_connection_id,label_id",
+        ).execute()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_upsert_gmail_ingestion_state_failed',
+            extra={
+                'workspace_id': workspace_id,
+                'connection_id': gmail_connection_id,
+                'label_id': label_id,
+                'error': type(e).__name__,
+            },
+        )
+        return False
+    return True

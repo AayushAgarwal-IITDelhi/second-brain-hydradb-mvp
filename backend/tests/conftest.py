@@ -46,6 +46,19 @@ os.environ.setdefault(
     "SLACK_OAUTH_STATE_SECRET",
     "test-state-secret-do-not-use-in-prod",
 )
+# Gmail Connect (Phase 8) — placeholder OAuth credentials. Separate
+# state secret so tests can prove the Gmail flow doesn't accept tokens
+# signed by the Slack secret (and vice versa).
+os.environ.setdefault("GMAIL_CLIENT_ID",     "test-gmail-client-id")
+os.environ.setdefault("GMAIL_CLIENT_SECRET", "test-gmail-client-secret")
+os.environ.setdefault(
+    "GMAIL_REDIRECT_URI",
+    "http://127.0.0.1:8000/api/gmail/oauth/callback",
+)
+os.environ.setdefault(
+    "GMAIL_OAUTH_STATE_SECRET",
+    "test-gmail-state-secret-do-not-use-in-prod",
+)
 os.environ.setdefault("FRONTEND_BASE_URL", "http://localhost:5173")
 # Disable the query cache in tests so each test sees live responses.
 os.environ["QUERY_CACHE_ENABLED"] = "false"
