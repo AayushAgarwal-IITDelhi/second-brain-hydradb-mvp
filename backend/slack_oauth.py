@@ -378,9 +378,38 @@ def run_workspace_ingest(
     total_skipped = 0
     processed = 0
 
+    # Phase 7: per-channel retry + dead-letter. process_channel +
+    # upload_in_batches both touch the network; transient failures
+    # deserve a second attempt. Permanent failures emit dead_letter
+    # so an operator can replay them later.
+    from observability import emit_dead_letter  # noqa: PLC0415
+    from retry import retry_with_backoff       # noqa: PLC0415
+
     for channel_id in channel_ids:
+        def _process_one() -> Dict[str, Any]:
+            return process_channel(slack, channel_id, state, force=force)
+
+        def _on_giveup(err: BaseException, _channel_id: str = channel_id) -> None:
+            emit_dead_letter(
+                kind="slack_ingest_channel",
+                workspace_id=workspace_id,
+                error=err,
+                context={
+                    "channel_id": _channel_id,
+                    "stage":      "process_channel",
+                },
+            )
+
         try:
-            result = process_channel(slack, channel_id, state, force=force)
+            result = retry_with_backoff(
+                _process_one,
+                attempts=3,
+                initial_delay=1.0,
+                max_delay=8.0,
+                retry_on=(Exception,),
+                on_giveup=_on_giveup,
+                op_name="slack_ingest_channel",
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "workspace_ingest_channel_error",
@@ -390,6 +419,7 @@ def run_workspace_ingest(
                     "error":        type(e).__name__,
                 },
             )
+            total_failure += 1
             continue
         processed += 1
         total_files += len(result.get("files") or [])
@@ -403,7 +433,20 @@ def run_workspace_ingest(
                 state.save()
             continue
 
-        stats = upload_in_batches(hydra, files, state)
+        # Phase 7: upload_in_batches has its own internal per-batch
+        # retry behavior inside the HydraDB client, so we don't double-
+        # wrap here. Failures are reflected in stats["failures"].
+        try:
+            stats = upload_in_batches(hydra, files, state)
+        except Exception as e:  # noqa: BLE001
+            emit_dead_letter(
+                kind="slack_ingest_upload",
+                workspace_id=workspace_id,
+                error=e,
+                context={"channel_id": channel_id, "file_count": len(files)},
+            )
+            total_failure += 1
+            continue
         total_success += stats.get("successes", 0)
         total_failure += stats.get("failures", 0)
 

@@ -1034,3 +1034,101 @@ def is_channel_selected_for_workspace(
     if not rows:
         return False
     return bool(rows[0].get("is_selected"))
+
+# =====================================================================
+# Phase 7: durable Slack event dedupe.
+# =====================================================================
+# Backed by public.slack_event_seen (see phase7_production_hardening.sql).
+# claim_slack_event_id returns True on the FIRST claim and False on
+# duplicates -- the dedupe primitive for /slack/events.
+#
+# We use insert-on-conflict-do-nothing as the atomicity primitive.
+# Postgres serializes the constraint check, so the first insert
+# returns a row; a duplicate inserted by a concurrent worker conflicts
+# and returns no row. The caller branches on that.
+
+def claim_slack_event_id(
+    *, event_id: str, workspace_id: Optional[str] = None,
+) -> bool:
+    """
+    Atomically claim a Slack event_id for processing.
+
+    Returns:
+        True  -- this caller is the FIRST to see this event_id;
+                 caller should proceed to process the event.
+        False -- the event_id was already claimed by another delivery
+                 (a Slack retry, or another worker handled it);
+                 caller should drop the event.
+
+    Failures fall back to returning True (i.e. "process the event"),
+    which means a DB outage degrades us to the previous in-memory
+    behavior rather than dropping all webhook deliveries.
+    """
+    if not event_id:
+        return False
+
+    payload: Dict[str, Any] = {"event_id": event_id}
+    if workspace_id:
+        payload["workspace_id"] = workspace_id
+
+    try:
+        client = get_supabase()
+        resp = (
+            client.table("slack_event_seen")
+            .insert(payload, returning="representation")
+            # ignore_duplicates=True -> ON CONFLICT DO NOTHING.
+            # When the row already exists, .data comes back as an
+            # empty list and we treat that as "duplicate".
+            .execute()
+        )
+    except Exception as e:  # noqa: BLE001
+        # Likely a unique-constraint violation surfaced as a generic
+        # exception by the supabase client. We can't tell apart "real
+        # DB outage" from "duplicate row" here, so we fail OPEN
+        # (return True) only when we can't confirm dedupe -- the
+        # downside (processing a duplicate during a Supabase outage)
+        # is less bad than the upside (degrading to in-memory behavior
+        # rather than dropping events). The "duplicate" path emits a
+        # specific event so we can spot it in logs.
+        error_name = type(e).__name__
+        error_msg = str(e).lower()
+        if "duplicate" in error_msg or "23505" in error_msg or "unique" in error_msg:
+            logger.debug(
+                'supabase_claim_event_duplicate',
+                extra={'event_id': event_id},
+            )
+            return False
+        logger.warning(
+            'supabase_claim_event_failed',
+            extra={'event_id': event_id, 'error': error_name},
+        )
+        return True
+
+    rows = getattr(resp, "data", None) or []
+    return bool(rows)
+
+
+def cleanup_slack_event_seen(*, retain_hours: int = 24) -> int:
+    """
+    Drop dedupe rows older than `retain_hours`. Call from a periodic
+    job (or ad-hoc); we don't auto-cleanup on every request because
+    the table stays small (Slack's retry window is 1h).
+
+    Returns the number of rows removed, or 0 on error.
+    """
+    try:
+        client = get_supabase()
+        resp = client.rpc(
+            "cleanup_slack_event_seen", {"retain_hours": int(retain_hours)},
+        ).execute()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_cleanup_event_seen_failed',
+            extra={'error': type(e).__name__},
+        )
+        return 0
+    data = getattr(resp, "data", None)
+    try:
+        return int(data) if data is not None else 0
+    except (TypeError, ValueError):
+        return 0

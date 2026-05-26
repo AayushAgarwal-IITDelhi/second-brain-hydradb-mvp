@@ -292,7 +292,13 @@ def require_user(
 
     Raises 401 on any verification failure.
     """
-    return _decode_bearer(authorization)
+    user = _decode_bearer(authorization)
+    # Phase 7: bind the verified identity into the per-request logging
+    # context so every downstream log line carries user_id automatically.
+    # workspace_id stays None on user-only routes (/api/me*).
+    from logging_config import bind_user_context  # noqa: PLC0415
+    bind_user_context(user.id, None)
+    return user
 
 
 def require_workspace(
@@ -312,6 +318,10 @@ def require_workspace(
 
     workspace_id = (x_workspace_id or "").strip()
     if not workspace_id:
+        # Bind the user even though the workspace header is missing,
+        # so the resulting 400 log line still carries user_id.
+        from logging_config import bind_user_context  # noqa: PLC0415
+        bind_user_context(user.id, None)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Missing X-Workspace-Id header.",
@@ -320,6 +330,8 @@ def require_workspace(
     role = get_workspace_membership(user_id=user.id, workspace_id=workspace_id)
     if role is None:
         # 403 not 404, so workspace-id enumeration can't probe existence.
+        from logging_config import bind_user_context  # noqa: PLC0415
+        bind_user_context(user.id, workspace_id)
         logger.info(
             'workspace_access_denied',
             extra={'user_id': user.id, 'workspace_id': workspace_id},
@@ -328,6 +340,12 @@ def require_workspace(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No access to this workspace.",
         )
+
+    # Phase 7: bind both user_id AND workspace_id for every downstream
+    # log line on this request. This is what gives the workspace-aware
+    # observability surface its punch.
+    from logging_config import bind_user_context  # noqa: PLC0415
+    bind_user_context(user.id, workspace_id)
 
     return WorkspaceContext(
         user=user, workspace_id=workspace_id, role=role,

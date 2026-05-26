@@ -11,8 +11,29 @@ routes call them by name from main, so the patch sits exactly there.
 
 from unittest.mock import patch
 
+import pytest
+
 
 TEST_WS_ID = "00000000-0000-0000-0000-00000000aaaa"
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limit_state():
+    """
+    Phase 7: the new per-bucket rate limits (slack_ingest=5/5min,
+    auth=30/5min, etc.) accumulate across tests in the same process.
+    Without resetting them, the 6th test in TestRunIngest hits the
+    /api/slack/ingest limit and gets 429 -- shadowing the 401/400/etc.
+    the test was actually checking for. Clear the buckets per-test
+    so each assertion sees the correct status code.
+    """
+    from rate_limit import _limiter
+    with _limiter._lock:
+        _limiter._buckets.clear()
+    yield
+    with _limiter._lock:
+        _limiter._buckets.clear()
+
 
 
 # ── GET /api/slack/channels ──────────────────────────────────────────────

@@ -52,7 +52,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import (  # noqa: E402
-    BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, status,
+    BackgroundTasks, Depends, FastAPI, Header, HTTPException,
+    Request, Response, status,
 )
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse  # noqa: E402
@@ -72,7 +73,10 @@ from logging_config import configure_logging, get_logger  # noqa: E402
 from prompts import INSUFFICIENT_CONTEXT_ANSWER  # noqa: E402
 from query_cache import build_cache_key, get_cached, put as cache_put  # noqa: E402
 from query_rewriter import rewrite_query  # noqa: E402
-from rate_limit import rate_limit_dependency  # noqa: E402
+from rate_limit import (  # noqa: E402
+    make_rate_limit_dependency,
+    rate_limit_dependency,
+)
 from realtime_ingest import (  # noqa: E402
     admin_status_snapshot,
     _event_already_seen,
@@ -133,10 +137,24 @@ def _parse_cors_origins() -> List[str]:
 ALLOWED_ORIGINS = _parse_cors_origins()
 
 
+# ---------- Phase 7: per-route rate-limit dependencies ---------- #
+# Each one targets a named bucket so a flood in one area can't starve
+# the others. The factory reads its limit from env at request time, so
+# operators can retune limits without a restart.
+auth_rate_limit            = make_rate_limit_dependency("auth")
+slack_webhook_rate_limit   = make_rate_limit_dependency("slack_webhook")
+slack_ingest_rate_limit    = make_rate_limit_dependency("ingest")
+
+
 # ---------- Lifespan: startup checks + scheduler ---------- #
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_required_env()
+    # Phase 7: opt-in Sentry init (no-op when SENTRY_DSN unset).
+    # Initialized AFTER env validation so a startup config error
+    # surfaces in stdout logs, not Sentry.
+    from observability import init_sentry  # noqa: PLC0415
+    init_sentry()
     start_scheduler()
     try:
         yield
@@ -492,6 +510,27 @@ def health() -> Dict[str, str]:
     }
 
 
+@app.get("/api/ready")
+def ready(response: Response) -> Dict[str, Any]:
+    """
+    Readiness probe. Confirms the backend's CRITICAL upstream
+    dependencies (Supabase, HydraDB, OpenAI/compatible) are reachable.
+
+    Distinct from /api/health (liveness):
+      - /api/health  -> "the process can serve HTTP"  (cheap, always 200 once boot completes)
+      - /api/ready   -> "the process can serve TRAFFIC" (200 only when all deps OK)
+
+    Returns 200 with check details when all deps are healthy, or 503
+    with the same shape when any dep fails. The body always includes a
+    per-check breakdown so a probe failure is debuggable from logs.
+    """
+    from observability import check_dependencies  # noqa: PLC0415
+    result = check_dependencies()
+    if not result.get("ok"):
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return result
+
+
 # ---------- Protected routes ---------- #
 @app.post(
     "/api/query",
@@ -784,7 +823,10 @@ def query_stream(
 # Public route — authenticated by Slack's HMAC signature, not X-API-Key.
 # Slack expects us to ACK within 3 seconds, so we verify, queue the
 # ingestion as a BackgroundTask, and return 200 immediately.
-@app.post("/slack/events")
+@app.post(
+    "/slack/events",
+    dependencies=[Depends(slack_webhook_rate_limit)],
+)
 async def slack_events(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -896,7 +938,7 @@ def admin_status() -> Dict[str, Any]:
 
 
 # ---------- User profile + workspaces (Phase 1 multi-user) ---------- #
-@app.get("/api/me")
+@app.get("/api/me", dependencies=[Depends(auth_rate_limit)])
 def me(user: SupabaseUser = Depends(require_user)) -> Dict[str, Any]:
     """
     Return the JWT-verified caller's identity. Useful for the frontend
@@ -905,7 +947,7 @@ def me(user: SupabaseUser = Depends(require_user)) -> Dict[str, Any]:
     return {"id": user.id, "email": user.email}
 
 
-@app.get("/api/me/workspaces")
+@app.get("/api/me/workspaces", dependencies=[Depends(auth_rate_limit)])
 def my_workspaces(
     user: SupabaseUser = Depends(require_user),
 ) -> List[Dict[str, Any]]:
@@ -1262,7 +1304,11 @@ def slack_channels_save(
     return {"selected_count": len(req.selected_channel_ids)}
 
 
-@app.post("/api/slack/ingest", status_code=status.HTTP_202_ACCEPTED)
+@app.post(
+    "/api/slack/ingest",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(slack_ingest_rate_limit)],
+)
 def slack_ingest(
     background_tasks: BackgroundTasks,
     workspace: WorkspaceContext = Depends(require_workspace),

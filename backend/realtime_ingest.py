@@ -79,7 +79,30 @@ STATE_PATH = _BACKEND_DIR / "data" / "ingestion_state.json"
 
 
 # ---------------------------------------------------------------------- #
-# Idempotency: dedupe Slack event retries (~3 retries within 1 hour)
+# Idempotency: dedupe Slack event retries (~3 retries within 1 hour).
+#
+# Phase 7 hardening
+# -----------------
+# Phase 5 stored seen event_ids in this module-level dict only. That
+# survived in-process retries but not restarts and not multi-worker
+# deployments. Phase 7 promotes the in-memory map to a HOT-PATH cache
+# in front of a durable Supabase-backed claim:
+#
+#   1. Look up event_id in the in-memory dict (microseconds). If
+#      present and fresh, drop -- this is the common case for retries
+#      that arrive faster than the round-trip to Supabase.
+#   2. Otherwise call supabase_client.claim_slack_event_id, which does
+#      an INSERT ... ON CONFLICT DO NOTHING into slack_event_seen.
+#      True = we claimed it (process); False = another worker already
+#      claimed it (drop).
+#   3. On success populate the in-memory cache so subsequent retries
+#      short-circuit at step 1.
+#
+# If Supabase is unreachable, claim_slack_event_id falls back to
+# returning True (process the event); the in-memory cache still
+# prevents same-process duplicates. That's a deliberate trade-off:
+# during an outage we'd rather process the occasional duplicate than
+# drop every Slack event.
 # ---------------------------------------------------------------------- #
 _SEEN_EVENT_TTL = 60 * 60   # 1 hour matches Slack's retry window
 _SEEN_EVENT_MAX = 5000      # cap memory
@@ -87,10 +110,12 @@ _seen_event_ids: Dict[str, float] = {}
 _seen_lock = threading.Lock()
 
 
-def _event_already_seen(event_id: str) -> bool:
+def _event_already_seen_in_memory(event_id: str) -> bool:
     """
-    Return True if we've already processed this Slack event_id.
-    Marks it as seen as a side effect (best-effort, in-memory).
+    Hot-path check: is event_id already in the in-process dedupe cache?
+    Returns True if so (caller should drop). Side effect: records the
+    event_id in the cache so subsequent calls within the TTL also
+    return True even if this caller is the first one.
     """
     if not event_id:
         return False
@@ -102,11 +127,48 @@ def _event_already_seen(event_id: str) -> bool:
             for k, t in list(_seen_event_ids.items()):
                 if t < cutoff:
                     _seen_event_ids.pop(k, None)
-        if event_id in _seen_event_ids:
-            if now - _seen_event_ids[event_id] < _SEEN_EVENT_TTL:
-                return True
+        seen_at = _seen_event_ids.get(event_id)
+        if seen_at is not None and now - seen_at < _SEEN_EVENT_TTL:
+            return True
         _seen_event_ids[event_id] = now
         return False
+
+
+def _event_already_seen(event_id: str) -> bool:
+    """
+    Phase 7: two-tier dedupe. Returns True if this event has already
+    been claimed (either in-process or in Supabase).
+
+    Flow:
+      - In-process hit  -> True (drop). Records seen.
+      - In-process miss -> claim against Supabase. If Supabase says we
+                           lost the race (someone else already claimed
+                           it), update the in-process map and return
+                           True. Otherwise we own the event and return
+                           False (caller proceeds).
+    """
+    if not event_id:
+        return False
+
+    # Stage 1: in-process cache. Marks the event_id as seen as a side
+    # effect (so two concurrent threads handling Slack retries in the
+    # same process can't both claim it).
+    if _event_already_seen_in_memory(event_id):
+        return True
+
+    # Stage 2: durable claim. Lazy import to avoid a hard dependency at
+    # module import time -- supabase_client pulls in network libs.
+    from supabase_client import claim_slack_event_id  # noqa: PLC0415
+
+    claimed = claim_slack_event_id(event_id=event_id)
+    if claimed:
+        # We own this event_id. The in-process cache was already
+        # populated by _event_already_seen_in_memory above.
+        return False
+
+    # Lost the race against another worker. Remember it so any further
+    # retries that hit THIS worker short-circuit at stage 1.
+    return True
 
 
 # ---------------------------------------------------------------------- #
@@ -174,9 +236,46 @@ def process_slack_event(payload: Dict[str, Any]) -> None:
         logger.debug('realtime_payload_not_dict')
         return
 
+    # Phase 7: wrap the inner processing with retry + dead-letter. The
+    # inner function uses primitives (Slack API, HydraDB, IngestionState
+    # file I/O) that can fail transiently; retries with backoff handle
+    # the common cases. A permanent failure emits a dead_letter event
+    # AND, if Sentry is configured, an exception capture.
+    from observability import emit_dead_letter  # noqa: PLC0415
+    from retry import retry_with_backoff       # noqa: PLC0415
+
+    workspace_for_logs = (
+        payload.get("team_id") or _resolve_team_id(payload) or "unknown"
+    )
+
+    def _on_giveup(err: BaseException) -> None:
+        emit_dead_letter(
+            kind="realtime_event",
+            workspace_id=workspace_for_logs,
+            error=err,
+            context={
+                "event_id": payload.get("event_id") or "",
+                "event_type": (payload.get("event") or {}).get("type") or "",
+            },
+        )
+
     try:
-        _process_slack_payload_inner(payload)
+        retry_with_backoff(
+            _process_slack_payload_inner,
+            payload,
+            attempts=3,
+            initial_delay=0.5,
+            max_delay=4.0,
+            # Retry on broad Exception so transient HTTP errors from
+            # Slack or HydraDB get a second chance, but NOT on
+            # KeyboardInterrupt / SystemExit (which inherit BaseException).
+            retry_on=(Exception,),
+            on_giveup=_on_giveup,
+            op_name="realtime_event",
+        )
     except Exception as e:  # noqa: BLE001
+        # We logged + dead-lettered in on_giveup. Swallow here so a
+        # single event never crashes the webhook worker.
         logger.error(
             'realtime_event_handler_failed',
             extra={'error': type(e).__name__},
