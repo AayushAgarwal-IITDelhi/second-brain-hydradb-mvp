@@ -378,12 +378,47 @@ def _build_source_card(
         # Also promote stable_key and channel from the raw chunk so that
         # dedupe_by_stable_key and _source_passes_filters work correctly even
         # without a state-file entry. (BUG-003 / BUG-004 fix)
+        #
+        # Recency fix: ALSO promote `timestamp` and `document_type` so
+        # the recency reranker can rank Slack messages by Slack ts even
+        # when no IngestionState entry exists yet. Realtime-ingested
+        # messages frequently hit this path because state.json may not
+        # have been re-read since the upload finished. We harvest from
+        # chunk metadata first (cheap, structured), and fall back to
+        # parsing the markdown header that the builder always writes
+        # ("Timestamp: <ts>" / "# Slack Message" / "# Slack Thread").
+        chunk_channel = (
+            _get_path(chunk, ("metadata", "channel"))
+            if isinstance(chunk, dict) else None
+        )
+        chunk_timestamp = (
+            _get_path(chunk, ("metadata", "timestamp"))
+            if isinstance(chunk, dict) else None
+        )
+        chunk_doc_type = (
+            _get_path(chunk, ("metadata", "document_type"))
+            if isinstance(chunk, dict) else None
+        )
+        # Last-resort: parse the markdown header body if metadata
+        # didn't carry the fields. The builder ALWAYS writes
+        # "Timestamp: <ts>" so this works for every legacy ingest.
+        if chunk_timestamp is None or chunk_doc_type is None or not chunk_channel:
+            body_text = _chunk_text(chunk) if isinstance(chunk, dict) else ""
+            harvested = _harvest_slack_header_fields(body_text)
+            if chunk_timestamp is None:
+                chunk_timestamp = harvested.get("timestamp")
+            if chunk_doc_type is None:
+                chunk_doc_type = harvested.get("document_type")
+            if not chunk_channel:
+                chunk_channel = harvested.get("channel")
         return {
-            "index":      index,
-            "source":     minimal_source,
-            "score":      score,
-            "stable_key": candidate_stable_key,
-            "channel":    _get_path(chunk, ("metadata", "channel")) if isinstance(chunk, dict) else None,
+            "index":         index,
+            "source":        minimal_source,
+            "score":         score,
+            "stable_key":    candidate_stable_key,
+            "channel":       chunk_channel,
+            "timestamp":     chunk_timestamp,
+            "document_type": chunk_doc_type,
         }
 
     # Rich source card backed by ingestion state.
@@ -400,6 +435,42 @@ def _build_source_card(
         "document_type": entry.get("document_type"),
         "score":         score,
     }
+
+
+# Compiled once at import: the markdown header lines build_message_file
+# / build_thread_file always emit. We use these to harvest Slack
+# metadata back out of the doc body when chunk metadata is missing.
+_SLACK_HEADER_TIMESTAMP_RE = re.compile(
+    r"^Timestamp:\s*(\S+)", re.MULTILINE | re.IGNORECASE,
+)
+_SLACK_HEADER_CHANNEL_RE = re.compile(
+    r"^Channel:\s*(\S+)", re.MULTILINE | re.IGNORECASE,
+)
+_SLACK_DOC_HEADER_RE = re.compile(
+    r"^#\s*Slack\s+(Message|Thread)\b", re.MULTILINE | re.IGNORECASE,
+)
+
+
+def _harvest_slack_header_fields(body_text: str) -> Dict[str, Any]:
+    """
+    Parse the Slack-doc markdown header (always written by the
+    ingestion builder) to recover channel + timestamp + document_type
+    when chunk metadata didn't carry them. Returns a dict with any
+    fields that were found.
+    """
+    out: Dict[str, Any] = {}
+    if not body_text:
+        return out
+    m = _SLACK_HEADER_TIMESTAMP_RE.search(body_text)
+    if m:
+        out["timestamp"] = m.group(1)
+    m = _SLACK_HEADER_CHANNEL_RE.search(body_text)
+    if m:
+        out["channel"] = m.group(1)
+    m = _SLACK_DOC_HEADER_RE.search(body_text)
+    if m:
+        out["document_type"] = m.group(1).lower()  # "message" or "thread"
+    return out
 
 
 def _load_state_safely() -> Optional[IngestionState]:
@@ -557,8 +628,13 @@ def _source_passes_filters(
     timestamp is also let through, on the same "don't drop" principle.
     """
     if channel:
+        # Strip a leading "#" so "#engineering" and "engineering" both
+        # match the stored channel name. The query rewriter normalizes
+        # this for inferred channels, but a user may also pass an
+        # explicit `channel` argument carrying the prefix.
+        wanted = channel.lstrip("#").lower()
         card_channel = source_card.get("channel")
-        if isinstance(card_channel, str) and card_channel.lower() != channel.lower():
+        if isinstance(card_channel, str) and card_channel.lower() != wanted:
             return False
     if user:
         card_user = source_card.get("user")
@@ -579,8 +655,119 @@ def _source_passes_filters(
 
 
 # ---------------------------------------------------------------------- #
-# Reusable building blocks: streaming and non-streaming endpoints share these
+# Recency intent: "latest message" / "most recent message in #engineering"
 # ---------------------------------------------------------------------- #
+# When the user asks for the latest / newest / most recent Slack message
+# we override semantic ranking and sort candidates by Slack timestamp
+# descending. Pure semantic recall (top_k=5 from HydraDB) often misses
+# the newest message because a brand-new "REALTIME TEST" line is short,
+# semantically thin, and easily out-ranked by older but lexically richer
+# messages. The fix: widen the candidate set, then sort by timestamp.
+#
+# Detection is deliberately conservative -- we only fire when both a
+# recency word AND a Slack-message noun appear, so phrases like "latest
+# news" or "what's the most recent decision" continue to use semantic
+# recall. Boundary case "latest news" is pinned by an existing test.
+
+# Slack-message-like nouns. We DO NOT treat "decision" / "news" / "update"
+# as recency targets -- those are semantic-recall use cases.
+_RECENCY_TARGET_TOKENS = (
+    "message", "messages",
+    "post", "posts",
+    "chat", "chats",
+    "ping", "pings",
+    "slack",                # "latest in slack", "newest slack message"
+)
+
+# Recency cue words.
+_RECENCY_CUE_TOKENS = (
+    "latest", "newest", "recent", "last",
+)
+
+# Multi-word cues that don't fit the single-token loop above.
+_RECENCY_CUE_PHRASES = (
+    "most recent",
+    "what's new",
+    "whats new",
+)
+
+# Widened HydraDB candidate set when the recency intent fires. The
+# default user-facing top_k is small (5) for LLM context-budget
+# reasons; for recency reranking we want a much larger pool to pick
+# from, since the newest message may sit far down the semantic ranking.
+_RECENCY_CANDIDATE_POOL = 50
+
+
+def _detect_recency_intent(question: str) -> bool:
+    """
+    True iff the question is asking for the latest Slack message (or
+    similar). Conservative: requires a recency cue AND a Slack-message
+    target noun. "latest news" alone returns False (no chat-like noun).
+    """
+    if not question:
+        return False
+    q = question.lower()
+
+    has_target = any(tok in q for tok in _RECENCY_TARGET_TOKENS)
+    if not has_target:
+        return False
+
+    # Token-level cue match using word boundaries so "lastly" doesn't
+    # trip "last".
+    for cue in _RECENCY_CUE_TOKENS:
+        if re.search(rf"\b{re.escape(cue)}\b", q):
+            return True
+    for phrase in _RECENCY_CUE_PHRASES:
+        if phrase in q:
+            return True
+    return False
+
+
+def _is_slack_message_card(card: Dict[str, Any]) -> bool:
+    """
+    Heuristic: this source card came from a Slack message/thread
+    ingest. We check document_type first (set by build_message_file /
+    build_thread_file in ingestion.ingest_slack) and fall back to the
+    stable_key prefix.
+    """
+    doc_type = card.get("document_type")
+    if isinstance(doc_type, str) and doc_type in ("message", "thread"):
+        return True
+    sk = card.get("stable_key")
+    if isinstance(sk, str) and sk.startswith("slack:"):
+        return True
+    # Pre-Phase-4 docs may carry no stable_key but a channel name.
+    # Not strong enough to count on its own.
+    return False
+
+
+def _rerank_by_recency(
+    chunks_with_meta: List[Dict[str, Any]], top_k: int,
+) -> List[Dict[str, Any]]:
+    """
+    Sort surviving chunks by Slack timestamp descending and cap at top_k.
+
+    Slack-message chunks WITH a parseable timestamp dominate -- they're
+    the only candidates the user actually asked for. Chunks without a
+    timestamp are dropped from the recency result entirely; if no Slack
+    chunks survive, the caller falls back to semantic ranking.
+
+    Returns a list with the same shape rerank_chunks would return (the
+    same dict keys: text, source_card, original_index, timestamp_float).
+    """
+    slack_with_ts = [
+        c for c in chunks_with_meta
+        if _is_slack_message_card(c["source_card"])
+        and c.get("timestamp_float") is not None
+    ]
+    if not slack_with_ts:
+        return []
+    slack_with_ts.sort(
+        key=lambda c: c["timestamp_float"], reverse=True,
+    )
+    return slack_with_ts[:top_k]
+
+
 def prepare_recall_context(
     question: str,
     top_k: int,
@@ -645,7 +832,17 @@ def prepare_recall_context(
     # mocks, never by user-facing routes.
     hydra = HydraDBClient(sub_tenant_id=hydradb_sub_tenant_id) \
         if hydradb_sub_tenant_id else HydraDBClient()
-    raw_response = hydra.full_recall(query=question, top_k=top_k)
+
+    # Recency intent: widen the candidate pool BEFORE the HydraDB call.
+    # Pure semantic top_k=5 frequently misses the newest message
+    # because brand-new short messages are lexically thin and lose to
+    # older but more-keyword-dense docs. We pull a much larger pool
+    # and re-sort by Slack timestamp below.
+    recency_intent = _detect_recency_intent(question)
+    effective_top_k = (
+        max(top_k, _RECENCY_CANDIDATE_POOL) if recency_intent else top_k
+    )
+    raw_response = hydra.full_recall(query=question, top_k=effective_top_k)
     chunks = _extract_chunks(raw_response)
     debug_on = _debug_recall_enabled()
 
@@ -700,15 +897,32 @@ def prepare_recall_context(
     chunks_with_meta = dedupe_by_stable_key(chunks_with_meta)
 
     # ---- Step 3: rerank if the mode asks for it; otherwise just cap ----
-    ranked, exact_matches_found = rerank_chunks(
-        chunks_with_meta, query_terms, mode, top_k,
-        metadata_bias=metadata_bias,
-    )
+    # Recency intent overrides the normal modes. If the recency
+    # reranker returns chunks, we use them; if it returns nothing
+    # (no surviving Slack-message chunks with timestamps -- e.g. the
+    # workspace has only Gmail docs), we fall back to the normal
+    # semantic rerank so the query still gets answered.
+    if recency_intent:
+        recency_ranked = _rerank_by_recency(chunks_with_meta, top_k)
+    else:
+        recency_ranked = []
+
+    if recency_ranked:
+        ranked = recency_ranked
+        exact_matches_found = 0
+        retrieval_mode_effective = "recency"
+    else:
+        ranked, exact_matches_found = rerank_chunks(
+            chunks_with_meta, query_terms, mode, top_k,
+            metadata_bias=metadata_bias,
+        )
+        retrieval_mode_effective = mode
 
     logger.debug('recall_context_ready', extra={
         'chunks_count': len(chunks),
         'filtered_out': filtered_out,
-        'mode': mode,
+        'mode': retrieval_mode_effective,
+        'recency_intent': recency_intent,
         'top_k': top_k,
     })
 
@@ -753,7 +967,7 @@ def prepare_recall_context(
         "chunks_count":     len(chunks),
         "filtered_out":     filtered_out,
         "exact_matches":    exact_matches_found,
-        "retrieval_mode":   mode,
+        "retrieval_mode":   retrieval_mode_effective,
         "query_terms":      query_terms,
         "fallback_debug":   None,
     }
