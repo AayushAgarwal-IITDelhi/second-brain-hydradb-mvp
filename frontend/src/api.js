@@ -445,6 +445,86 @@ export function runSlackIngest(signal) {
   return jsonFetch("/api/slack/ingest", { method: "POST", signal });
 }
 
+// ----- Gmail Connect (Phase 8, workspace-scoped) -----
+// Mirrors the Slack helpers above. Same workspace-bound auth (bearer +
+// X-Workspace-Id); the OAuth callback redirects back to the frontend
+// with ?gmail_connect=ok|error&reason=... which GmailSettings reads
+// once on mount.
+//
+// One workspace can hold MULTIPLE Gmail connections (personal +
+// shared mailbox, etc.), so labels and ingest take a connection_id.
+
+/**
+ * Fetch the workspace's Google OAuth authorize URL. The caller is
+ * expected to navigate window.location to the returned URL — Google
+ * will redirect back to /api/gmail/oauth/callback when done.
+ */
+export function getGmailConnectUrl(signal) {
+  return jsonFetch("/api/gmail/connect-url", { signal });
+}
+
+/**
+ * List every Gmail connection in the current workspace. The backend
+ * returns the PUBLIC projection — no access/refresh tokens. Shape:
+ *   { connections: [{ id, email, status, connected_at, ... }] }
+ */
+export function listGmailConnections(signal) {
+  return jsonFetch("/api/gmail/connections", { signal });
+}
+
+/**
+ * Delete a Gmail connection. Cascades to its labels + ingestion-state
+ * rows server-side. 404 if the connection doesn't belong to the
+ * caller's workspace.
+ */
+export function deleteGmailConnection(connectionId, signal) {
+  return jsonFetch(
+    `/api/gmail/connections/${encodeURIComponent(connectionId)}`,
+    { method: "DELETE", signal },
+  );
+}
+
+/**
+ * Return the label picker state for one Gmail connection. The backend
+ * refreshes the labels from Gmail on every call (so newly-created
+ * labels show up), then returns the stored rows including is_selected.
+ * Shape:
+ *   { connected: bool, labels: [{ label_id, name, type, is_selected }] }
+ */
+export function getGmailLabels(connectionId, signal) {
+  const qs = new URLSearchParams({ connection_id: connectionId }).toString();
+  return jsonFetch(`/api/gmail/labels?${qs}`, { signal });
+}
+
+/**
+ * Replace the selected-label set for a Gmail connection. `ids` is a
+ * string array of Gmail label IDs; passing an empty array clears the
+ * selection. 404 if the connection doesn't belong to this workspace.
+ */
+export function saveGmailLabels(connectionId, ids, signal) {
+  return jsonFetch("/api/gmail/labels", {
+    method: "POST",
+    body: {
+      connection_id:      connectionId,
+      selected_label_ids: Array.isArray(ids) ? ids : [],
+    },
+    signal,
+  });
+}
+
+/**
+ * Kick off a Gmail ingestion run for one connection's selected
+ * labels. Returns immediately; the actual work runs in a backend
+ * BackgroundTask. Shape: { status: "started", labels_queued }.
+ */
+export function runGmailIngest(connectionId, signal) {
+  return jsonFetch("/api/gmail/ingest", {
+    method: "POST",
+    body: { connection_id: connectionId },
+    signal,
+  });
+}
+
 // ====================================================================
 // POST /api/query/stream  (Server-Sent Events, workspace-scoped)
 // ====================================================================

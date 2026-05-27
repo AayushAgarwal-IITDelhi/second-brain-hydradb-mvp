@@ -13,6 +13,7 @@ import {
   streamQuery,
 } from "./api.js";
 import SlackSettings from "./slack/SlackSettings.jsx";
+import GmailSettings from "./gmail/GmailSettings.jsx";
 
 const MODES = [
   { value: "default",      label: "Default — concise answer" },
@@ -1017,6 +1018,8 @@ export default function App() {
   // Phase 3: Slack settings panel. Toggle is in the header alongside
   // History / Saved so the rest of the layout doesn't have to move.
   const [slackPanelOpen, setSlackPanelOpen] = useState(false);
+  // Phase 8: Gmail settings panel. Same toggle pattern as Slack.
+  const [gmailPanelOpen, setGmailPanelOpen] = useState(false);
 
   return (
     <div className="app">
@@ -1073,6 +1076,17 @@ export default function App() {
           >
             Slack
           </button>
+          <button
+            type="button"
+            className={`btn btn--ghost ${gmailPanelOpen ? "btn--active" : ""}`}
+            onClick={() => setGmailPanelOpen((open) => !open)}
+            aria-expanded={gmailPanelOpen}
+            aria-controls="gmail-settings-panel"
+            disabled={submitting}
+            title="Connect Gmail and pick labels to ingest"
+          >
+            Gmail
+          </button>
           <ArmedButton
             onConfirm={handleClearChat}
             label="Clear chat"
@@ -1104,6 +1118,8 @@ export default function App() {
       )}
 
       {slackPanelOpen && <SlackSettings />}
+
+      {gmailPanelOpen && <GmailSettings />}
 
       {viewingSaved && (
         <SavedAnswerOverlay
