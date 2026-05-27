@@ -101,19 +101,63 @@ create trigger slack_installations_set_updated_at
 -- =============================================================================
 -- slack_channels
 -- =============================================================================
+-- Mirrors the production schema. Dev databases that were created
+-- before these columns existed pick them up via the idempotent
+-- `add column if not exists` block below. `installation_id` is set
+-- by the backend when it has the row in hand; the column is
+-- nullable in this migration so legacy callers continue to work,
+-- but the production schema treats it as required and the backend
+-- always passes it.
 create table if not exists public.slack_channels (
   id                uuid primary key default gen_random_uuid(),
   workspace_id      uuid not null references public.workspaces(id) on delete cascade,
+  installation_id   uuid references public.slack_installations(id) on delete cascade,
   slack_channel_id  text not null,
   name              text not null default '',
-  is_selected       boolean not null default false,
+  is_private        boolean not null default false,
   is_archived       boolean not null default false,
+  member_count      integer not null default 0,
+  topic             text not null default '',
+  purpose           text not null default '',
+  is_selected       boolean not null default false,
+  last_seen_at      timestamptz,
   updated_at        timestamptz not null default now(),
   unique (workspace_id, slack_channel_id)
 );
 
+-- Defensive idempotent additions: anything below covers an existing
+-- database that was created before these columns existed. Each one
+-- is a no-op on a fresh deploy.
+alter table public.slack_channels
+  add column if not exists installation_id uuid references public.slack_installations(id) on delete cascade;
+alter table public.slack_channels
+  add column if not exists is_private      boolean not null default false;
+alter table public.slack_channels
+  add column if not exists member_count    integer not null default 0;
+alter table public.slack_channels
+  add column if not exists topic           text    not null default '';
+alter table public.slack_channels
+  add column if not exists purpose         text    not null default '';
+alter table public.slack_channels
+  add column if not exists last_seen_at    timestamptz;
+
+-- The production schema also has UNIQUE(installation_id, slack_channel_id).
+-- Add it defensively for parity.
+do $$
+begin
+  begin
+    alter table public.slack_channels
+      add constraint slack_channels_installation_channel_key
+      unique (installation_id, slack_channel_id);
+  exception when others then
+    null;
+  end;
+end$$;
+
 create index if not exists slack_channels_workspace_idx
   on public.slack_channels (workspace_id);
+create index if not exists slack_channels_installation_idx
+  on public.slack_channels (installation_id);
 
 drop trigger if exists slack_channels_set_updated_at
   on public.slack_channels;

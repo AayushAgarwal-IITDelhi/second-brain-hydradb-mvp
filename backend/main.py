@@ -1308,9 +1308,14 @@ def slack_channels_list(
         except Exception:  # noqa: BLE001
             fresh = []
         if fresh:
+            # Production schema's slack_channels.installation_id FK
+            # is non-null. Forward the installation row's id so the
+            # upsert payload satisfies it. The kwarg is optional
+            # (older dev databases without the column still work).
             upsert_slack_channels(
                 workspace_id=workspace.workspace_id,
                 channels=fresh,
+                installation_id=install.get("id"),
             )
 
     rows = list_workspace_channels(workspace_id=workspace.workspace_id)

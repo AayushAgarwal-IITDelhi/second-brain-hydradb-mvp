@@ -631,51 +631,115 @@ def upsert_slack_channels(
     *,
     workspace_id: str,
     channels: List[Dict[str, Any]],
+    installation_id: Optional[str] = None,
 ) -> int:
     """
     Upsert a batch of channels for a workspace. Each item must have at
-    least `slack_channel_id` and `name`; `is_archived` defaults to False.
-    Existing rows are updated in place — selection state (is_selected)
-    is NOT clobbered here, only name + is_archived are refreshed.
+    least `slack_channel_id` and `name`; every other field falls back
+    to a safe default so a partial payload doesn't break the insert.
+    Existing rows are updated in place — selection state (`is_selected`)
+    is NEVER clobbered by this function.
 
-    Returns the number of rows touched (best-effort; PostgREST doesn't
-    distinguish insert from update in its response count).
+    Production-schema alignment
+    ---------------------------
+    The production `slack_channels` table carries several columns the
+    old code never populated (`installation_id`, `is_private`,
+    `member_count`, `topic`, `purpose`, `last_seen_at`). Of those,
+    `installation_id` is a foreign key against `slack_installations.id`
+    that the production schema treats as required — sending the row
+    WITHOUT it triggers a NOT-NULL violation and PostgREST returns
+    400. The caller MUST pass `installation_id` when it has the
+    installation row in hand (the /api/slack/channels route does).
+    When omitted (older tests, fresh dev DB), we just don't include
+    the column; the dev schema treats it as nullable.
+
+    Error logging
+    -------------
+    On failure we extract the structured PostgREST error body (code,
+    message, hint, details) and log it. The previous code logged just
+    `type(e).__name__`, which flattened every Supabase failure to
+    `APIError` and gave operators no debugging signal. Channel IDs are
+    safe to log; channel names are NOT (a renamed-for-privacy channel
+    leaking via logs would be embarrassing).
+
+    Returns the number of rows touched.
     """
     if not channels:
         return 0
 
+    now_iso = _utc_iso_now()
     rows: List[Dict[str, Any]] = []
     for c in channels:
         cid = (c.get("slack_channel_id") or "").strip()
         if not cid:
             continue
-        rows.append({
+        row: Dict[str, Any] = {
             "workspace_id":     workspace_id,
             "slack_channel_id": cid,
             "name":             (c.get("name") or "").strip(),
             "is_archived":      bool(c.get("is_archived")),
-        })
+            "is_private":       bool(c.get("is_private")),
+            # Slack omits num_members for archived or no-bot-member
+            # private channels. Default to 0 so we never insert NULL
+            # into a NOT NULL integer column.
+            "member_count":     int(c.get("member_count") or 0),
+            "topic":            (c.get("topic")   or ""),
+            "purpose":          (c.get("purpose") or ""),
+            "last_seen_at":     now_iso,
+        }
+        # The installation_id FK is required by the production schema
+        # and unused by the dev schema. Set it only when provided so
+        # we don't try to insert into a column that doesn't exist on
+        # older databases.
+        if installation_id:
+            row["installation_id"] = installation_id
+        rows.append(row)
     if not rows:
         return 0
 
     try:
         client = get_supabase()
-        # ignore_duplicates=False so an existing row gets its name +
-        # is_archived refreshed if Slack tells us they changed.
+        # ignore_duplicates=False so an existing row gets its
+        # metadata refreshed if Slack tells us anything changed.
         resp = (
             client.table("slack_channels")
-            .upsert(rows, on_conflict="workspace_id,slack_channel_id",
-                    ignore_duplicates=False)
+            .upsert(
+                rows,
+                on_conflict="workspace_id,slack_channel_id",
+                ignore_duplicates=False,
+            )
             .execute()
         )
     except Exception as e:  # noqa: BLE001
-        logger.warning(
-            'supabase_upsert_channels_failed',
-            extra={'workspace_id': workspace_id, 'error': type(e).__name__,
-                   'count': len(rows)},
-        )
+        # Extract the structured PostgREST body when possible so the
+        # cause (e.g. "column does not exist", "violates not-null
+        # constraint") is visible in production logs. The body NEVER
+        # echoes back row values, so it's safe to log.
+        err_extra: Dict[str, Any] = {
+            "workspace_id": workspace_id,
+            "error":        type(e).__name__,
+            "count":        len(rows),
+        }
+        body = None
+        try:
+            body = e.json()  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            body = None
+        if isinstance(body, dict):
+            for key in ("code", "message", "hint", "details"):
+                if key in body and body[key]:
+                    err_extra[f"pg_{key}"] = str(body[key])[:300]
+        else:
+            err_extra["error_repr"] = repr(e)[:300]
+        logger.warning('supabase_upsert_channels_failed', extra=err_extra)
         return 0
     return len(getattr(resp, "data", []) or [])
+
+
+def _utc_iso_now() -> str:
+    """Return current UTC time as ISO 8601 -- format Postgres accepts."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
 
 
 def list_workspace_channels(

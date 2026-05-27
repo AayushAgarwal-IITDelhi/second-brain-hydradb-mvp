@@ -263,9 +263,17 @@ def installation_from_oauth_response(data: Dict[str, Any]) -> Dict[str, Any]:
 def list_slack_channels(bot_token: str) -> List[Dict[str, Any]]:
     """
     Enumerate channels the bot can see via conversations.list. Returns
-    a list of {slack_channel_id, name, is_archived} dicts ready to upsert
-    into slack_channels. We paginate transparently — Slack caps each
-    page at 1000.
+    a list of dicts ready to upsert into slack_channels. We paginate
+    transparently — Slack caps each page at 1000.
+
+    Per-channel fields:
+        slack_channel_id  str
+        name              str
+        is_archived       bool
+        is_private        bool
+        member_count      int      (0 when Slack omits num_members)
+        topic             str      (topic.value, empty when missing)
+        purpose           str      (purpose.value, empty when missing)
 
     Failures return an empty list and log a warning. The caller decides
     whether to surface that to the user.
@@ -290,10 +298,28 @@ def list_slack_channels(bot_token: str) -> List[Dict[str, Any]]:
                 cid = (ch.get("id") or "").strip()
                 if not cid:
                     continue
+                # Slack returns topic/purpose as nested {value, creator,
+                # last_set} dicts. We only need the .value string.
+                topic_obj   = ch.get("topic")   or {}
+                purpose_obj = ch.get("purpose") or {}
+                # `num_members` may be missing on private channels the
+                # bot isn't a member of; default to 0 so we don't try to
+                # insert NULL into a NOT NULL integer column.
+                num_members = ch.get("num_members")
+                try:
+                    member_count = int(num_members) if num_members is not None else 0
+                except (TypeError, ValueError):
+                    member_count = 0
                 out.append({
                     "slack_channel_id": cid,
                     "name":             (ch.get("name") or "").strip(),
                     "is_archived":      bool(ch.get("is_archived")),
+                    "is_private":       bool(ch.get("is_private")),
+                    "member_count":     member_count,
+                    "topic":            (topic_obj.get("value") or "").strip()
+                                         if isinstance(topic_obj, dict) else "",
+                    "purpose":          (purpose_obj.get("value") or "").strip()
+                                         if isinstance(purpose_obj, dict) else "",
                 })
             cursor = (resp.get("response_metadata") or {}).get("next_cursor") or ""
             pages += 1
