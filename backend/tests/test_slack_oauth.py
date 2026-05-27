@@ -274,3 +274,156 @@ class TestOauthCallback:
             )
         assert r.status_code == 302
         assert "incomplete_install" in r.headers["location"]
+
+
+# ── upsert_slack_installation — production schema alignment ──────────────
+class TestUpsertSlackInstallationPayload:
+    """
+    Pins the wire-level shape of the Slack-installation upsert. The
+    production schema uses `scope` (singular) -- sending `scopes`
+    triggers a 400 from PostgREST and the user lands on
+    /slack_connect=error&reason=persist_failed.
+    """
+
+    def _mock_supabase(self, exec_result=None, exec_raises=None):
+        """Build a MagicMock chain that mirrors the real supabase-py
+        fluent API: get_supabase().table(...).upsert(...).execute()."""
+        from unittest.mock import MagicMock
+        execute = MagicMock()
+        if exec_raises is not None:
+            execute.side_effect = exec_raises
+        else:
+            execute.return_value = MagicMock(
+                data=exec_result or [{"id": "row-1"}],
+            )
+        upsert = MagicMock(return_value=MagicMock(execute=execute))
+        table  = MagicMock(return_value=MagicMock(upsert=upsert))
+        client = MagicMock(table=table)
+        return client, upsert
+
+    def test_upsert_sends_scope_not_scopes(self):
+        """The persisted column is `scope` (singular). Sending `scopes`
+        is what was triggering the production 400."""
+        from unittest.mock import patch
+        from supabase_client import upsert_slack_installation
+        client, upsert = self._mock_supabase()
+        with patch("supabase_client.get_supabase", return_value=client):
+            upsert_slack_installation(
+                workspace_id="ws-1",
+                slack_team_id="T1",
+                slack_team_name="Acme",
+                bot_user_id="U_BOT",
+                bot_token="xoxb-secret",
+                scopes="channels:read,channels:history",
+            )
+        # Inspect the payload the upsert was called with.
+        args, kwargs = upsert.call_args
+        sent = args[0]
+        assert "scope"  in sent
+        assert "scopes" not in sent
+        assert sent["scope"] == "channels:read,channels:history"
+        assert kwargs.get("on_conflict") == "workspace_id"
+
+    def test_upsert_includes_installed_by_when_provided(self):
+        from unittest.mock import patch
+        from supabase_client import upsert_slack_installation
+        client, upsert = self._mock_supabase()
+        with patch("supabase_client.get_supabase", return_value=client):
+            upsert_slack_installation(
+                workspace_id="ws-1",
+                slack_team_id="T1",
+                slack_team_name="Acme",
+                bot_user_id="U_BOT",
+                bot_token="xoxb-secret",
+                scopes="channels:read",
+                installed_by="user-uuid-abc",
+            )
+        sent = upsert.call_args.args[0]
+        assert sent["installed_by"] == "user-uuid-abc"
+
+    def test_upsert_omits_installed_by_when_blank(self):
+        # An installed_by="" or None must NOT be sent. Older deployments
+        # may not have the column or may have a stricter FK; the
+        # nullable-default-omit path is safest.
+        from unittest.mock import patch
+        from supabase_client import upsert_slack_installation
+        client, upsert = self._mock_supabase()
+        with patch("supabase_client.get_supabase", return_value=client):
+            upsert_slack_installation(
+                workspace_id="ws-1",
+                slack_team_id="T1",
+                slack_team_name="Acme",
+                bot_user_id="U_BOT",
+                bot_token="xoxb-secret",
+                scopes="channels:read",
+                # installed_by intentionally omitted (legacy callers).
+            )
+        sent = upsert.call_args.args[0]
+        assert "installed_by" not in sent
+
+    def test_upsert_logs_real_postgrest_error_body(self, caplog):
+        """
+        When supabase returns a structured error (postgrest.APIError),
+        the logger must include `pg_code`, `pg_message`, `pg_hint`,
+        `pg_details` so an operator can see the real cause -- NOT just
+        the type name `APIError`. The bot_token must NEVER appear in
+        the log line.
+        """
+        import logging
+        from unittest.mock import patch
+        try:
+            from postgrest.exceptions import APIError as PGAPIError
+        except ImportError:  # pragma: no cover
+            pytest.skip("postgrest not installed")
+
+        err = PGAPIError({
+            "code":    "PGRST204",
+            "message": "Could not find the 'scopes' column",
+            "hint":    "Use 'scope' instead",
+            "details": "missing column",
+        })
+        from supabase_client import upsert_slack_installation
+        client, _ = self._mock_supabase(exec_raises=err)
+
+        with caplog.at_level(logging.WARNING, logger="supabase_client"):
+            with patch("supabase_client.get_supabase", return_value=client):
+                result = upsert_slack_installation(
+                    workspace_id="ws-1",
+                    slack_team_id="T1",
+                    slack_team_name="Acme",
+                    bot_user_id="U_BOT",
+                    bot_token="xoxb-secret-token",
+                    scopes="channels:read",
+                )
+        assert result is None
+
+        records = [
+            r for r in caplog.records
+            if r.message == "supabase_upsert_installation_failed"
+        ]
+        assert len(records) == 1
+        rec = records[0]
+        # Real PostgREST error fields should be present.
+        assert getattr(rec, "pg_code")    == "PGRST204"
+        assert "Could not find" in getattr(rec, "pg_message")
+        assert "scope" in getattr(rec, "pg_hint")
+        # The bot_token MUST NEVER appear anywhere in the log record.
+        full_repr = str(rec.__dict__)
+        assert "xoxb-secret-token" not in full_repr
+
+    def test_upsert_returns_none_on_failure(self):
+        from unittest.mock import patch
+        from supabase_client import upsert_slack_installation
+        client, _ = self._mock_supabase(
+            exec_raises=RuntimeError("transport failure"),
+        )
+        with patch("supabase_client.get_supabase", return_value=client):
+            result = upsert_slack_installation(
+                workspace_id="ws-1",
+                slack_team_id="T1",
+                slack_team_name="Acme",
+                bot_user_id="U_BOT",
+                bot_token="xoxb",
+                scopes="x",
+            )
+        assert result is None

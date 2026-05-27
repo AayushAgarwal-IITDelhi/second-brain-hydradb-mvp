@@ -493,34 +493,84 @@ def upsert_slack_installation(
     bot_user_id: str,
     bot_token: str,
     scopes: str,
+    installed_by: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Insert or update the workspace's Slack installation row. Returns the
     row on success, None on failure. Idempotent on workspace_id.
+
+    Schema notes (the production schema this targets)
+    -------------------------------------------------
+    The production `slack_installations` table uses the column name
+    `scope` (singular) -- NOT `scopes`. Sending `scopes` makes
+    PostgREST return 400 "Could not find the 'scopes' column ..." and
+    the caller sees `persist_failed` on the frontend. This function
+    sends `scope`, which matches the canonical Slack OAuth v2 response
+    field as well.
+
+    Also populates `installed_by` when the caller passes the verified
+    Supabase user id from the OAuth state. The column is nullable so
+    older callers continue to work.
+
+    Error logging
+    -------------
+    A PostgREST error carries a structured body (code, message, hint,
+    details). On failure we log all of those so an operator sees the
+    real cause -- previously we only logged `type(e).__name__`, which
+    flattened every Supabase failure to `APIError` and gave zero
+    debugging signal. We DELIBERATELY DO NOT log `bot_token` or any
+    other token material; only column-shape metadata flows into logs.
     """
-    payload = {
+    payload: Dict[str, Any] = {
         "workspace_id":    workspace_id,
         "slack_team_id":   slack_team_id,
         "slack_team_name": slack_team_name,
         "bot_user_id":     bot_user_id,
         "bot_token":       bot_token,
-        "scopes":          scopes,
+        # Production column is `scope` (singular). Keep the public
+        # Python kwarg name `scopes` for backwards compat with all
+        # callers; only the persisted column name changes.
+        "scope":           scopes,
     }
+    if installed_by:
+        payload["installed_by"] = installed_by
+
     try:
         client = get_supabase()
-        # `upsert` with on_conflict=workspace_id matches the UNIQUE
-        # constraint declared in phase3_slack_connect.sql, so re-running
-        # Connect for the same workspace updates the existing row.
+        # `upsert` with on_conflict=workspace_id matches the
+        # `unique (workspace_id)` constraint, so re-running Connect
+        # for the same workspace updates the existing row.
         resp = (
             client.table("slack_installations")
             .upsert(payload, on_conflict="workspace_id")
             .execute()
         )
     except Exception as e:  # noqa: BLE001
-        logger.warning(
-            'supabase_upsert_installation_failed',
-            extra={'workspace_id': workspace_id, 'error': type(e).__name__},
-        )
+        # Extract structured PostgREST fields when possible so the
+        # cause is visible in production logs. .json() exists on
+        # postgrest.exceptions.APIError; fall back to repr() if a
+        # different exception type came through (transport errors,
+        # for instance).
+        err_extra: Dict[str, Any] = {
+            "workspace_id": workspace_id,
+            "error":        type(e).__name__,
+        }
+        body = None
+        try:
+            body = e.json()  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            body = None
+        if isinstance(body, dict):
+            # Whitelisted keys only; the body NEVER contains the
+            # bot_token (PostgREST echoes back the column name that
+            # failed, not the values we sent) but we still pull just
+            # these specific keys to avoid leaking unexpected fields.
+            for key in ("code", "message", "hint", "details"):
+                if key in body and body[key]:
+                    err_extra[f"pg_{key}"] = str(body[key])[:300]
+        else:
+            err_extra["error_repr"] = repr(e)[:300]
+        logger.warning('supabase_upsert_installation_failed', extra=err_extra)
         return None
     rows = getattr(resp, "data", None) or []
     return rows[0] if rows else None

@@ -31,18 +31,62 @@
 -- =============================================================================
 -- slack_installations
 -- =============================================================================
+-- Schema notes
+-- ------------
+-- The production deployment (Railway-hosted backend + Supabase project)
+-- shipped before this file was tightened, and uses the column names
+-- below. The migration is idempotent: on a fresh database it lays the
+-- table down exactly; on an existing database it only adds anything
+-- missing (`add column if not exists`). It does NOT drop columns, so
+-- a dev database with the older `scopes` column will keep it
+-- alongside the new `scope` column -- the application only writes to
+-- `scope`.
 create table if not exists public.slack_installations (
-  id              uuid primary key default gen_random_uuid(),
-  workspace_id    uuid not null references public.workspaces(id) on delete cascade,
-  slack_team_id   text not null,
-  slack_team_name text not null default '',
-  bot_user_id     text not null default '',
-  bot_token       text not null,
-  scopes          text not null default '',
-  created_at      timestamptz not null default now(),
-  updated_at      timestamptz not null default now(),
+  id                  uuid primary key default gen_random_uuid(),
+  workspace_id        uuid not null references public.workspaces(id) on delete cascade,
+  slack_team_id       text not null,
+  slack_team_name     text not null default '',
+  slack_enterprise_id text,
+  bot_user_id         text not null default '',
+  bot_token           text not null,
+  -- Slack OAuth v2 returns this field as `scope` (singular). Match.
+  scope               text not null default '',
+  installed_by        uuid references auth.users(id),
+  installed_at        timestamptz not null default now(),
+  revoked_at          timestamptz,
+  updated_at          timestamptz not null default now(),
   unique (workspace_id)
 );
+
+-- Defensive idempotent additions: anything below covers an existing
+-- database that was created BEFORE these columns existed. Each one
+-- is a no-op on a fresh deploy.
+alter table public.slack_installations
+  add column if not exists slack_enterprise_id text;
+alter table public.slack_installations
+  add column if not exists scope               text not null default '';
+alter table public.slack_installations
+  add column if not exists installed_by        uuid references auth.users(id);
+alter table public.slack_installations
+  add column if not exists installed_at        timestamptz not null default now();
+alter table public.slack_installations
+  add column if not exists revoked_at          timestamptz;
+
+-- Unique by (workspace_id, slack_team_id) is also valid here -- the
+-- application enforces single-installation-per-workspace via the
+-- bare `unique (workspace_id)` constraint above, but adding this is
+-- harmless and matches the production schema.
+do $$
+begin
+  begin
+    alter table public.slack_installations
+      add constraint slack_installations_workspace_team_key
+      unique (workspace_id, slack_team_id);
+  exception when others then
+    -- Already exists (under this name or a different name); ignore.
+    null;
+  end;
+end$$;
 
 create index if not exists slack_installations_workspace_idx
   on public.slack_installations (workspace_id);

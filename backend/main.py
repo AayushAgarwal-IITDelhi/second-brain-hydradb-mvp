@@ -1241,6 +1241,11 @@ def slack_oauth_callback(
         bot_user_id=row["bot_user_id"],
         bot_token=row["bot_token"],
         scopes=row["scopes"],
+        # Phase 6+ audit: the verified OAuth state binds the caller's
+        # Supabase user_id. Forwarding it populates installed_by in
+        # the production schema -- a nullable column, so callers that
+        # don't pass it (older tests) continue to work.
+        installed_by=payload.get("user_id") or None,
     )
     if not saved:
         return _redirect_with_status(frontend, "error", "persist_failed")
