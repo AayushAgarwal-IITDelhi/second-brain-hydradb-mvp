@@ -31,6 +31,40 @@ const DOC_TYPES = [
   { value: "thread",  label: "Thread" },
 ];
 
+// Source filter (Phase 9). Each option carries the literal value the
+// `sources` state holds and the array shape the backend wants. We use
+// a sentinel UI value ("all") rather than the empty list so the
+// <select> rendering is straightforward; sourcesToList() does the
+// conversion at request-build time.
+const SOURCE_OPTIONS = [
+  { value: "all",   label: "All sources" },
+  { value: "slack", label: "Slack only"  },
+  { value: "gmail", label: "Gmail only"  },
+  { value: "both",  label: "Slack + Gmail" },
+];
+
+/**
+ * Convert the UI's `sources` choice into the `allowed_sources` array
+ * the backend expects (or `null` when the request should be sent
+ * without the field, preserving the pre-Phase-9 default).
+ *
+ *   "all"   -> null          (omit the field; default = all sources)
+ *   "slack" -> ["slack"]
+ *   "gmail" -> ["gmail"]
+ *   "both"  -> ["slack","gmail"]   (explicit "allow both" — same
+ *                                   observable behavior as "all" but
+ *                                   distinguishes user intent in logs.)
+ */
+function sourcesToList(value) {
+  switch (value) {
+    case "slack": return ["slack"];
+    case "gmail": return ["gmail"];
+    case "both":  return ["slack", "gmail"];
+    case "all":
+    default:      return null;
+  }
+}
+
 // ----------------------------------------------------------------------
 // Query history (localStorage)
 // ----------------------------------------------------------------------
@@ -56,6 +90,7 @@ function makeHistoryItem(params) {
     channel:       params.channel || "",
     user:          params.user || "",
     documentType:  params.documentType || "",
+    sources:       params.sources || "all",
     dateQuery:     params.dateQuery || "",
     startDate:     params.startDate || "",
     endDate:       params.endDate || "",
@@ -143,6 +178,7 @@ function makeSavedItem({ question, params, answer, sources, debug }) {
       channel:      (params && params.channel) || "",
       user:         (params && params.user) || "",
       documentType: (params && params.documentType) || "",
+      sources:      (params && params.sources) || "all",
       dateQuery:    (params && params.dateQuery) || "",
       startDate:    (params && params.startDate) || "",
       endDate:      (params && params.endDate) || "",
@@ -530,6 +566,10 @@ export default function App() {
   const [channel, setChannel] = useState("");
   const [user, setUser] = useState("");
   const [documentType, setDocumentType] = useState("");
+  // Phase 9: source filter (Slack / Gmail). Default "all" preserves
+  // the pre-Phase-9 behavior; sourcesToList() converts to the backend
+  // API shape (null vs ["slack"] / ["gmail"] / ["slack","gmail"]).
+  const [sources, setSources] = useState("all");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [dateQuery, setDateQuery] = useState("");
@@ -732,6 +772,7 @@ export default function App() {
       channel,
       user,
       documentType,
+      sources,
       startDate,
       endDate,
       dateQuery,
@@ -751,7 +792,7 @@ export default function App() {
     // enough to fully reconstruct the request when the user clicks a row.
     setHistory((prev) => pushHistoryItem(prev, {
       question: trimmed,
-      topK, mode, channel, user, documentType,
+      topK, mode, channel, user, documentType, sources,
       startDate, endDate, dateQuery,
     }));
 
@@ -872,6 +913,7 @@ export default function App() {
     setChannel(item.channel || "");
     setUser(item.user || "");
     setDocumentType(item.documentType || "");
+    setSources(item.sources || "all");
     setStartDate(item.startDate || "");
     setEndDate(item.endDate || "");
     setDateQuery(item.dateQuery || "");
@@ -1216,6 +1258,20 @@ export default function App() {
             >
               {DOC_TYPES.map((d) => (
                 <option key={d.value} value={d.value}>{d.label}</option>
+              ))}
+            </select>
+          </label>
+
+          <label className="field field--narrow">
+            <span className="field__label">Sources</span>
+            <select
+              value={sources}
+              onChange={(e) => setSources(e.target.value)}
+              disabled={submitting}
+              title="Restrict the answer to a specific connector (Slack / Gmail)"
+            >
+              {SOURCE_OPTIONS.map((s) => (
+                <option key={s.value} value={s.value}>{s.label}</option>
               ))}
             </select>
           </label>

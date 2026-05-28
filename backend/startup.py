@@ -93,6 +93,39 @@ def _validate_required_env() -> List[str]:
     ]
 
 
+# Gmail Connect (Phase 8) is OPT-IN per deployment. Either you set the
+# full group (all 4 vars), or you set none of them. A partial
+# configuration is the dangerous case: the app boots clean, /api/ready
+# stays green, the user clicks "Connect Gmail" and only THEN crashes
+# with `RuntimeError("GMAIL_OAUTH_STATE_SECRET is not set.")`. Group
+# validation closes that gap at boot.
+_GMAIL_OAUTH_ENV_GROUP = (
+    "GMAIL_CLIENT_ID",
+    "GMAIL_CLIENT_SECRET",
+    "GMAIL_REDIRECT_URI",
+    "GMAIL_OAUTH_STATE_SECRET",
+)
+
+
+def _validate_gmail_group() -> List[str]:
+    """
+    Gmail is opt-in. Returns:
+      - []                      when ALL Gmail OAuth env vars are set (group complete),
+      - []                      when NONE are set (group absent — opt out),
+      - [missing names]         when SOME are set but not all (partial config).
+
+    Partial configuration is a misconfiguration we want to catch at
+    boot — see the comment on _GMAIL_OAUTH_ENV_GROUP.
+    """
+    present = [n for n in _GMAIL_OAUTH_ENV_GROUP if (os.getenv(n) or "").strip()]
+    if not present:
+        return []                       # all 4 unset -> Gmail off, fine.
+    if len(present) == len(_GMAIL_OAUTH_ENV_GROUP):
+        return []                       # all 4 set -> Gmail on, fine.
+    # Partial: report the ones still missing.
+    return [n for n in _GMAIL_OAUTH_ENV_GROUP if n not in present]
+
+
 def _validate_production_env() -> List[str]:
     """
     Production-only sanity checks. Returns a list of human-readable
@@ -217,6 +250,33 @@ def validate_required_env() -> None:
             "If you are using OpenRouter / Together / Groq / Azure-compatible,",
             "set OPENAI_API_KEY to the provider's key and OPENAI_BASE_URL to",
             "their endpoint.",
+            "=" * 64,
+            "",
+        ])
+        raise StartupConfigError("\n".join(lines))
+
+    # Gmail is opt-in. If the user set SOME Gmail vars but not all,
+    # fail fast at boot rather than at first /api/gmail/connect-url
+    # click. This runs in BOTH local and production modes -- the
+    # foot-gun exists in either.
+    gmail_partial = _validate_gmail_group()
+    if gmail_partial:
+        lines = [
+            "",
+            "=" * 64,
+            "Second Brain backend cannot start.",
+            "",
+            "Gmail Connect is partially configured. Either set ALL four of",
+            "the Gmail OAuth environment variables, or unset all of them",
+            "to disable the Gmail connector.",
+            "",
+            "Currently missing or blank:",
+        ]
+        for name in gmail_partial:
+            lines.append(f"  - {name}")
+        lines.extend([
+            "",
+            "See backend/.env.example for descriptions of each var.",
             "=" * 64,
             "",
         ])

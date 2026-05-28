@@ -211,6 +211,11 @@ QueryMode = Literal[
 ]
 DocumentType = Literal["message", "thread"]
 HistoryRole = Literal["user", "assistant"]
+# Sources the user can restrict a query to. None / empty = all sources.
+# Currently the backend writes only Slack ("message" / "thread"
+# documents) and Gmail ("email" documents); the literal is closed so a
+# typo in the JSON body becomes a 422 instead of a silent no-op.
+SourceKind = Literal["slack", "gmail"]
 
 
 # Cap on conversation_history entries from the request. Frontend keeps the
@@ -269,6 +274,18 @@ class QueryRequest(BaseModel):
     document_type: Optional[DocumentType] = Field(
         None,
         description="Optional filter: 'message' or 'thread'.",
+    )
+    # Optional restriction on which connector source a candidate must
+    # come from. None / omitted / empty list means "all sources" (the
+    # default and the pre-Phase-9 behavior). Each list item is one of
+    # SourceKind ("slack", "gmail"). Pydantic enforces the literal so
+    # an unknown source name in the body returns 422.
+    allowed_sources: Optional[List[SourceKind]] = Field(
+        None,
+        description="Optional restriction on connector source(s). "
+                    "Omit or pass null for all sources; pass ['slack'] "
+                    "or ['gmail'] to filter to one connector; pass "
+                    "['slack','gmail'] to allow both explicitly.",
     )
     # Date range — accept either a Slack ts string ("1778775842.876209")
     # or a unix-timestamp number. recall.py normalizes both. Explicit
@@ -605,6 +622,9 @@ def query(
         # Weak inference becomes a ranking bias (matching chunks float up
         # but non-matching chunks aren't dropped).
         metadata_bias=rewrite["metadata_bias"],
+        # Phase 9: source filter (Slack / Gmail). None = all sources,
+        # matching pre-Phase-9 behavior.
+        allowed_sources=req.allowed_sources,
         # Phase 4: route this query to the workspace's HydraDB
         # sub-tenant. ensure_workspace_sub_tenant materializes the row
         # value on the fly for any pre-Phase-4 workspace that missed
@@ -721,6 +741,8 @@ def query_stream(
                 start_timestamp=resolved["start_timestamp"],
                 end_timestamp=resolved["end_timestamp"],
                 metadata_bias=rewrite["metadata_bias"],
+                # Phase 9: source filter (Slack / Gmail).
+                allowed_sources=req.allowed_sources,
                 # Phase 4: workspace-isolated recall.
                 hydradb_sub_tenant_id=ensure_workspace_sub_tenant(
                     workspace_id=workspace.workspace_id,

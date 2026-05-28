@@ -138,6 +138,29 @@ export class ApiError extends Error {
 }
 
 /**
+ * Convert the UI's `sources` sentinel into the array shape the
+ * backend's `allowed_sources` field expects (or `null` to omit
+ * the field entirely so the request preserves pre-Phase-9 defaults).
+ *
+ *   "all"   -> null            (omit -> backend default: all sources)
+ *   "slack" -> ["slack"]
+ *   "gmail" -> ["gmail"]
+ *   "both"  -> ["slack","gmail"]
+ *
+ * Mirror of `sourcesToList` in App.jsx; duplicated here so api.js
+ * stays standalone and importable in tests / non-React callers.
+ */
+function sourcesValueToArray(value) {
+  switch (value) {
+    case "slack": return ["slack"];
+    case "gmail": return ["gmail"];
+    case "both":  return ["slack", "gmail"];
+    case "all":
+    default:      return null;
+  }
+}
+
+/**
  * Build the request body, omitting optional fields that are blank/null
  * so the backend's Pydantic model uses its defaults instead of receiving
  * "" for a filter the user didn't fill in.
@@ -149,6 +172,7 @@ function buildRequestBody({
   channel,
   user,
   documentType,
+  sources,
   startDate,
   endDate,
   dateQuery,
@@ -158,6 +182,16 @@ function buildRequestBody({
   if (channel && channel.trim()) body.channel = channel.trim();
   if (user && user.trim()) body.user = user.trim();
   if (documentType) body.document_type = documentType;
+
+  // Phase 9: source filter. The UI's "sources" state is a single
+  // string sentinel ("all" | "slack" | "gmail" | "both"). The
+  // backend wants either an array of source kinds or the field
+  // omitted entirely (== all sources). We pass an explicit
+  // ["slack","gmail"] for "both" so the request log shows the
+  // user's intent even though the observable behavior matches
+  // "all".
+  const allowedSources = sourcesValueToArray(sources);
+  if (allowedSources !== null) body.allowed_sources = allowedSources;
 
   // Natural-language date phrase. The backend parses it; explicit start/end
   // timestamps from the date pickers will still override the parsed range.

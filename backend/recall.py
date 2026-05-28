@@ -607,6 +607,59 @@ def _coerce_to_unix_seconds(value: Any) -> Optional[float]:
     return None
 
 
+# ---------------------------------------------------------------------- #
+# Source-kind detection for the allowed_sources filter
+# ---------------------------------------------------------------------- #
+# A small helper that classifies a source card as coming from Slack or
+# Gmail. Detection order:
+#   1. document_type — set by the Slack ingest builder ("message" /
+#      "thread") and the Gmail ingest builder ("email"). This is the
+#      cheapest, most reliable signal.
+#   2. stable_key prefix — "slack:..." for Slack, "gmail:..." for Gmail.
+#      Used as a fallback when document_type didn't make it onto the
+#      card (rare: ingestion-state lookup miss).
+# Cards we can't classify return None, and the caller decides how to
+# handle them. The current policy (see _source_passes_filters) treats
+# unknown-source cards as "pass through" — better to over-include than
+# to silently drop legitimate matches.
+
+# Document types that count as a Slack source. Kept narrow so a future
+# new doc_type doesn't accidentally classify as Slack.
+_SLACK_DOC_TYPES = {"message", "thread"}
+# Document types that count as a Gmail source.
+_GMAIL_DOC_TYPES = {"email"}
+
+
+def _extract_source_kind(card: Dict[str, Any]) -> Optional[str]:
+    """
+    Classify a source card as "slack" or "gmail" (or None if unknown).
+
+    The classification is intentionally conservative — we'd rather
+    return None and let an unknown card pass than mislabel one. The
+    `allowed_sources` filter relies on this exactly: when the result
+    is None, we don't filter the card out, we let it through.
+    """
+    if not isinstance(card, dict):
+        return None
+    doc_type = card.get("document_type")
+    if isinstance(doc_type, str):
+        if doc_type in _SLACK_DOC_TYPES:
+            return "slack"
+        if doc_type in _GMAIL_DOC_TYPES:
+            return "gmail"
+    # Fallback: stable_key prefix. The Slack message builder uses
+    # "slack:msg:..." / "slack:thread:..."; the Gmail builder uses
+    # "gmail:msg:...". Both prefixes are stable parts of the wire
+    # format the backend writes -- safe to rely on.
+    sk = card.get("stable_key")
+    if isinstance(sk, str):
+        if sk.startswith("slack:"):
+            return "slack"
+        if sk.startswith("gmail:"):
+            return "gmail"
+    return None
+
+
 def _source_passes_filters(
     source_card: Dict[str, Any],
     channel: Optional[str],
@@ -614,6 +667,7 @@ def _source_passes_filters(
     document_type: Optional[str],
     start_unix: Optional[float] = None,
     end_unix: Optional[float] = None,
+    allowed_sources: Optional[List[str]] = None,
 ) -> bool:
     """
     Return True if this source card should be kept given the filters.
@@ -623,6 +677,12 @@ def _source_passes_filters(
     (no `channel` / `user` / `document_type` / `timestamp` fields), we
     let it through for the metadata-style filters — better to over-
     include than to silently drop legitimate matches.
+
+    `allowed_sources` is a small whitelist like ["slack"] or
+    ["slack", "gmail"]. None / empty list means "all sources" and is
+    the default behavior. Unknown-source cards (no document_type AND
+    no recognizable stable_key prefix) pass through even when the
+    filter is set — same "don't silently drop" principle.
 
     Date filters are slightly stricter: a card with no parseable
     timestamp is also let through, on the same "don't drop" principle.
@@ -643,6 +703,13 @@ def _source_passes_filters(
     if document_type:
         card_type = source_card.get("document_type")
         if isinstance(card_type, str) and card_type != document_type:
+            return False
+    if allowed_sources:
+        # None/empty -> "all sources allowed" (default behavior).
+        # Otherwise we filter, but only when we can actually classify
+        # the card. Unknown-source cards pass.
+        kind = _extract_source_kind(source_card)
+        if kind is not None and kind not in allowed_sources:
             return False
     if start_unix is not None or end_unix is not None:
         ts_value = _coerce_to_unix_seconds(source_card.get("timestamp"))
@@ -779,6 +846,7 @@ def prepare_recall_context(
     end_timestamp: Any = None,
     metadata_bias: Optional[Dict[str, str]] = None,
     hydradb_sub_tenant_id: Optional[str] = None,
+    allowed_sources: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Run HydraDB recall and build the LLM-ready context + parallel sources.
@@ -833,6 +901,24 @@ def prepare_recall_context(
     hydra = HydraDBClient(sub_tenant_id=hydradb_sub_tenant_id) \
         if hydradb_sub_tenant_id else HydraDBClient()
 
+    # Normalize the allowed_sources whitelist. Input shapes we accept:
+    #   None                      -> all sources allowed (default)
+    #   []                        -> all sources allowed (same as None)
+    #   ["slack"]                 -> Slack only
+    #   ["gmail"]                 -> Gmail only
+    #   ["slack","gmail"]         -> both (= all currently known)
+    #   ["Slack", " slack ", ""]  -> ["slack"] (trimmed, lowercased, deduped)
+    # Anything that normalizes to an empty set is collapsed to None so
+    # the filter becomes a no-op downstream.
+    normalized_sources: Optional[List[str]] = None
+    if allowed_sources:
+        cleaned = {
+            s.strip().lower()
+            for s in allowed_sources
+            if isinstance(s, str) and s.strip()
+        }
+        normalized_sources = sorted(cleaned) if cleaned else None
+
     # Recency intent: widen the candidate pool BEFORE the HydraDB call.
     # Pure semantic top_k=5 frequently misses the newest message
     # because brand-new short messages are lexically thin and lose to
@@ -880,6 +966,7 @@ def prepare_recall_context(
 
         if not _source_passes_filters(
             source_card, channel, user, document_type, start_unix, end_unix,
+            allowed_sources=normalized_sources,
         ):
             filtered_out += 1
             continue
@@ -1013,6 +1100,7 @@ def answer_question(
     conversation_history: Optional[List[Any]] = None,
     metadata_bias: Optional[Dict[str, str]] = None,
     hydradb_sub_tenant_id: Optional[str] = None,
+    allowed_sources: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     End-to-end recall + grounded answer.
@@ -1067,6 +1155,7 @@ def answer_question(
         end_timestamp=end_timestamp,
         metadata_bias=metadata_bias,
         hydradb_sub_tenant_id=hydradb_sub_tenant_id,
+        allowed_sources=allowed_sources,
     )
 
     if not prepared["ready"]:
