@@ -1,202 +1,257 @@
-# Second Brain
+# Second Brain MVP
 
-A multi-tenant "second brain" that ingests your Slack channels and Gmail
-into HydraDB, retrieves relevant context for any question, and streams a
-grounded answer with cited sources via a cloud LLM. Comes with a React +
-Vite frontend for streaming Q&A, multi-turn conversations, saved answers,
-connector management, and dark mode.
+> A multi-workspace retrieval app that turns your Slack threads and Gmail labels into a searchable, citation-backed second brain.
 
-## Features
+[![Frontend](https://img.shields.io/badge/frontend-React%20%2B%20Vite-61dafb?logo=react&logoColor=white)](#stack)
+[![Backend](https://img.shields.io/badge/backend-FastAPI-009688?logo=fastapi&logoColor=white)](#stack)
+[![Database](https://img.shields.io/badge/database-Supabase-3ECF8E?logo=supabase&logoColor=white)](#stack)
+[![Deploy: Vercel](https://img.shields.io/badge/frontend%20deploy-Vercel-000?logo=vercel)](#deployment)
+[![Deploy: Railway](https://img.shields.io/badge/backend%20deploy-Railway-0B0D0E?logo=railway)](#deployment)
+[![Tests](https://img.shields.io/badge/tests-868%20passing-brightgreen)](#testing)
+[![Coverage](https://img.shields.io/badge/coverage-91.27%25-brightgreen)](#testing)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](#license)
 
-**Search & retrieval**
-- HydraDB semantic recall with local re-ranking
-- **Exact mode** — prefer chunks containing literal keyword matches
-- **Hybrid mode** — combine semantic + keyword scoring
-- **Person/channel-aware query rewriting** — "what did Rahul say in product?"
-  automatically infers `user=Rahul`, `channel=product` and applies them as
-  hard filters (strong inference) or ranking bias (weak inference)
-- **Natural-language date parsing** — `last week`, `yesterday`,
-  `after May 10`, `from May 1 to May 7`, etc. resolved server-side
-- **Query TTL cache** (bypassed when conversation history is present)
-- Citation cleanup (`[N]` markers aligned with surviving sources)
+Second Brain ingests your team's Slack conversations and Gmail threads, isolates them per workspace, and answers natural-language questions with cited sources — including realtime "what is the latest message in #engineering" lookups.
 
-**Slack ingestion**
-- Per-workspace OAuth connect — no shared bot token required
-- Scheduled background ingestion (APScheduler)
-- **Incremental sync** — per-channel watermarks, dedupe via stable keys
-  (`slack:{channel_id}:{ts}`), `FORCE_REINGEST` escape hatch
-- Thread expansion into single Markdown documents
-- **Realtime Slack webhook** for live updates (HMAC-verified, optional)
+Built for small teams that want LLM recall over their own communications without sending raw data through someone else's chatbot product.
 
-**Gmail ingestion**
-- Per-workspace Google OAuth connect — read-only scopes only
-- Multiple Gmail connections per workspace (personal + shared mailbox)
-- Label-based ingestion filtering
-- Configurable message cap per run (`GMAIL_MAX_MESSAGES_PER_RUN`)
+---
 
-**Multi-user & multi-workspace**
-- Supabase auth (email/password via Supabase SDK; JWT verified server-side)
-- Every workspace is isolated: separate HydraDB sub-tenant, separate tokens
-- Workspace switcher in the frontend
+## Table of contents
 
-**LLM answering**
-- OpenAI-compatible LLM wrapper (OpenAI, OpenRouter, Together, Groq, etc.)
-- **Streaming responses** via Server-Sent Events
-- **Multi-turn conversation memory** — last 6 turns sent for reference
-  resolution (`he`, `that decision`, etc.)
-- Mode-specific prompts: default / summary / decisions / action_items /
-  who_said / exact / hybrid
-- Grounded answers with sources cited as `[1]`, `[2]`, etc.
+- [Highlights](#highlights)
+- [Stack](#stack)
+- [Architecture](#architecture)
+- [How it works](#how-it-works)
+- [Screenshots](#screenshots)
+- [Local setup](#local-setup)
+- [Environment variables](#environment-variables)
+- [Supabase setup](#supabase-setup)
+- [Slack app setup](#slack-app-setup)
+- [Gmail OAuth setup](#gmail-oauth-setup)
+- [Running the app](#running-the-app)
+- [Deployment](#deployment)
+- [Project structure](#project-structure)
+- [API overview](#api-overview)
+- [Security notes](#security-notes)
+- [Troubleshooting](#troubleshooting)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License](#license)
 
-**Chat & saved answers**
-- Chat sessions persisted in Supabase (survives page refresh)
-- Saved answers persisted in Supabase (synced across devices)
-- Export to Markdown / TXT with safe filenames
+---
 
-**Production hardening**
-- Startup env validation — refuses to boot with missing required vars or
-  placeholder secrets
-- Structured JSON logging with request/correlation/user/workspace IDs
-- Per-route rate limiting (auth, query, webhook, ingest buckets)
-- Typed error hierarchy with consistent `{detail, error_type}` JSON shape
-- Liveness + readiness probes with per-dependency latency tracking
-- Optional Sentry integration
+## Highlights
 
-## Tech stack
+- **Multi-workspace by design.** Every API call is scoped by a Supabase JWT plus an `X-Workspace-Id` header. Slack installations, Gmail connections, and HydraDB sub-tenants are partitioned per workspace.
+- **Two connectors.**
+  - **Slack** — workspace-level OAuth, per-channel selection, manual + realtime + scheduled ingestion.
+  - **Gmail** — per-workspace OAuth with support for **multiple Gmail accounts** per workspace, label-based selection, manual ingestion.
+- **Recall that does what you mean.**
+  - Semantic search via HydraDB for "what did we decide about Kafka?"
+  - Automatic **recency mode** for "what is the latest message in #engineering" — sorts by Slack timestamp instead of semantic score.
+  - Channel + person + date filters extracted from natural language.
+- **Production hardening.**
+  - Slack webhook idempotency backed by a durable Supabase table (survives restarts and multi-worker deploys).
+  - Structured logs with `request_id` / `user_id` / `workspace_id` / `correlation_id`.
+  - Per-bucket rate limiting (`auth`, `query`, `slack_webhook`, `ingest`).
+  - Dead-letter logging + exponential-backoff retries on background jobs.
+  - Optional Sentry integration; readiness probe covers Supabase, HydraDB, and the LLM provider.
+- **Saved answers, source citations, chat history**, theming, keyboard shortcuts.
 
-- **Backend:** Python 3.11+, FastAPI + Uvicorn, `slack_sdk`, `supabase`,
-  `PyJWT`, `google-auth-oauthlib`, `requests`, `openai`, `apscheduler`,
-  `cachetools`, `dateparser`
-- **Frontend:** React 18, Vite 5, Supabase JS client, `react-markdown`,
-  `remark-gfm`
-- **Data:** HydraDB (vector store), Supabase (auth, metadata, chat history)
+---
+
+## Stack
+
+| Layer            | Tooling                                                  |
+| ---------------- | -------------------------------------------------------- |
+| Frontend         | React 18 + Vite + plain CSS                              |
+| Backend          | FastAPI + Pydantic v2 + supabase-py                      |
+| Auth + Database  | Supabase (Postgres + Auth + RLS)                         |
+| Retrieval        | HydraDB (vector recall) with workspace-scoped sub-tenants |
+| LLM              | OpenAI-compatible provider (OpenAI / OpenRouter / etc.)   |
+| Frontend hosting | Vercel                                                   |
+| Backend hosting  | Railway (Render / Fly / Docker also supported)           |
+| Observability    | Sentry (opt-in) + structured stdout logs                  |
+
+---
 
 ## Architecture
 
-```
-Users ──► React frontend ──► FastAPI backend
-              │  (Supabase JWT)       │
-              │                       ├─► HydraDB recall ──► Cloud LLM ──► SSE stream
-              │                       │
-              │                       ├─► Slack ingestion ──► HydraDB upload
-              │                       │      (per-workspace bot token, OAuth)
-              │                       │
-              │                       └─► Gmail ingestion ──► HydraDB upload
-              │                              (per-workspace OAuth, read-only)
-              │
-              └──► Supabase (auth, workspaces, chat sessions, saved answers,
-                             slack_installations, gmail_connections)
-```
+```mermaid
+flowchart LR
+    User([User<br/>Browser])
+    subgraph Frontend["Frontend · Vercel"]
+        FE["React + Vite SPA"]
+    end
+    subgraph Backend["Backend · Railway"]
+        API["FastAPI app"]
+        SCHED["Scheduler<br/>per-workspace"]
+        RT["Slack realtime<br/>webhook handler"]
+    end
+    subgraph DataPlane["Data plane"]
+        SB[(Supabase<br/>Postgres + Auth)]
+        HDB[(HydraDB<br/>vector recall<br/>per-workspace sub-tenants)]
+    end
+    subgraph External["External SaaS"]
+        SLACK[Slack API]
+        GMAIL[Gmail API]
+        LLM[LLM provider]
+    end
 
-Ingestion pipeline detail:
-
-```
-Slack  ──►  ingestion/  ──►  HydraDB     ──►  recall.py  ──►  llm.py  ──►  FastAPI
-Gmail  ──►  gmail_oauth ──►  (per-workspace         │            │
-               │              sub-tenant)      rerank +      streaming
-               │                               person/chan    (SSE)
-          APScheduler                          inference
-          + realtime
-          webhook
-```
-
-## Folder structure
-
-```
-backend/
-├── .env.example              # all env vars documented; copy → .env
-├── requirements.txt
-├── Dockerfile
-├── docker-compose.yml
-├── DEPLOYMENT.md             # step-by-step deploy guide (Render / Railway)
-├── LOGGING.md                # structured logging architecture
-├── TEST_REPORT.md            # test coverage report + known issues
-├── main.py                   # FastAPI app — routes, CORS, lifespan hooks
-├── auth.py                   # X-API-Key dep (legacy admin route only)
-├── auth_supabase.py          # Supabase JWT verification (HS256 + ES256/RS256)
-├── supabase_client.py        # Supabase service-role client + all DB ops
-├── slack_oauth.py            # per-workspace Slack OAuth flow + ingestion runner
-├── gmail_oauth.py            # per-workspace Gmail OAuth flow + ingestion runner
-├── slack_signature.py        # HMAC-SHA256 verification for /slack/events
-├── realtime_ingest.py        # Slack Events API endpoint + background processing
-├── scheduler.py              # APScheduler — periodic per-workspace ingestion
-├── hydradb_client.py         # HydraDB ingestion + recall HTTP client
-├── recall.py                 # HydraDB recall + grounded answer + reranking
-├── llm.py                    # Cloud LLM wrapper (OpenAI-compatible) + streaming
-├── prompts.py                # per-mode system prompts + conversation history fmt
-├── query_rewriter.py         # person/channel inference heuristics
-├── search_utils.py           # keyword extraction, rerank, metadata bias
-├── date_utils.py             # natural-language date phrase parser
-├── query_cache.py            # TTL cache for stateless queries
-├── rate_limit.py             # per-bucket sliding-window rate limiter
-├── errors.py                 # typed AppError hierarchy + global handler
-├── startup.py                # env validation at boot (Phase 7 hardening)
-├── logging_config.py         # structured JSON logging + ContextVar injection
-├── observability.py          # Sentry, dead-letter logging, /api/ready checks
-├── request_context.py        # ASGI middleware — request/correlation IDs
-├── retry.py                  # exponential backoff with jitter (no tenacity)
-├── data/
-│   ├── .gitkeep
-│   └── ingestion_state.json  # per-channel watermarks (gitignored)
-├── supabase/
-│   ├── schema.sql            # base tables + RLS policies
-│   ├── phase2_chat_and_saved.sql
-│   ├── phase3_slack_connect.sql
-│   ├── phase4_hydradb_workspace_isolation.sql
-│   ├── phase7_production_hardening.sql
-│   └── phase8_gmail_connector.sql
-└── ingestion/
-    ├── slack_client.py       # Slack API wrapper with caching
-    ├── normalize.py          # noise filtering, thread detection
-    ├── ingestion_state.py    # JSON state file helpers
-    └── ingest_slack.py       # CLI ingestion entry point (single-workspace)
-
-frontend/
-├── package.json
-├── vite.config.js
-├── index.html
-├── .env.example
-└── src/
-    ├── main.jsx
-    ├── App.jsx               # chat UI, panels, history, saved answers
-    ├── api.js                # API client (askQuery, streamQuery, all endpoints)
-    ├── styles.css            # light + dark theme, mobile-responsive
-    ├── auth/
-    │   ├── AuthContext.jsx   # Supabase session management
-    │   ├── AuthForm.jsx      # sign-in / sign-up UI
-    │   ├── AuthGate.jsx      # session guard wrapper
-    │   ├── WorkspaceContext.jsx  # active workspace + token getter
-    │   └── WorkspaceSwitcher.jsx
-    ├── slack/
-    │   └── SlackSettings.jsx # channel picker + connect / ingest UI
-    ├── gmail/
-    │   └── GmailSettings.jsx # Gmail connection manager + label picker
-    └── lib/
-        └── supabase.js       # Supabase client singleton
+    User -- HTTPS --> FE
+    FE -- "Bearer JWT<br/>X-Workspace-Id" --> API
+    API <-- SQL + RLS --> SB
+    API <-- recall + upload --> HDB
+    API <-- OAuth + msgs --> SLACK
+    API <-- OAuth + msgs --> GMAIL
+    API -- completion --> LLM
+    SLACK -- "events webhook" --> RT
+    RT --> HDB
+    SCHED --> API
 ```
 
-## Quick start
+### Request lifecycle
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant FE as Vercel Frontend
+    participant API as FastAPI (Railway)
+    participant SB as Supabase
+    participant HDB as HydraDB
+    participant LLM as LLM
+
+    U->>FE: Ask "latest message in #engineering"
+    FE->>API: POST /api/query<br/>Authorization: Bearer …<br/>X-Workspace-Id: …
+    API->>SB: verify JWT + workspace membership
+    SB-->>API: ok (sub-tenant id)
+    API->>HDB: full_recall(top_k=50, sub_tenant_id=ws_…)
+    HDB-->>API: candidate chunks
+    API->>API: detect recency intent → rerank by Slack ts DESC
+    API->>LLM: prompt + numbered context
+    LLM-->>API: answer + [citations]
+    API-->>FE: { answer, sources }
+    FE-->>U: render with source cards
+```
+
+---
+
+## How it works
+
+### 1. OAuth (Slack + Gmail)
+
+OAuth flows are workspace-scoped. Before redirecting the user to the provider's consent screen, the backend mints an **HMAC-signed state token** that binds:
+
+- `workspace_id` (so the callback can't be replayed against another workspace)
+- `user_id` (audit + downstream `installed_by`)
+- a 5-minute `exp`
+- a random `nonce`
+
+The callback has no `Authorization` header — Google/Slack can't send one — so the signed state is the only authoritative way to know which workspace this install belongs to. Tampering breaks the HMAC, expiry blocks replay attacks, and a separate state secret per connector (`SLACK_OAUTH_STATE_SECRET`, `GMAIL_OAUTH_STATE_SECRET`) means a leak of one doesn't compromise the other.
+
+Tokens (Slack `bot_token`, Google `refresh_token`/`access_token`) are persisted in Supabase tables that have RLS enabled with **no policies** — only the service-role backend can read them. The API never serializes tokens in any response body.
+
+### 2. Ingestion
+
+#### Slack — manual
+
+`POST /api/slack/ingest` resolves the workspace's selected channels, pulls each channel's new messages since the last watermark, builds one markdown doc per message/thread, and uploads to HydraDB under the workspace's sub-tenant id. Each per-channel pass has a retry + dead-letter wrapper so a single bad channel can't fail the whole run.
+
+#### Slack — realtime
+
+Slack delivers `message` events to `POST /slack/events`. The handler:
+
+1. Verifies the HMAC signature against `SLACK_SIGNING_SECRET` with a timestamp tolerance.
+2. Acks immediately (Slack times out at 3s).
+3. Hands the event to the background worker.
+
+```mermaid
+sequenceDiagram
+    participant SLK as Slack
+    participant API as /slack/events
+    participant DEDUPE as Supabase<br/>slack_event_seen
+    participant HDB as HydraDB
+
+    SLK->>API: POST event (sig + ts + body)
+    API->>API: verify HMAC + timestamp
+    API-->>SLK: 200 OK
+    Note right of API: ack in <100 ms
+
+    API->>DEDUPE: INSERT event_id ON CONFLICT DO NOTHING
+    alt new event
+        DEDUPE-->>API: claimed
+        API->>API: route by team_id → workspace + bot_token
+        API->>HDB: upload as message doc
+    else duplicate (Slack retry or other worker)
+        DEDUPE-->>API: already seen
+        API->>API: drop silently
+    end
+```
+
+The two-tier dedupe (process-local cache in front of the Supabase claim) means duplicates survive both restarts and multi-worker deployments, while still being microseconds-fast on the hot path.
+
+#### Gmail
+
+`POST /api/gmail/ingest` runs per-connection: for each selected label, it lists the most recent message ids (capped at `GMAIL_MAX_MESSAGES_PER_RUN`, default 100), fetches each message via `users.messages.get?format=full`, converts the payload to markdown (subject, from, to, cc, date, labels, snippet, body text, Gmail message id, permalink), and uploads to the workspace's HydraDB sub-tenant. `SPAM` and `TRASH` are blocked by default unless `GMAIL_ALLOW_SPAM_TRASH=true`.
+
+Stable dedupe key for every email: `gmail:msg:{message_id}`.
+
+### 3. Retrieval
+
+`prepare_recall_context` is the single place where ranking happens:
+
+1. **Recency-intent detection** — if the question contains a recency cue (`latest`, `newest`, `most recent`, `last`) AND a Slack-message noun (`message`, `post`, `chat`, `ping`, `slack`), the candidate pool is widened (default 50) and the surviving Slack-message chunks are sorted by Slack timestamp DESC.
+2. **Channel filter** — `#engineering` and `engineering` both match the stored channel name `engineering`.
+3. **Semantic / exact / hybrid modes** apply when recency intent doesn't fire. Metadata bias (weak person/channel inference) gives matching chunks a ranking boost without hard-filtering.
+
+When the recency rerank finds no Slack chunks with timestamps (e.g. Gmail-only workspace), the pipeline falls back to semantic mode so the question still gets answered.
+
+### 4. Answer generation
+
+Reranked chunks become numbered `[1]`, `[2]`, … blocks in the prompt. The LLM is instructed to cite the `[N]` for every claim. The response includes a parallel `sources[]` array with channel + permalink + timestamp + snippet so the UI can render rich source cards. Citation tags that don't correspond to any surviving source are stripped server-side.
+
+---
+
+## Screenshots
+
+> *(Replace these placeholders with real images in `docs/screenshots/`.)*
+
+| | |
+| --- | --- |
+| ![Main chat view](docs/screenshots/chat.png) | ![Saved answers](docs/screenshots/saved.png) |
+| *Main chat view with source citations* | *Saved answers panel* |
+| ![Slack settings](docs/screenshots/slack.png) | ![Gmail settings](docs/screenshots/gmail.png) |
+| *Slack channel picker* | *Gmail label picker (multi-account)* |
+
+---
+
+## Local setup
 
 ### Prerequisites
 
-- Python 3.11+
-- Node.js 18+
-- A [Supabase](https://supabase.com) project (free tier is fine)
-- HydraDB account (API key + tenant ID)
-- OpenAI API key (or any OpenAI-compatible provider)
-- A [Slack app](https://api.slack.com/apps) with OAuth configured (see below)
+- Node 20+
+- Python 3.12+
+- A Supabase project (free tier is fine)
+- A HydraDB tenant + API key
+- An OpenAI-compatible API key
+- (Optional, for connectors) Slack app credentials + Google OAuth credentials
 
-### 1 — Clone and set up the backend
+### Clone
 
 ```bash
-git clone <your-repo-url>
-cd <your-repo>/backend
+git clone https://github.com/your-org/second-brain-mvp.git
+cd second-brain-mvp
+```
 
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\Activate.ps1
+### Backend
+
+```bash
+cd backend
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-cp .env.example .env             # then fill in the required values (see below)
+cp .env.example .env
+# edit .env with your secrets
 ```
 
 ### 2 — Set up Supabase
@@ -220,341 +275,471 @@ cp .env.example .env             # then fill in the required values (see below)
 ### 3 — Set up the frontend
 
 ```bash
-cd ../frontend
+cd frontend
 npm install
-cp .env.example .env.local      # set VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, VITE_API_BASE_URL
+cp .env.example .env.local
+# edit .env.local — point VITE_API_BASE_URL at your backend
 ```
 
-### 4 — Run locally
+---
+
+## Environment variables
+
+### Backend (`backend/.env`)
 
 ```bash
-# Terminal 1 — backend
-cd backend
-uvicorn main:app --reload --port 8000
+# ─── Core ────────────────────────────────────────────────────────────
+ENVIRONMENT=local                  # set to "production" on Railway
+APP_API_KEY=replace-with-a-long-random-string
+CORS_ORIGINS=http://localhost:5173
+FRONTEND_BASE_URL=http://localhost:5173
+LOG_LEVEL=INFO
 
-# Terminal 2 — frontend
-cd frontend
-npm run dev
+# ─── Supabase ────────────────────────────────────────────────────────
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_JWT_SECRET=your-supabase-jwt-secret
+SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key
+
+# ─── HydraDB (vector recall) ─────────────────────────────────────────
+HYDRADB_API_KEY=your-hydradb-key
+HYDRADB_TENANT_ID=your-tenant-id
+
+# ─── LLM provider (OpenAI-compatible) ────────────────────────────────
+OPENAI_API_KEY=your-openai-key
+# OPENAI_BASE_URL=https://openrouter.ai/api/v1   # optional override
+# LLM_MODEL=gpt-4o-mini                          # optional override
+
+# ─── Slack Connect ───────────────────────────────────────────────────
+SLACK_CLIENT_ID=your-slack-client-id
+SLACK_CLIENT_SECRET=your-slack-client-secret
+SLACK_REDIRECT_URI=http://127.0.0.1:8000/api/slack/oauth/callback
+SLACK_OAUTH_STATE_SECRET=generate-a-long-random-string
+SLACK_SIGNING_SECRET=your-slack-signing-secret
+
+# ─── Gmail Connect (Phase 8, optional) ───────────────────────────────
+GMAIL_CLIENT_ID=
+GMAIL_CLIENT_SECRET=
+GMAIL_REDIRECT_URI=http://127.0.0.1:8000/api/gmail/oauth/callback
+GMAIL_OAUTH_STATE_SECRET=
+GMAIL_MAX_MESSAGES_PER_RUN=100
+GMAIL_ALLOW_SPAM_TRASH=false
+
+# ─── Observability (optional) ────────────────────────────────────────
+SENTRY_DSN=
+SENTRY_TRACES_SAMPLE_RATE=0.1
 ```
 
-Backend at `http://127.0.0.1:8000` (interactive docs at `/docs`).
-Frontend at `http://localhost:5173`.
+Generate the random secrets in one line:
 
-## Backend configuration
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+```
 
-Copy `backend/.env.example` → `backend/.env` and fill in real values. The
-app will refuse to start if any REQUIRED variable is missing or still set to
-a placeholder.
+### Frontend (`frontend/.env.local`)
 
-### Required
+```bash
+VITE_API_BASE_URL=http://127.0.0.1:8000
+VITE_SUPABASE_URL=https://your-project.supabase.co
+VITE_SUPABASE_ANON_KEY=your-supabase-anon-key
+```
 
-| Key | Purpose |
-|---|---|
-| `HYDRADB_API_KEY` | HydraDB API key. |
-| `HYDRADB_TENANT_ID` | HydraDB project-wide tenant ID. |
-| `OPENAI_API_KEY` | LLM provider API key. |
-| `SUPABASE_URL` | Your Supabase project URL (`https://xxx.supabase.co`). |
-| `SUPABASE_JWT_SECRET` | JWT secret from Supabase → Settings → API. |
-| `SUPABASE_SERVICE_ROLE_KEY` | Service-role key (never expose to the browser). |
+---
 
-### Slack OAuth (required to use the Slack connector)
+## Supabase setup
 
-| Key | Purpose |
-|---|---|
-| `SLACK_CLIENT_ID` | OAuth client ID from your Slack app. |
-| `SLACK_CLIENT_SECRET` | OAuth client secret. |
-| `SLACK_REDIRECT_URI` | Must match the Redirect URL registered in the Slack app. Local: `http://127.0.0.1:8000/api/slack/oauth/callback`. |
-| `SLACK_OAUTH_STATE_SECRET` | Random 32-byte hex string used to HMAC-sign OAuth state tokens. |
-| `SLACK_SIGNING_SECRET` | Signing secret from Slack app → Basic Information (required for realtime webhook). |
+1. Create a Supabase project. Note the `URL`, `anon key`, `service role key`, and `JWT secret` (under **Settings → API**).
+2. Apply the SQL migrations in order. They are idempotent:
 
-### Gmail OAuth (optional)
-
-Leave these blank to disable the Gmail connector. The rest of the app boots
-normally without them.
-
-| Key | Purpose |
-|---|---|
-| `GMAIL_CLIENT_ID` | Google OAuth 2.0 client ID. |
-| `GMAIL_CLIENT_SECRET` | Google OAuth 2.0 client secret. |
-| `GMAIL_REDIRECT_URI` | Must match an Authorized Redirect URI in Google Cloud Console. Local: `http://127.0.0.1:8000/api/gmail/oauth/callback`. |
-| `GMAIL_OAUTH_STATE_SECRET` | Separate random 32-byte hex string for Gmail state signing. |
-
-### Optional tuning
-
-| Key | Default | Purpose |
-|---|---|---|
-| `APP_API_KEY` | — | Shared secret for the legacy `/api/admin/status` route. |
-| `CORS_ORIGINS` | `http://localhost:3000,http://localhost:5173` | Comma-separated allowed browser origins. |
-| `FRONTEND_BASE_URL` | first CORS origin | Where OAuth callbacks redirect after completing. |
-| `OPENAI_BASE_URL` | `https://api.openai.com` | Override for OpenRouter / Groq / Together / Azure. |
-| `OPENAI_MODEL` | `gpt-4o-mini` | Model name for the LLM. |
-| `LLM_MAX_TOKENS` | `500` | Max LLM output tokens. |
-| `HYDRADB_BASE_URL` | `https://api.hydradb.com` | Override HydraDB endpoint. |
-| `HYDRADB_SUB_TENANT_ID` | `slack-second-brain` | Fallback sub-tenant for legacy CLI ingestion. |
-| `AUTO_INGEST` | `false` | `true` to enable scheduled background ingestion. |
-| `AUTO_INGEST_INTERVAL_MINUTES` | `15` | Minutes between scheduler runs. |
-| `AUTO_INGEST_RUN_ON_STARTUP` | `false` | `true` to ingest immediately on boot. |
-| `REALTIME_INGEST_ENABLED` | `true` | `false` to disable `POST /slack/events`. |
-| `QUERY_CACHE_ENABLED` | `true` | `false` to disable the query cache. |
-| `QUERY_CACHE_TTL_SECONDS` | `300` | Cache entry lifetime in seconds. |
-| `QUERY_CACHE_MAX_SIZE` | `100` | LRU cap on cached queries. |
-| `RATE_LIMIT_PER_5_MIN` | `20` | Query bucket limit per client per 5 minutes. |
-| `RATE_LIMIT_AUTH_PER_5_MIN` | `30` | Auth bucket limit. |
-| `RATE_LIMIT_SLACK_WEBHOOK_PER_5_MIN` | `600` | Webhook bucket limit. |
-| `RATE_LIMIT_INGEST_PER_5_MIN` | `5` | Manual ingest trigger limit. |
-| `GMAIL_MAX_MESSAGES_PER_RUN` | `100` | Max Gmail messages fetched per ingest run. |
-| `GMAIL_ALLOW_SPAM_TRASH` | `false` | `true` to allow ingesting Spam/Trash labels. |
-| `SLACK_LIMIT_PER_CHANNEL` | `500` | Messages pulled per channel per scheduler run. |
-| `HYDRADB_BATCH_SIZE` | `50` | Files per HydraDB upload batch. |
-| `FORCE_REINGEST` | `false` | `true` to skip dedupe state (CLI only). |
-| `DEBUG_RECALL` | `false` | `true` to log raw HydraDB chunk responses. |
-| `LOG_LEVEL` | `INFO` | `DEBUG \| INFO \| WARNING \| ERROR`. |
-| `ENVIRONMENT` | `local` | Echoed in `/api/health` — `local \| staging \| production`. |
-| `SENTRY_DSN` | — | Sentry DSN for error tracking (optional). |
-| `SENTRY_TRACES_SAMPLE_RATE` | `0.1` | Sentry trace sampling ratio (0.0–1.0). |
-
-## Frontend configuration
-
-Copy `frontend/.env.example` → `frontend/.env.local`:
-
-| Key | Purpose |
-|---|---|
-| `VITE_SUPABASE_URL` | Your Supabase project URL (same as backend `SUPABASE_URL`). |
-| `VITE_SUPABASE_ANON_KEY` | Supabase anon/public key (safe for the browser). |
-| `VITE_API_BASE_URL` | Backend base URL, e.g. `http://localhost:8000` or `https://your-backend.onrender.com`. |
-| `VITE_APP_API_KEY` | Legacy `APP_API_KEY` — only used by the admin status card. Leave blank in production. |
-
-These values are baked into the JS bundle at build time (Vite static replacement).
-
-## Slack app setup
-
-1. Create a new app at https://api.slack.com/apps → **From scratch**.
-2. Under **OAuth & Permissions → Bot Token Scopes**, add:
-   - `channels:history`, `channels:read`
-   - `groups:history`, `groups:read` (for private channels, optional)
-   - `users:read`
-3. Under **OAuth & Permissions → Redirect URLs**, add your `SLACK_REDIRECT_URI`.
-4. Under **Basic Information**, copy the **Client ID**, **Client Secret**, and
-   **Signing Secret** into your `.env`.
-5. **Connect** from the frontend: open Settings → Slack → Connect Workspace.
-   The OAuth flow installs the bot into your Slack workspace and stores the
-   bot token in Supabase (per workspace; never returned to the browser).
-6. **Select channels** in the Slack settings panel and click **Save**, then
-   click **Ingest Now** to pull messages into HydraDB.
-
-### Optional: realtime webhook
-
-For messages to appear within seconds (instead of waiting for the scheduler):
-
-1. Under **Event Subscriptions**, enable events and set the Request URL to
-   `https://<your-host>/slack/events`.
-2. Subscribe to bot events: `message.channels`, `message.groups`.
-3. Ensure `SLACK_SIGNING_SECRET` is set and `REALTIME_INGEST_ENABLED=true`.
-
-For local development you need a public tunnel (ngrok / cloudflared).
-
-## Gmail app setup
-
-1. In [Google Cloud Console](https://console.cloud.google.com/), create a
-   project and enable the **Gmail API**.
-2. Under **APIs & Services → Credentials**, create an **OAuth 2.0 Client ID**
-   (type: Web application).
-3. Add your `GMAIL_REDIRECT_URI` to **Authorized redirect URIs**.
-4. Copy the **Client ID** and **Client Secret** into your `.env`.
-5. Generate `GMAIL_OAUTH_STATE_SECRET`:
    ```bash
-   python -c "import secrets; print(secrets.token_hex(32))"
+   cd backend/supabase
+   psql "$SUPABASE_DB_URL" -f schema.sql
+   psql "$SUPABASE_DB_URL" -f phase2_chat_and_saved.sql
+   psql "$SUPABASE_DB_URL" -f phase3_slack_connect.sql
+   psql "$SUPABASE_DB_URL" -f phase4_hydradb_workspace_isolation.sql
+   psql "$SUPABASE_DB_URL" -f phase7_production_hardening.sql
+   psql "$SUPABASE_DB_URL" -f phase8_gmail_connector.sql
    ```
 6. **Connect** from the frontend: open Settings → Gmail → Connect Account.
    Multiple Gmail accounts can be connected per workspace.
 
-Scopes requested (read-only): `openid email profile gmail.readonly`.
-The connector never sends, modifies, or deletes email.
+   *Or* paste them sequentially into the Supabase SQL editor.
 
-## HydraDB setup
+3. Enable email auth (or any provider you want) under **Authentication → Providers**.
+4. After applying changes, run `NOTIFY pgrst, 'reload schema'` so PostgREST picks up new columns.
 
-1. Sign up / log in at HydraDB and create a tenant.
-2. Copy your **API key** and **tenant ID** into `HYDRADB_API_KEY` and
-   `HYDRADB_TENANT_ID`.
-3. Per-workspace sub-tenants are created automatically when a workspace first
-   ingests. You do not need to pre-create them.
+---
 
-## Authentication
+## Slack app setup
 
-All `/api/*` user routes require a Supabase JWT in the `Authorization: Bearer <token>`
-header. The frontend's Supabase client handles token acquisition and refresh automatically.
+1. Create a Slack app at <https://api.slack.com/apps>.
+2. Under **OAuth & Permissions**, add the bot token scopes:
+   - `channels:history`
+   - `channels:read`
+   - `groups:history`
+   - `groups:read`
+   - `users:read`
+3. Set the redirect URL to `SLACK_REDIRECT_URI` (must be HTTPS in production).
+4. Under **Event Subscriptions**:
+   - Request URL: `https://your-backend.example.com/slack/events`
+   - Subscribe to bot events: `message.channels`, `message.groups`.
+5. Copy **Client ID**, **Client Secret**, and **Signing Secret** into the backend env.
+6. Install the app to a test workspace and invite the bot to the channels you want to ingest.
 
-Routes that require a workspace also expect `X-Workspace-Id: <uuid>` — the frontend
-sets this from `WorkspaceContext`.
+---
 
-OAuth callback routes (`/api/slack/oauth/callback`, `/api/gmail/oauth/callback`)
-authenticate via HMAC-signed state tokens baked into the OAuth redirect URL; they
-do not require a JWT.
+## Gmail OAuth setup
 
-The legacy `/api/admin/status` route uses `X-API-Key` (set `APP_API_KEY` in `.env`).
+1. In <https://console.cloud.google.com/apis/credentials>, create an **OAuth client ID** of type **Web application**.
+2. Add `GMAIL_REDIRECT_URI` to the **Authorized redirect URIs** list.
+3. Enable the **Gmail API** for the project (APIs & Services → Library).
+4. Add yourself as a test user under **OAuth consent screen → Test users** (skip publishing for MVP).
+5. Copy **Client ID** and **Client Secret** into the backend env.
 
-## API endpoints
+Scopes the connector requests (read-only — we never modify or send mail):
 
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| `GET` | `/` | public | Service info. |
-| `GET` | `/api/health` | public | Liveness probe — `{status, service, environment, version}`. |
-| `GET` | `/api/ready` | public | Readiness probe — checks Supabase, HydraDB, OpenAI. Returns 503 if any dep is down. |
-| `GET` | `/api/me` | JWT | Current user info. |
-| `GET` | `/api/me/workspaces` | JWT | List workspaces the user belongs to. |
-| `POST` | `/api/query` | JWT + workspace | Ask a question; returns JSON answer + sources + debug. |
-| `POST` | `/api/query/stream` | JWT + workspace | Same, streamed via SSE. |
-| `GET` | `/api/chat/sessions` | JWT + workspace | List chat sessions. |
-| `POST` | `/api/chat/sessions` | JWT + workspace | Create a chat session. |
-| `GET` | `/api/chat/sessions/{id}/messages` | JWT + workspace | Get messages for a session. |
-| `POST` | `/api/chat/sessions/{id}/messages` | JWT + workspace | Append a message. |
-| `GET` | `/api/saved-answers` | JWT + workspace | List saved answers. |
-| `POST` | `/api/saved-answers` | JWT + workspace | Save an answer. |
-| `DELETE` | `/api/saved-answers/{id}` | JWT + workspace | Delete a saved answer. |
-| `GET` | `/api/slack/connect-url` | JWT + workspace | Get the Slack OAuth authorization URL. |
-| `GET` | `/api/slack/oauth/callback` | Signed state | OAuth redirect handler (Slack → backend). |
-| `GET` | `/api/slack/channels` | JWT + workspace | List channels available in the connected workspace. |
-| `POST` | `/api/slack/channels` | JWT + workspace | Save selected channels. |
-| `POST` | `/api/slack/ingest` | JWT + workspace | Trigger a manual Slack ingest (background). |
-| `GET` | `/api/gmail/connect-url` | JWT + workspace | Get the Gmail OAuth authorization URL. |
-| `GET` | `/api/gmail/oauth/callback` | Signed state | OAuth redirect handler (Google → backend). |
-| `GET` | `/api/gmail/connections` | JWT + workspace | List Gmail connections. |
-| `DELETE` | `/api/gmail/connections/{id}` | JWT + workspace | Remove a Gmail connection. |
-| `GET` | `/api/gmail/labels` | JWT + workspace | List labels for a connection. |
-| `POST` | `/api/gmail/labels` | JWT + workspace | Save selected labels. |
-| `POST` | `/api/gmail/ingest` | JWT + workspace | Trigger a manual Gmail ingest (background). |
-| `GET` | `/api/admin/status` | `X-API-Key` | Ingestion + scheduler diagnostics (legacy). |
-| `POST` | `/slack/events` | Slack HMAC | Realtime Slack event webhook (when enabled). |
-
-### Query request shape
-
-```json
-{
-  "question": "What did Rahul say about latency?",
-  "top_k": 5,
-  "mode": "default",
-  "channel": null,
-  "user": null,
-  "document_type": null,
-  "start_timestamp": null,
-  "end_timestamp": null,
-  "date_query": null,
-  "conversation_history": []
-}
+```
+openid  email  profile  https://www.googleapis.com/auth/gmail.readonly
 ```
 
-- `mode` — `default | summary | decisions | action_items | who_said | exact | hybrid`
-- `top_k` — integer 1–10 (default 5)
-- `conversation_history` — last 6 `{role, content}` turns (oldest first)
-- `date_query` — natural-language phrase (`last week`, `after May 10`); overridden
-  by explicit `start_timestamp` / `end_timestamp`
+---
 
-### Streaming response
+## Running the app
 
-`POST /api/query/stream` returns `text/event-stream`:
-
-- `event: token  data: {"text": "<delta>"}` — one or more per response
-- `event: done   data: {"answer": ..., "sources": [...], "debug": {...}}` — final
-- `event: error  data: {"detail": ..., "error_type": ...}` — on failure
-
-### Sample non-streaming response
-
-```json
-{
-  "answer": "Rahul said latency is fine in production [1].",
-  "sources": [
-    {
-      "index": 1,
-      "channel": "product",
-      "user": "Rahul Verma",
-      "timestamp": "1778775842.876209",
-      "snippet": "Latency is fine in production. We measured it last week.",
-      "permalink": "https://your-workspace.slack.com/archives/C012/p1778775842876209",
-      "stable_key": "slack:C012:1778775842.876209",
-      "document_type": "message"
-    }
-  ],
-  "debug": {
-    "cache_hit": false,
-    "chunks_returned": 5,
-    "chunks_used": 1,
-    "retrieval_mode": "default",
-    "query_rewrite": {
-      "inferred_person": "Rahul",
-      "person_confidence": "strong",
-      "inferred_channel": null,
-      "retrieval_biases_applied": ["person:strong"]
-    }
-  }
-}
-```
-
-### Error responses
-
-| Status | When |
-|---|---|
-| `401` | Missing or invalid JWT / API key. |
-| `403` | Workspace not found or user is not a member. |
-| `422` | Request body fails Pydantic validation. |
-| `429` | Rate limit exceeded for this bucket. |
-| `502` | Upstream LLM or HydraDB failure. |
-| `503` | Required connector not configured (e.g. Gmail vars missing). |
-| `504` | Upstream timeout. |
-
-## Frontend usage
-
-Once both backend and frontend are running:
-
-1. Open `http://localhost:5173` and sign in (or create an account).
-2. Select your workspace (or ask an admin to add you to one via Supabase).
-3. Connect **Slack** and/or **Gmail** via the Settings panels in the header.
-4. Type a question in the composer. Press **Ask** or Enter.
-5. Watch the answer stream in. Click **Stop** to cancel mid-stream.
-6. Each completed answer has:
-   - **☆ Save** — bookmark this answer (persisted to Supabase)
-   - **⬇ MD** / **⬇ TXT** — download answer + sources
-   - **⧉ Copy** — copy answer text to clipboard
-7. Source cards under each answer have **Open in Slack** or **Open in Gmail** + **⧉ Copy link**.
-8. Header buttons: **☾ Dark / ☀ Light**, **History**, **Saved**, **Clear chat**.
-9. Conversation memory works automatically — follow-up questions like
-   "What did he say about X?" resolve correctly.
-
-## Running tests
+In two terminals:
 
 ```bash
-cd backend
-pytest --tb=short -q
+# terminal 1 — backend
+cd backend && source .venv/bin/activate
+uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
-
-The CI coverage gate is **85%**. To check coverage locally:
 
 ```bash
-pytest --cov=. --cov-report=term-missing
+# terminal 2 — frontend
+cd frontend
+npm run dev
 ```
 
-There are no frontend tests currently.
+Visit <http://localhost:5173>, sign up with Supabase auth, create or join a workspace, and connect a Slack workspace or a Gmail account from the top nav.
+
+### Tests
+
+```bash
+cd backend && python3 -m pytest tests/ --cov=. --cov-fail-under=85
+```
+
+```bash
+cd frontend && npm run build
+```
+
+---
 
 ## Deployment
 
-See [`backend/DEPLOYMENT.md`](backend/DEPLOYMENT.md) for step-by-step instructions
-for Render + Railway (backend) and Vercel (frontend), including the production
-checklist and Sentry setup.
+### Backend on Railway
 
-## Local files that are not committed
+1. Create a new Railway project. Link it to this repo or to `backend/` as the deploy root.
+2. Use the included `Dockerfile` (Python 3.12 + uvicorn).
+3. Set every variable from `backend/.env.example` in the Railway **Variables** tab. **`ENVIRONMENT=production`** is required — it triggers an extra startup audit that:
+   - Refuses to boot with a `localhost` CORS origin.
+   - Refuses to boot if `SLACK_REDIRECT_URI` isn't HTTPS.
+   - Refuses to boot if any secret still looks like a `.env.example` placeholder.
+4. Health probe: point Railway at `GET /api/health`. Liveness: `200`. For readiness use `GET /api/ready` — it returns `503` when Supabase / HydraDB / the LLM provider is unreachable.
+5. Cron / scheduler: the backend's in-process scheduler runs ingestion passes per workspace. If you scale to >1 replica, disable the in-process scheduler and run it as a single Railway scheduled job instead.
 
-- `backend/.env` — real secrets; copy from `.env.example` and fill in
-- `frontend/.env.local` — frontend env; copy from `.env.example` and fill in
-- `backend/data/ingestion_state.json` — regenerated on the next ingestion run
-- `frontend/node_modules/`, `frontend/dist/`
+### Frontend on Vercel
 
-## Notes
+1. Import the repo into Vercel. Set the **Root Directory** to `frontend`.
+2. Build command: `npm run build`. Output directory: `dist`.
+3. Set the env vars:
 
-- The cloud LLM is required — there is no local-model fallback.
-- Chat sessions and saved answers are persisted in Supabase (synced across
-  devices and page refreshes). `localStorage` is used only as a local cache
-  and fallback.
-- Realtime webhook ingestion is optional; scheduled + incremental sync covers
-  the common case.
-- The CLI ingestion script (`python -m ingestion.ingest_slack`) is a legacy
-  single-workspace path. Multi-workspace deployments use the per-workspace
-  OAuth flow via the UI.
+   ```bash
+   VITE_API_BASE_URL=https://your-backend.up.railway.app
+   VITE_SUPABASE_URL=https://your-project.supabase.co
+   VITE_SUPABASE_ANON_KEY=your-anon-key
+   ```
+
+4. After the first deploy, copy the Vercel URL back to the backend's `CORS_ORIGINS` and `FRONTEND_BASE_URL`, and add it as a Slack/Google OAuth redirect URI base.
+
+### Supabase in production
+
+- Enable **email confirmation** under Authentication.
+- Verify RLS is enabled on every table — the migrations do this, but it's worth confirming under **Database → Tables**.
+- Schedule the dedupe-table cleanup (it's optional but tidy):
+
+  ```sql
+  select cron.schedule(
+    'cleanup-slack-event-seen',
+    '0 4 * * *',                                   -- 04:00 UTC daily
+    $$ select public.cleanup_slack_event_seen(24); $$
+  );
+  ```
+
+---
+
+## Project structure
+
+```
+second-brain-mvp/
+├── README.md
+├── DEPLOYMENT.md                  # extra deployment recipes
+├── render.yaml                    # alt deploy spec (Render)
+├── backend/
+│   ├── Dockerfile
+│   ├── docker-compose.yml
+│   ├── pyproject.toml
+│   ├── requirements.txt
+│   ├── requirements-dev.txt
+│   ├── setup.cfg
+│   ├── .env.example
+│   ├── main.py                    # FastAPI app + routes
+│   ├── auth.py                    # legacy API-key auth (admin only)
+│   ├── auth_supabase.py           # Supabase JWT verification + workspace binding
+│   ├── supabase_client.py         # all Supabase CRUD helpers
+│   ├── startup.py                 # env validation + secrets audit
+│   ├── logging_config.py          # structured logs + request context
+│   ├── request_context.py
+│   ├── rate_limit.py              # per-bucket sliding-window limiter
+│   ├── observability.py           # Sentry hooks + dep checks + dead-letter
+│   ├── retry.py                   # exponential-backoff helper
+│   ├── errors.py
+│   ├── hydradb_client.py          # vector recall client
+│   ├── recall.py                  # prepare_recall_context, recency rerank
+│   ├── search_utils.py            # rerank / dedupe / keyword scoring
+│   ├── query_rewriter.py          # person + channel inference
+│   ├── query_cache.py
+│   ├── prompts.py
+│   ├── llm.py
+│   ├── slack_oauth.py             # Slack OAuth + channel fetch + ingest runner
+│   ├── slack_signature.py         # HMAC verification for /slack/events
+│   ├── realtime_ingest.py         # Slack webhook → HydraDB pipeline
+│   ├── gmail_oauth.py             # Gmail OAuth + label/message fetch + ingest
+│   ├── scheduler.py               # per-workspace background pass
+│   ├── date_utils.py
+│   ├── ingestion/
+│   │   ├── ingest_slack.py        # message → markdown builder
+│   │   └── …
+│   ├── supabase/
+│   │   ├── schema.sql                              # workspaces + members + profiles
+│   │   ├── phase2_chat_and_saved.sql               # chat sessions + saved answers
+│   │   ├── phase3_slack_connect.sql                # slack_installations + slack_channels
+│   │   ├── phase4_hydradb_workspace_isolation.sql  # sub-tenant naming + tracking
+│   │   ├── phase7_production_hardening.sql         # slack_event_seen dedupe
+│   │   └── phase8_gmail_connector.sql              # gmail_connections / _labels / _ingestion_state
+│   └── tests/
+│       ├── conftest.py
+│       ├── test_recall_recency.py
+│       ├── test_slack_oauth.py
+│       ├── test_slack_channels.py
+│       ├── test_gmail_oauth.py
+│       ├── test_gmail_routes.py
+│       ├── test_gmail_isolation.py
+│       ├── test_phase4_isolation.py
+│       ├── test_phase7_hardening.py
+│       └── …
+└── frontend/
+    ├── package.json
+    ├── vite.config.js
+    ├── index.html
+    ├── .env.example
+    └── src/
+        ├── main.jsx
+        ├── App.jsx
+        ├── api.js
+        ├── styles.css
+        ├── lib/
+        │   └── supabase.js
+        ├── auth/
+        │   ├── AuthContext.jsx
+        │   ├── AuthGate.jsx
+        │   ├── AuthForm.jsx
+        │   ├── WorkspaceContext.jsx
+        │   └── WorkspaceSwitcher.jsx
+        ├── slack/
+        │   └── SlackSettings.jsx
+        └── gmail/
+            └── GmailSettings.jsx
+```
+
+---
+
+## API overview
+
+Every route below requires:
+
+- `Authorization: Bearer <supabase_jwt>`
+- `X-Workspace-Id: <workspace_uuid>`
+
+…with the exception of `/api/me*`, the OAuth callbacks, `/api/health`, `/api/ready`, and `/slack/events`.
+
+### Identity + workspaces
+
+```http
+GET    /api/me
+GET    /api/me/workspaces
+```
+
+### Query
+
+```http
+POST   /api/query
+POST   /api/query/stream          # Server-Sent Events
+```
+
+Example:
+
+```bash
+curl -X POST "$API/api/query" \
+  -H "Authorization: Bearer $JWT" \
+  -H "X-Workspace-Id: $WS" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"what is the latest message in #engineering"}'
+```
+
+Response shape:
+
+```json
+{
+  "answer":  "The latest message in #engineering says PROD REALTIME FINAL TEST 12345 23:15 [1].",
+  "sources": [
+    {
+      "index":     1,
+      "channel":   "engineering",
+      "timestamp": "1740000000.000",
+      "permalink": "https://your-team.slack.com/archives/C1/p1740000000000",
+      "snippet":   "PROD REALTIME FINAL TEST 12345 23:15"
+    }
+  ],
+  "retrieval_mode": "recency"
+}
+```
+
+### Slack Connect
+
+```http
+GET    /api/slack/connect-url
+GET    /api/slack/oauth/callback             # public; HMAC-signed state
+GET    /api/slack/channels
+POST   /api/slack/channels                   # { selected_channel_ids: [...] }
+POST   /api/slack/ingest
+POST   /slack/events                         # public; signature-verified webhook
+```
+
+### Gmail Connect
+
+```http
+GET    /api/gmail/connect-url
+GET    /api/gmail/oauth/callback             # public; HMAC-signed state
+GET    /api/gmail/connections
+DELETE /api/gmail/connections/{id}
+GET    /api/gmail/labels?connection_id=...
+POST   /api/gmail/labels                     # { connection_id, selected_label_ids }
+POST   /api/gmail/ingest                     # { connection_id }
+```
+
+### Chat history + saved answers
+
+```http
+GET    /api/chat/sessions
+GET    /api/chat/sessions/{id}/messages
+POST   /api/chat/sessions
+GET    /api/saved-answers
+POST   /api/saved-answers
+DELETE /api/saved-answers/{id}
+```
+
+### Probes
+
+```http
+GET    /api/health                  # liveness — always 200 once boot finishes
+GET    /api/ready                   # readiness — 503 when deps unhealthy
+```
+
+---
+
+## Security notes
+
+- **Tokens never leave the backend.** Slack `bot_token` and Google `refresh_token` / `access_token` live in Supabase tables with RLS enabled and **no policies** — only the service-role backend can read them. The public projection helpers strip token fields before any API response.
+- **OAuth state is HMAC-signed** with a per-connector secret and a 5-minute expiry. Tampering breaks the signature; replay is blocked by expiry. The callback derives the target workspace from the *signed* state, never from a header.
+- **RLS everywhere.** Every workspace-scoped table has policies that gate access on `workspace_members`. Even if the JWT verification on the backend were bypassed, RLS would still reject cross-workspace reads.
+- **Webhook signatures.** `/slack/events` verifies the HMAC over the raw body before parsing JSON, with a timestamp tolerance to defeat replays.
+- **Idempotency at scale.** The Slack dedupe is two-tier — a process-local cache in front of `INSERT … ON CONFLICT DO NOTHING` against `slack_event_seen`. Duplicates survive restarts and multi-worker deploys.
+- **Spam/Trash protection.** Gmail labels `SPAM` and `TRASH` are blocked at the ingest runner unless `GMAIL_ALLOW_SPAM_TRASH=true`.
+- **No body/token logging.** Email bodies, message bodies, and tokens are deliberately excluded from log lines. Failed Supabase upserts log the structured PostgREST error body (`code`, `message`, `hint`, `details`) — never the row values.
+- **Per-bucket rate limits.** `auth=30/5min`, `query=20/5min`, `slack_webhook=600/5min`, `ingest=5/5min`. A flood in one bucket can't starve another.
+- **Production env audit.** `ENVIRONMENT=production` refuses to boot with `localhost` CORS, http redirect URIs, or placeholder secrets.
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| `?slack_connect=error&reason=persist_failed` after OAuth | Production schema uses `scope` (singular), code sending `scopes` | Already fixed — column-aligned in `phase3_slack_connect.sql`. If you see this on an existing DB, re-run that migration. |
+| `supabase_upsert_channels_failed` after Slack connect | `slack_channels.installation_id` is NOT NULL; older code didn't send it | Already fixed — the channel upsert now forwards `installation_id`. Re-run `phase3_slack_connect.sql`. |
+| Query returns an older message for "latest message" | Pure semantic recall outranked the newest message | Already fixed — recency intent now widens the candidate pool to 50 and reranks by Slack timestamp DESC. |
+| `503` on `/api/ready` | One of Supabase / HydraDB / OpenAI is unreachable | Check the body — each dep is reported separately with `latency_ms` and `reason`. |
+| Slack events arrive but nothing ingests | Bot not invited to the channel | Invite the bot, then `Refresh` in the Slack panel. |
+| "Gmail OAuth is not configured" | Backend missing `GMAIL_CLIENT_ID` etc. | Set the four Gmail env vars and restart. The connector is opt-in. |
+| Frontend stuck at "Loading…" with 401 in console | Bearer token expired and refresh didn't run | Refresh the page. If persistent, sign out and back in — Supabase's auto-refresh sometimes needs a session reset. |
+| New table columns missing in API responses | PostgREST schema cache stale | Run `NOTIFY pgrst, 'reload schema';` against the Supabase DB. |
+| `column "scopes" does not exist` | Old migration drift | Re-run `phase3_slack_connect.sql` — it adds `scope` defensively and never drops data. |
+
+---
+
+## Roadmap
+
+- [ ] Gmail realtime via [push notifications](https://developers.google.com/gmail/api/guides/push)
+- [ ] Notion connector (read-only)
+- [ ] Linear / GitHub Issues connector
+- [ ] Per-workspace LLM provider override
+- [ ] In-app workspace billing
+- [ ] Recall over attachments (PDFs, slides) via OCR pre-stage
+- [ ] Encrypted token storage with `pgsodium`
+- [ ] Multi-tenant scheduler with leader election (replaces in-process scheduler at >1 replica)
+- [ ] Public Postman collection + OpenAPI publishing
+- [ ] Frontend code-splitting (bundle is currently ~565 kB un-gzipped)
+
+---
+
+## Contributing
+
+Contributions welcome. A few ground rules:
+
+1. **Tests before merge.** Backend coverage gate is 85%. New routes need tests for happy-path, auth, workspace isolation, and the failure mode.
+2. **Schema migrations are idempotent.** Every new SQL file uses `create table if not exists` + `add column if not exists` + `do $$ … exception when others then null; end $$` for constraints. Never drop a column on an existing database.
+3. **Log structure, not strings.** Use `logger.info("event_name", extra={...})` so logs stay parseable.
+4. **Never log tokens or message bodies.** When in doubt, log an ID or a length.
+5. **Pydantic models use `ConfigDict(extra="forbid")`** so a typo in a request body becomes a 422 instead of a silent no-op.
+
+### Dev loop
+
+```bash
+# Backend tests
+cd backend && python3 -m pytest tests/ -q
+
+# Backend with hot-reload
+uvicorn main:app --reload
+
+# Frontend with hot-reload
+cd frontend && npm run dev
+
+# Frontend prod build (validates type errors + bundle)
+npm run build
+```
+
+### File layout conventions
+
+- `backend/<feature>_oauth.py` — OAuth + provider API client + ingestion runner for one connector.
+- `backend/supabase/phaseN_<thing>.sql` — additive, idempotent migrations.
+- `backend/tests/test_<feature>_<aspect>.py` — one file per aspect (oauth / routes / isolation / hardening).
+- `frontend/src/<feature>/<Feature>Settings.jsx` — the in-app picker UI for one connector.
+
+---
+
+## License
+
+MIT. See [`LICENSE`](LICENSE) for the full text.
+
+---
+
+*Built with FastAPI, React, Supabase, and HydraDB. Made for teams that want their own data back.*
