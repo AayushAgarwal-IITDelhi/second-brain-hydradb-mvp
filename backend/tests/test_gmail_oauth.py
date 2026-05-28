@@ -24,7 +24,7 @@ class TestOAuthState:
         payload = verify_oauth_state(token)
         assert payload is not None
         assert payload["workspace_id"] == "ws-1"
-        assert payload["user_id"]      == "user-1"
+        assert payload["user_id"] == "user-1"
 
     def test_two_tokens_differ_due_to_nonce(self):
         from gmail_oauth import make_oauth_state
@@ -89,8 +89,8 @@ class TestOAuthState:
     def test_expired_token_rejected(self, monkeypatch):
         from gmail_oauth import make_oauth_state, verify_oauth_state
         token = make_oauth_state("ws-1", "u-1")
-        # Jump forward past the 5-minute lifetime.
-        with patch("gmail_oauth.time.time", return_value=time.time() + 10_000):
+        # time.time() is called inside oauth_common now, so patch it there.
+        with patch("oauth_common.time.time", return_value=time.time() + 10_000):
             assert verify_oauth_state(token) is None
 
 
@@ -124,7 +124,7 @@ class TestBuildConnectUrl:
         payload = verify_oauth_state(state)
         assert payload is not None
         assert payload["workspace_id"] == "ws-7"
-        assert payload["user_id"]      == "u-7"
+        assert payload["user_id"] == "u-7"
 
 
 # =====================================================================
@@ -153,7 +153,7 @@ class TestExchangeCode:
         ):
             data = exchange_code("auth-code-123")
         assert data is not None
-        assert data["access_token"]  == "at-1"
+        assert data["access_token"] == "at-1"
         assert data["refresh_token"] == "rt-1"
 
     def test_http_error_returns_none(self):
@@ -226,7 +226,7 @@ class TestFetchUserInfo:
         resp.json.return_value = {"sub": "google-123", "email": "u@example.com"}
         with patch("gmail_oauth.requests.get", return_value=resp):
             info = fetch_user_info("at-1")
-        assert info["sub"]   == "google-123"
+        assert info["sub"] == "google-123"
         assert info["email"] == "u@example.com"
 
     def test_http_error_returns_none(self):
@@ -257,9 +257,9 @@ class TestInstallationProjection:
         info = {"sub": "google-123", "email": "u@example.com"}
         out = installation_from_token_response(token, info)
         assert out["google_user_id"] == "google-123"
-        assert out["email"]          == "u@example.com"
-        assert out["access_token"]   == "at-1"
-        assert out["refresh_token"]  == "rt-1"
+        assert out["email"] == "u@example.com"
+        assert out["access_token"] == "at-1"
+        assert out["refresh_token"] == "rt-1"
         assert "gmail.readonly" in out["scopes"]
         assert out["token_expiry"] is not None
 
@@ -267,11 +267,11 @@ class TestInstallationProjection:
         from gmail_oauth import installation_from_token_response
         out = installation_from_token_response({}, {})
         assert out["google_user_id"] == ""
-        assert out["email"]          == ""
-        assert out["access_token"]   == ""
-        assert out["refresh_token"]  == ""
-        assert out["scopes"]         == ""
-        assert out["token_expiry"]   is None
+        assert out["email"] == ""
+        assert out["access_token"] == ""
+        assert out["refresh_token"] == ""
+        assert out["scopes"] == ""
+        assert out["token_expiry"] is None
 
 
 # =====================================================================
@@ -307,9 +307,9 @@ class TestBuildEmailDocument:
         doc = build_email_document(self._sample_message(), "owner@example.com")
         assert doc is not None
         assert "Quarterly review on Friday." in doc["content"]
-        assert "Subject: Quarterly review"   in doc["content"]
+        assert "Subject: Quarterly review" in doc["content"]
         assert "From: Alice <alice@example.com>" in doc["content"]
-        assert "Labels: INBOX, Label_5"      in doc["content"]
+        assert "Labels: INBOX, Label_5" in doc["content"]
         # Phase 8 spec: every doc must carry the gmail message id and
         # the snippet line as part of the header block.
         assert "Message-Id: msg-abc-123" in doc["content"]
@@ -452,7 +452,7 @@ class TestBuildEmailDocument:
         from gmail_oauth import build_email_document
         doc = build_email_document(self._sample_message(), "owner@example.com")
         assert "subject" not in doc
-        assert "body"    not in doc
+        assert "body" not in doc
         # message_id is fine -- it's a stable opaque identifier.
         assert doc["message_id"] == "msg-abc-123"
 

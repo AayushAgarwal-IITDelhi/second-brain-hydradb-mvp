@@ -475,8 +475,9 @@ def upload_in_batches(
         )
         if recorded > 0:
             state.touch_last_ingested()
-        # Save after every batch so a crash mid-run still keeps partial progress.
-        state.save()
+        # save_locked() merges with any concurrent realtime writes before
+        # persisting, so a webhook firing mid-run doesn't lose its entries.
+        state.save_locked()
 
     return {"successes": successes, "failures": failures}
 
@@ -535,7 +536,7 @@ def main() -> None:
             newest = result.get("newest_ts_seen")
             if newest:
                 state.set_last_synced_ts(result["channel_id"], newest)
-                state.save()
+                state.save_locked()
                 logger.info('ingest_channel_watermark_advanced', extra={
                     'channel_id': result['channel_id'],
                     'newest_ts': newest,
@@ -554,7 +555,7 @@ def main() -> None:
         newest = result.get("newest_ts_seen")
         if newest and stats["failures"] == 0:
             state.set_last_synced_ts(result["channel_id"], newest)
-            state.save()
+            state.save_locked()
             logger.info('ingest_channel_watermark_advanced', extra={
                 'channel_id': result['channel_id'],
                 'newest_ts': newest,

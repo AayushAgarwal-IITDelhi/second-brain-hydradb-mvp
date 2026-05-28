@@ -203,17 +203,17 @@ class TestRunAllWorkspacesOnce:
             summary = run_all_workspaces_once()
 
         assert summary["workspaces_total"] == 2
-        assert summary["workspaces_run"]   == 2
+        assert summary["workspaces_run"] == 2
         assert mock_run.call_count == 2
 
         # Verify each call carried the RIGHT sub_tenant_id.
-        first_kwargs  = mock_run.call_args_list[0].kwargs
+        first_kwargs = mock_run.call_args_list[0].kwargs
         second_kwargs = mock_run.call_args_list[1].kwargs
-        assert first_kwargs["workspace_id"]          == "ws-1"
+        assert first_kwargs["workspace_id"] == "ws-1"
         assert first_kwargs["hydradb_sub_tenant_id"] == "ws_aaaaaaaaaaaa"
-        assert first_kwargs["bot_token"]             == "xoxb-1"
-        assert first_kwargs["channel_ids"]           == ["C1", "C2"]
-        assert second_kwargs["workspace_id"]          == "ws-2"
+        assert first_kwargs["bot_token"] == "xoxb-1"
+        assert first_kwargs["channel_ids"] == ["C1", "C2"]
+        assert second_kwargs["workspace_id"] == "ws-2"
         assert second_kwargs["hydradb_sub_tenant_id"] == "ws_bbbbbbbbbbbb"
 
         # Both clean runs -> both should be stamped synced.
@@ -234,7 +234,7 @@ class TestRunAllWorkspacesOnce:
         ) as mock_run:
             summary = run_all_workspaces_once()
         assert summary["workspaces_skipped"] == 1
-        assert summary["workspaces_run"]     == 0
+        assert summary["workspaces_run"] == 0
         mock_run.assert_not_called()
 
     def test_skips_workspace_with_no_sub_tenant(self):
@@ -290,7 +290,7 @@ class TestRunAllWorkspacesOnce:
         ) as mock_mark:
             summary = run_all_workspaces_once()
         assert summary["workspaces_failed"] == 1
-        assert summary["workspaces_run"]    == 1
+        assert summary["workspaces_run"] == 1
         # Only the successful workspace gets a sync stamp.
         mock_mark.assert_called_once()
         assert mock_mark.call_args.kwargs["workspace_id"] == "ws-good"

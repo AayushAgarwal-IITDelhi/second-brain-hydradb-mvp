@@ -682,9 +682,9 @@ def upsert_slack_channels(
             # Slack omits num_members for archived or no-bot-member
             # private channels. Default to 0 so we never insert NULL
             # into a NOT NULL integer column.
-            "member_count":     int(c.get("member_count") or 0),
-            "topic":            (c.get("topic")   or ""),
-            "purpose":          (c.get("purpose") or ""),
+            "member_count": int(c.get("member_count") or 0),
+            "topic": (c.get("topic") or ""),
+            "purpose": (c.get("purpose") or ""),
             "last_seen_at":     now_iso,
         }
         # The installation_id FK is required by the production schema
@@ -1160,6 +1160,7 @@ def is_channel_selected_for_workspace(
 # Postgres serializes the constraint check, so the first insert
 # returns a row; a duplicate inserted by a concurrent worker conflicts
 # and returns no row. The caller branches on that.
+
 
 def claim_slack_event_id(
     *, event_id: str, workspace_id: Optional[str] = None,

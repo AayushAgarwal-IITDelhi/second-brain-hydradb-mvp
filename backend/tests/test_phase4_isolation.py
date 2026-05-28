@@ -336,9 +336,9 @@ class TestListActiveWorkspacesWithSlack:
         # Each row carries the full payload the scheduler needs.
         by_id = {row["workspace_id"]: row for row in result}
         assert by_id["ws-1"]["hydradb_sub_tenant_id"] == "ws_aaaaaa1"
-        assert by_id["ws-1"]["bot_token"]             == "xoxb-1"
-        assert by_id["ws-1"]["channel_ids"]           == ["C1", "C2"]
-        assert by_id["ws-3"]["channel_ids"]           == ["C9"]
+        assert by_id["ws-1"]["bot_token"] == "xoxb-1"
+        assert by_id["ws-1"]["channel_ids"] == ["C1", "C2"]
+        assert by_id["ws-3"]["channel_ids"] == ["C9"]
 
     def test_swallows_supabase_errors(self):
         from supabase_client import list_active_workspaces_with_slack

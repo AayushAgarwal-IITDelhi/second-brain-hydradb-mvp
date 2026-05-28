@@ -101,8 +101,6 @@ from supabase_client import (  # noqa: E402
     get_gmail_connection,
     get_gmail_connection_public,
     get_slack_installation,
-    get_slack_installation_public,
-    get_workspace_sub_tenant_id,
     list_chat_messages,
     list_chat_sessions,
     list_gmail_connections_public,
@@ -112,7 +110,6 @@ from supabase_client import (  # noqa: E402
     list_selected_gmail_label_ids,
     list_user_workspaces,
     list_workspace_channels,
-    mark_workspace_synced,
     set_selected_channels,
     set_selected_gmail_labels,
     upsert_gmail_connection,
@@ -133,14 +130,14 @@ from slack_oauth import (  # noqa: E402
 # clash with the Slack helpers above (both modules expose
 # build_connect_url, exchange_code, verify_oauth_state, etc.).
 from gmail_oauth import (  # noqa: E402
-    build_connect_url        as gmail_build_connect_url,
-    exchange_code            as gmail_exchange_code,
-    fetch_user_info          as gmail_fetch_user_info,
+    build_connect_url as gmail_build_connect_url,
+    exchange_code as gmail_exchange_code,
+    fetch_user_info as gmail_fetch_user_info,
     gmail_oauth_configured,
     installation_from_token_response as gmail_installation_from_token_response,
-    list_labels              as list_gmail_labels_from_api,
+    list_labels as list_gmail_labels_from_api,
     run_workspace_gmail_ingest,
-    verify_oauth_state       as verify_gmail_oauth_state,
+    verify_oauth_state as verify_gmail_oauth_state,
 )
 
 configure_logging(level=os.getenv('LOG_LEVEL', 'INFO'))
@@ -163,9 +160,9 @@ ALLOWED_ORIGINS = _parse_cors_origins()
 # Each one targets a named bucket so a flood in one area can't starve
 # the others. The factory reads its limit from env at request time, so
 # operators can retune limits without a restart.
-auth_rate_limit            = make_rate_limit_dependency("auth")
-slack_webhook_rate_limit   = make_rate_limit_dependency("slack_webhook")
-slack_ingest_rate_limit    = make_rate_limit_dependency("ingest")
+auth_rate_limit = make_rate_limit_dependency("auth")
+slack_webhook_rate_limit = make_rate_limit_dependency("slack_webhook")
+slack_ingest_rate_limit = make_rate_limit_dependency("ingest")
 
 
 # ---------- Lifespan: startup checks + scheduler ---------- #
@@ -1253,16 +1250,21 @@ def slack_oauth_callback(
     return _redirect_with_status(frontend, "ok", row["slack_team_name"] or "")
 
 
-def _redirect_with_status(frontend: str, result: str, reason: str):
+def _oauth_redirect(frontend: str, connector: str, result: str, reason: str):
     """
     Build the post-callback redirect URL the user's browser lands on.
-    `reason` is included verbatim — never holds untrusted unbounded
-    input, since on success it's a Slack team name (already validated
-    by Slack) and on failure it's a short fixed code we choose.
+    `connector` is the query-param key (e.g. "slack_connect", "gmail_connect")
+    so the frontend can dispatch by connector type.
+    `reason` is never untrusted: on success it's a team name or email
+    (validated upstream); on failure it's a short fixed code we choose.
     """
     from fastapi.responses import RedirectResponse  # noqa: PLC0415
-    qs = urlencode_safely({"slack_connect": result, "reason": reason})
+    qs = urlencode_safely({connector: result, "reason": reason})
     return RedirectResponse(url=f"{frontend}/?{qs}", status_code=302)
+
+
+def _redirect_with_status(frontend: str, result: str, reason: str):
+    return _oauth_redirect(frontend, "slack_connect", result, reason)
 
 
 def urlencode_safely(d: Dict[str, str]) -> str:
@@ -1510,12 +1512,7 @@ def gmail_oauth_callback(
 
 
 def _gmail_redirect_with_status(frontend: str, result: str, reason: str):
-    """Same shape as the Slack callback redirect helper, separate
-    query-param name so a single frontend handler can dispatch by
-    connector."""
-    from fastapi.responses import RedirectResponse  # noqa: PLC0415
-    qs = urlencode_safely({"gmail_connect": result, "reason": reason})
-    return RedirectResponse(url=f"{frontend}/?{qs}", status_code=302)
+    return _oauth_redirect(frontend, "gmail_connect", result, reason)
 
 
 @app.get("/api/gmail/connections")

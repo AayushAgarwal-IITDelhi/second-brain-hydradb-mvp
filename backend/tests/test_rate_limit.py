@@ -37,7 +37,6 @@ def _isolate_rate_limit_state():
         _limiter._buckets.clear()
 
 
-
 class TestRateLimitHelpers:
     def test_bucket_limit_default(self):
         from rate_limit import _bucket_limit

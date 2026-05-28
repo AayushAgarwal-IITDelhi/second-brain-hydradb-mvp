@@ -240,7 +240,7 @@ class TestOAuthStateIsolation:
         payload = verify_oauth_state(token)
         assert payload is not None
         assert payload["workspace_id"] == WORKSPACE_A
-        assert payload["user_id"]      == "user-a"
+        assert payload["user_id"] == "user-a"
 
     def test_swapping_workspace_id_in_payload_invalidates_signature(self):
         """If an attacker decodes the state, swaps the workspace_id,
@@ -268,7 +268,7 @@ class TestOAuthStateIsolation:
         not be replayable, regardless of which workspace it claims."""
         from gmail_oauth import make_oauth_state, verify_oauth_state
         token = make_oauth_state(WORKSPACE_A, "user-a")
-        with patch("gmail_oauth.time.time", return_value=time.time() + 10_000):
+        with patch("oauth_common.time.time", return_value=time.time() + 10_000):
             assert verify_oauth_state(token) is None
 
     def test_callback_uses_state_workspace_not_caller_workspace(
@@ -342,7 +342,7 @@ class TestTokenSecrecy:
         body_text = r.text
         # Even the FIELD NAMES "access_token" / "refresh_token" must
         # never appear in the response body.
-        assert "access_token"  not in body_text
+        assert "access_token" not in body_text
         assert "refresh_token" not in body_text
 
     def test_get_public_helper_strips_token_fields(self):
@@ -363,7 +363,7 @@ class TestTokenSecrecy:
             "updated_at":     "2025-01-01T00:00:00Z",
         }
         public = _gmail_public_projection(row)
-        assert "access_token"  not in public
+        assert "access_token" not in public
         assert "refresh_token" not in public
         # Sanity: the public field IS there.
         assert public["email"] == "u@example.com"

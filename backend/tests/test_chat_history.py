@@ -197,8 +197,8 @@ class TestCreateMessage:
         assert body["id"] == "msg-1"
         _, kwargs = mock_fn.call_args
         assert kwargs["session_id"] == "sess-1"
-        assert kwargs["role"]       == "user"
-        assert kwargs["content"]    == "Hi"
+        assert kwargs["role"] == "user"
+        assert kwargs["content"] == "Hi"
         assert kwargs["sources"] is None
 
     def test_appends_assistant_message_with_sources(

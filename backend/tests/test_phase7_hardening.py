@@ -149,7 +149,8 @@ class TestDependencyChecks:
     def test_openai_check_skipped_via_env(self, monkeypatch):
         import observability
         monkeypatch.setenv("DISABLE_OPENAI_READINESS", "true")
-        good_resp = MagicMock(); good_resp.status_code = 200
+        good_resp = MagicMock()
+        good_resp.status_code = 200
         with patch("observability.requests.get",     return_value=good_resp), \
              patch("observability.requests.options", return_value=good_resp):
             result = observability.check_dependencies()
@@ -283,10 +284,11 @@ class TestPerBucketLimits:
         req.headers = {"x-api-key": "isolate"}
         req.client = MagicMock(host="1.1.1.1")
 
-        slack_dep  = make_rate_limit_dependency("slack_webhook", limit=2)
+        slack_dep = make_rate_limit_dependency("slack_webhook", limit=2)
         ingest_dep = make_rate_limit_dependency("ingest", limit=2)
 
-        slack_dep(req); slack_dep(req)
+        slack_dep(req)
+        slack_dep(req)
         with pytest.raises(RateLimitedError):
             slack_dep(req)
         # Different bucket, same client -> still under its own limit.

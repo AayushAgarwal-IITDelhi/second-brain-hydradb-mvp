@@ -99,9 +99,9 @@ def run_all_workspaces_once() -> dict:
 
     for ws in workspaces:
         workspace_id = ws.get("workspace_id") or ""
-        bot_token    = ws.get("bot_token") or ""
-        channel_ids  = ws.get("channel_ids") or []
-        sub_tenant   = (ws.get("hydradb_sub_tenant_id") or "").strip()
+        bot_token = ws.get("bot_token") or ""
+        channel_ids = ws.get("channel_ids") or []
+        sub_tenant = (ws.get("hydradb_sub_tenant_id") or "").strip()
 
         if not channel_ids:
             # Connected but nothing selected -- nothing to ingest yet.

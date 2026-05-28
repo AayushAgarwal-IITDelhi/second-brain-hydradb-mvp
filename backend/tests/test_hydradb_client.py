@@ -244,3 +244,42 @@ class TestSummarizeUploadResponse:
         ok, bad = summarize_upload_response({"something": "else"}, batch_size=5)
         assert ok == 5
         assert bad == 0
+
+    def test_result_with_non_null_error_field_counts_as_failure(self):
+        """Line 73: _result_is_failed returns True when error field is non-empty."""
+        from hydradb_client import summarize_upload_response
+        payload = {
+            "results": [
+                {"status": "queued", "error": "ingestion failed: bad encoding"},
+            ]
+        }
+        ok, bad = summarize_upload_response(payload, batch_size=1)
+        assert ok == 0
+        assert bad == 1
+
+
+# ── HydraDBClient constructor guards ──────────────────────────────────────
+
+
+class TestHydraDBClientInit:
+    def test_raises_when_api_key_missing(self, monkeypatch):
+        """Line 131: ValueError raised when HYDRADB_API_KEY is absent."""
+        monkeypatch.delenv("HYDRADB_API_KEY", raising=False)
+        from hydradb_client import HydraDBClient
+        with pytest.raises(ValueError, match="HYDRADB_API_KEY"):
+            HydraDBClient(
+                base_url="https://hydra.test",
+                api_key=None,
+                tenant_id="tenant",
+            )
+
+    def test_raises_when_tenant_id_missing(self, monkeypatch):
+        """Line 133: ValueError raised when HYDRADB_TENANT_ID is absent."""
+        monkeypatch.delenv("HYDRADB_TENANT_ID", raising=False)
+        from hydradb_client import HydraDBClient
+        with pytest.raises(ValueError, match="HYDRADB_TENANT_ID"):
+            HydraDBClient(
+                base_url="https://hydra.test",
+                api_key="some-key",
+                tenant_id=None,
+            )

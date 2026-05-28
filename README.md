@@ -254,7 +254,25 @@ cp .env.example .env
 # edit .env with your secrets
 ```
 
-### Frontend
+### 2 — Set up Supabase
+
+1. Create a new Supabase project.
+2. In the SQL editor, run each migration in order:
+   ```
+   backend/supabase/schema.sql
+   backend/supabase/phase2_chat_and_saved.sql
+   backend/supabase/phase3_slack_connect.sql
+   backend/supabase/phase4_hydradb_workspace_isolation.sql
+   backend/supabase/phase7_production_hardening.sql
+   backend/supabase/phase8_gmail_connector.sql
+   ```
+3. From **Settings → API**, copy `Project URL`, `anon/public key`, `service_role key`,
+   and `JWT Secret` into `backend/.env`.
+4. Create a workspace row in the `workspaces` table and add your user to
+   `workspace_memberships`. (There is no UI for this yet — use the Supabase
+   table editor or SQL.)
+
+### 3 — Set up the frontend
 
 ```bash
 cd frontend
@@ -341,6 +359,8 @@ VITE_SUPABASE_ANON_KEY=your-supabase-anon-key
    psql "$SUPABASE_DB_URL" -f phase7_production_hardening.sql
    psql "$SUPABASE_DB_URL" -f phase8_gmail_connector.sql
    ```
+6. **Connect** from the frontend: open Settings → Gmail → Connect Account.
+   Multiple Gmail accounts can be connected per workspace.
 
    *Or* paste them sequentially into the Supabase SQL editor.
 

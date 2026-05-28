@@ -92,9 +92,9 @@ class TestCreateSavedAnswer:
         assert body["id"] == "saved-new"
         _, kwargs = mock_fn.call_args
         assert kwargs["question"] == "Q"
-        assert kwargs["answer"]   == "A"
-        assert kwargs["mode"]     == "default"
-        assert kwargs["filters"]  == {"topK": 5}
+        assert kwargs["answer"] == "A"
+        assert kwargs["mode"] == "default"
+        assert kwargs["filters"] == {"topK": 5}
         assert kwargs["workspace_id"] == TEST_WS_ID
 
     def test_accepts_minimal_payload(self, client, jwt_auth_headers):
@@ -163,7 +163,7 @@ class TestDeleteSavedAnswer:
         body = r.json()
         assert body == {"id": "saved-1", "deleted": True}
         _, kwargs = mock_fn.call_args
-        assert kwargs["saved_id"]     == "saved-1"
+        assert kwargs["saved_id"] == "saved-1"
         assert kwargs["workspace_id"] == TEST_WS_ID
 
     def test_unknown_id_returns_404(self, client, jwt_auth_headers):

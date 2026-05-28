@@ -89,7 +89,7 @@ def normalize_slack_message(
         "reply_count": int(message.get("reply_count") or 0),
         # Slack does not return permalinks in conversations.history; obtaining
         # one requires a separate chat.getPermalink call. We leave it null for
-        # the MVP. See TODO in the README.
+        # the MVP (permalink is populated later by the ingestion pipeline).
         "permalink": message.get("permalink"),
     }
 

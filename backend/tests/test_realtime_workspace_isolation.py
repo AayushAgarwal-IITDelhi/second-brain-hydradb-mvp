@@ -127,8 +127,8 @@ class TestRoutePassesFullPayload:
         # inner event -- otherwise the new workspace-routing logic
         # has no team_id to work with.
         forwarded = mock_proc.call_args.args[0]
-        assert forwarded.get("type")     == "event_callback"
-        assert forwarded.get("team_id")  == "T_PASS"
+        assert forwarded.get("type") == "event_callback"
+        assert forwarded.get("team_id") == "T_PASS"
         assert forwarded.get("event_id") == "Ev_phase5_passthrough"
 
 
