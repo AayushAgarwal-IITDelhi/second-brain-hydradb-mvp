@@ -236,6 +236,57 @@ class IngestionState:
         return len(self.entries)
 
     # ----- cross-process locking ---------------------------------------- #
+    def save_locked(self) -> None:
+        """
+        Cross-process-safe save for long-running ingest passes.
+
+        Acquires an OS-level advisory lock on a ``<path>.lock`` sidecar file,
+        reloads the state file from disk to incorporate any concurrent writes
+        (e.g. the realtime webhook firing while a bulk ingest is running),
+        merges this instance's in-memory mutations on top, then atomically
+        writes and releases the lock.
+
+        Merge rules:
+          - ``entries``: this instance wins — new uploads take precedence.
+          - Per-channel watermarks: keep whichever ts is **newer** so we
+            never go backward on a channel.
+          - ``_meta`` (last_ingested_at): this instance wins.
+
+        Falls back to a plain :meth:`save` on systems where ``fcntl`` is
+        unavailable (Windows). Single-process deployments are safe either way.
+        """
+        lock_path = self.path.with_suffix(".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a") as lf:
+            if fcntl:
+                fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                # Reload whatever is on disk right now (may include realtime
+                # writes that happened after we loaded our in-memory copy).
+                fresh = IngestionState(self.path)
+
+                # Our newly-uploaded entries win.
+                fresh.entries.update(self.entries)
+
+                # Merge per-channel watermarks: keep the newer ts.
+                for ch_id, ch_data in self.channels.items():
+                    if ch_id == "_meta":
+                        fresh.channels["_meta"] = ch_data
+                    elif isinstance(ch_data, dict) and "last_synced_ts" in ch_data:
+                        existing_ts = (fresh.channels.get(ch_id) or {}).get(
+                            "last_synced_ts"
+                        )
+                        new_ts = ch_data["last_synced_ts"]
+                        if not existing_ts or new_ts > existing_ts:
+                            fresh.channels[ch_id] = {"last_synced_ts": new_ts}
+                    else:
+                        fresh.channels[ch_id] = ch_data
+
+                fresh.save()  # atomic write-temp-rename
+            finally:
+                if fcntl:
+                    fcntl.flock(lf, fcntl.LOCK_UN)
+
     @classmethod
     @contextmanager
     def locked(cls, path: Path) -> Generator["IngestionState", None, None]:

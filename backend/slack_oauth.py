@@ -18,13 +18,7 @@ an explicit token + channel list instead of reading them from env.
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
-import json
 import os
-import secrets
-import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
@@ -33,13 +27,12 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 from logging_config import get_logger
+from oauth_common import (
+    make_oauth_state as _core_make_state,
+    verify_oauth_state as _core_verify_state,
+)
 
 logger = get_logger(__name__)
-
-
-# OAuth state lifetime. Five minutes is more than enough for a user to
-# tap Connect, finish the Slack consent screen, and be redirected back.
-STATE_LIFETIME_SECONDS = 300
 
 # Default scopes we request from Slack. Bots need channels:history /
 # groups:history to read messages, *:read to enumerate channels, and
@@ -92,20 +85,9 @@ def slack_oauth_configured() -> bool:
 # ---------------------------------------------------------------------- #
 # OAuth state — HMAC-signed token binding workspace_id + user_id + nonce
 # ---------------------------------------------------------------------- #
-# We don't want to persist state in a DB row per OAuth attempt — too
-# much bookkeeping for a transient 5-minute window. Instead we sign a
-# small payload, send it as ?state=..., and verify it on callback. The
-# signing key (SLACK_OAUTH_STATE_SECRET) must be set; a missing key
-# fails closed.
-
-def _b64url_encode(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
-
-
-def _b64url_decode(s: str) -> bytes:
-    padding = "=" * (-len(s) % 4)
-    return base64.urlsafe_b64decode(s + padding)
-
+# Thin wrappers around oauth_common. The shared crypto lives there so
+# a single fix applies to both Slack and Gmail; the connector-specific
+# secret lookup and fail-closed guard stay here.
 
 def make_oauth_state(workspace_id: str, user_id: str) -> str:
     """
@@ -120,16 +102,7 @@ def make_oauth_state(workspace_id: str, user_id: str) -> str:
     if not secret:
         # Fail closed — if we can't sign, we can't safely issue states.
         raise RuntimeError("SLACK_OAUTH_STATE_SECRET is not set.")
-
-    payload = {
-        "workspace_id": workspace_id,
-        "user_id":      user_id,
-        "exp":          int(time.time()) + STATE_LIFETIME_SECONDS,
-        "nonce":        secrets.token_urlsafe(8),
-    }
-    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    sig = hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).digest()
-    return _b64url_encode(raw) + "." + _b64url_encode(sig)
+    return _core_make_state(secret, workspace_id, user_id)
 
 
 def verify_oauth_state(state: str) -> Optional[Dict[str, Any]]:
@@ -139,34 +112,7 @@ def verify_oauth_state(state: str) -> Optional[Dict[str, Any]]:
     signature, expired, missing secret). Never raises — callers branch
     on None.
     """
-    if not state or "." not in state:
-        return None
-    secret = _state_secret()
-    if not secret:
-        return None
-    try:
-        payload_b64, sig_b64 = state.split(".", 1)
-        raw = _b64url_decode(payload_b64)
-        sig = _b64url_decode(sig_b64)
-    except Exception:  # noqa: BLE001
-        return None
-
-    expected = hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).digest()
-    if not hmac.compare_digest(sig, expected):
-        return None
-    try:
-        payload = json.loads(raw.decode("utf-8"))
-    except Exception:  # noqa: BLE001
-        return None
-    if not isinstance(payload, dict):
-        return None
-
-    exp = payload.get("exp")
-    if not isinstance(exp, int) or exp < int(time.time()):
-        return None
-    if not payload.get("workspace_id") or not payload.get("user_id"):
-        return None
-    return payload
+    return _core_verify_state(_state_secret(), state)
 
 
 # ---------------------------------------------------------------------- #
@@ -456,7 +402,7 @@ def run_workspace_ingest(
             newest = result.get("newest_ts_seen")
             if newest:
                 state.set_last_synced_ts(result["channel_id"], newest)
-                state.save()
+                state.save_locked()
             continue
 
         # Phase 7: upload_in_batches has its own internal per-batch
@@ -479,7 +425,7 @@ def run_workspace_ingest(
         newest = result.get("newest_ts_seen")
         if newest and stats.get("failures", 0) == 0:
             state.set_last_synced_ts(result["channel_id"], newest)
-            state.save()
+            state.save_locked()
 
     logger.info(
         "workspace_ingest_complete",

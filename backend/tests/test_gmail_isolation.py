@@ -268,7 +268,7 @@ class TestOAuthStateIsolation:
         not be replayable, regardless of which workspace it claims."""
         from gmail_oauth import make_oauth_state, verify_oauth_state
         token = make_oauth_state(WORKSPACE_A, "user-a")
-        with patch("gmail_oauth.time.time", return_value=time.time() + 10_000):
+        with patch("oauth_common.time.time", return_value=time.time() + 10_000):
             assert verify_oauth_state(token) is None
 
     def test_callback_uses_state_workspace_not_caller_workspace(

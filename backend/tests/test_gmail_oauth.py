@@ -89,8 +89,8 @@ class TestOAuthState:
     def test_expired_token_rejected(self, monkeypatch):
         from gmail_oauth import make_oauth_state, verify_oauth_state
         token = make_oauth_state("ws-1", "u-1")
-        # Jump forward past the 5-minute lifetime.
-        with patch("gmail_oauth.time.time", return_value=time.time() + 10_000):
+        # time.time() is called inside oauth_common now, so patch it there.
+        with patch("oauth_common.time.time", return_value=time.time() + 10_000):
             assert verify_oauth_state(token) is None
 
 

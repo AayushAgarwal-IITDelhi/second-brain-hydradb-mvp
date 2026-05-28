@@ -1,9 +1,9 @@
 # Second Brain – HydraDB MVP: Test Report
 
-**Generated:** 2026-05-19  
+**Generated:** 2026-05-19 (updated 2026-05-28)  
 **Suite run:** `pytest tests/ --cov=. -q`  
-**Result:** 474 passed · 3 failed (intentional – document real bugs) · 2 xfailed · 3 warnings  
-**Overall coverage:** 90% (4 410 statements, 443 missed)
+**Result:** 882 passed · 3 failed (pre-existing ARCH-001 import-patching issue) · 29 warnings  
+**Overall coverage:** 91% (9 139 statements, 865 missed)
 
 ---
 
@@ -11,13 +11,11 @@
 
 | Category | Count |
 |---|---|
-| Test files | 19 |
-| Test classes | 59 |
-| Test cases collected | 479 |
-| Passed | 474 |
-| Failed (documenting real bugs) | 3 |
-| xfailed (documenting real bugs) | 2 |
-| Warnings | 3 |
+| Test files | 37 |
+| Test cases collected | 885 |
+| Passed | 882 |
+| Failed (ARCH-001 import-patching, pre-existing) | 3 |
+| Warnings | 29 |
 
 All external systems (HydraDB, OpenAI, Slack API, filesystem state) are **fully mocked**. No real credentials are exercised during the suite.
 
@@ -29,17 +27,9 @@ All external systems (HydraDB, OpenAI, Slack API, filesystem state) are **fully 
 
 **File:** `query_rewriter.py`  
 **Test:** `tests/test_query_rewriter.py::TestStrongPersonInference::test_strong_person_patterns[according to Charlie the meeting is cancelled-Charlie]`  
-**Status:** FAILING (intentional)
+**Status:** ✅ FIXED — `_clean_captured_name()` post-processes captures and strips trailing stop-words. All 38 query rewriter tests pass.
 
-**Root cause:** The `_NAME` regex pattern allows an optional second word after the first capitalised token (`[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?`). For the phrase "according to Charlie the meeting is cancelled", the optional second-word group matches " the", producing the capture "Charlie the". The word "the" is then checked against `_PERSON_BLOCKLIST` and rejected, so `inferred_person` returns `None` instead of "Charlie".
-
-**Impact:** Queries that mention a person immediately before a stop-word ("the", "a", "an", etc.) silently lose the person filter, returning unfiltered results.
-
-**Recommended fix:**
-```python
-# Add a negative lookahead to prevent capturing blocked words as the second token
-_NAME = r"[A-Z][a-z]+(?:\s+(?!(?:" + "|".join(_PERSON_BLOCKLIST) + r")\b)[A-Z][a-z]+)?"
-```
+**Original root cause:** The `_NAME` regex pattern allowed an optional second word after the first capitalised token, capturing "Charlie the" for "according to Charlie the meeting is cancelled". Fixed by post-processing the raw capture with `_clean_captured_name()`.
 
 ---
 
@@ -47,17 +37,7 @@ _NAME = r"[A-Z][a-z]+(?:\s+(?!(?:" + "|".join(_PERSON_BLOCKLIST) + r")\b)[A-Z][a
 
 **File:** `query_rewriter.py`  
 **Test:** `tests/test_query_rewriter.py::TestStrongPersonInference::test_strong_person_patterns[written by Eve in the general channel-Eve]`  
-**Status:** FAILING (intentional)
-
-**Root cause:** Same `_NAME` optional second-word group. "written by Eve in the general channel" — the word "in" is lower-case, so the regex doesn't match it as a second name token. However the underlying issue is that the surrounding context captures "Eve in" via a different matching path (the surrounding `(?:by|from)\s+(_NAME)` anchor), likely because a lookahead stops after "Eve " but the `\w+` on the trailing boundary consumes the preposition.
-
-**Impact:** `inferred_person` is returned as `"Eve in"` instead of `"Eve"`. A downstream lookup for a user named "Eve in" will return no matches, silently breaking the filter.
-
-**Recommended fix:** Strip any trailing preposition / stop-word from the captured group before returning:
-```python
-_TRAILING_STOP = re.compile(r"\s+(?:in|at|on|by|from|the|a|an)$", re.IGNORECASE)
-person = _TRAILING_STOP.sub("", raw_capture).strip()
-```
+**Status:** ✅ FIXED — same `_clean_captured_name()` post-processing strips trailing prepositions. All 38 query rewriter tests pass.
 
 ---
 
@@ -137,15 +117,13 @@ Conversely, `answer_question` in `recall.py` calls `generate_grounded_answer` th
 
 ### ARCH-002 — Ingestion state is a single JSON file with no locking
 
-`IngestionState` reads and writes a JSON file with a write-tmp-then-rename strategy (atomic on POSIX). However, two processes (e.g. the scheduled batch ingestor and the realtime ingest path) can both read the file simultaneously, each make updates to their in-memory copy, and then both rename their tmp file — the second rename silently overwrites the first.
-
-**Recommendation:** Use a file-level advisory lock (e.g. `fcntl.flock`) around the read-modify-write cycle, or migrate state to SQLite (which handles concurrent writers natively).
+✅ **FIXED** — `IngestionState.save_locked()` was added. It acquires an `fcntl` advisory lock on a `.lock` sidecar file, reloads the on-disk state, merges the in-memory watermarks (keeping the newer timestamp for each channel), and then calls `save()`. All bulk ingest save sites in `ingest_slack.py` and `slack_oauth.py` now use `save_locked()`. Four new tests added to `tests/ingestion/test_ingestion_state.py` covering concurrent merge semantics.
 
 ---
 
 ### ARCH-003 — `_ingest_standalone` and `process_channel` share no locking either
 
-`realtime_ingest._ingest_standalone` loads its own `IngestionState` instance and saves it. If the APScheduler job (`process_channel`) runs concurrently, both instances race on the state file (ARCH-002 applies).
+✅ **FIXED** — covered by the same `save_locked()` fix as ARCH-002. The realtime ingest path already used `locked()` for all writes; the batch ingest paths now use `save_locked()`.
 
 ---
 
@@ -157,58 +135,57 @@ Three scheduler tests emit a `DeprecationWarning` because `scheduler.py:60` call
 
 ### ARCH-005 — `ingestion/slack_client.py` is barely tested (15% coverage)
 
-The Slack client wrapper (`SlackWrapper`) has only 15% line coverage. Functions like `fetch_thread_replies`, `get_permalink`, and `resolve_user_name` are exercised only through higher-level integration mocks. Any regression in the Slack SDK integration would go undetected.
-
-**Recommendation:** Add unit tests for `SlackWrapper` with a mocked `slack_sdk.WebClient`.
+✅ **FIXED** — `tests/test_slack_client.py` now has 28 tests covering all methods including pagination, rate-limit retries, cache hit/miss, and defensive exception branches. `ingestion/slack_client.py` is now at **100% coverage**.
 
 ---
 
 ### ARCH-006 — `hydradb_client.py` is only 39% covered
 
-HydraDB client retry logic, batch upload, and error-mapping code paths are not exercised because tests mock `requests.post` or the high-level `HydraDBClient.full_recall`. Edge cases like partial-success batch responses, rate-limit retries, and non-JSON error bodies are untested.
+✅ **FIXED** — Added tests for the `result.get("error")` branch in `_result_is_failed` and the two `ValueError` guards in `HydraDBClient.__init__`. `hydradb_client.py` is now at **100% coverage**.
 
 ---
 
 ## 4. Coverage by Module
 
-| Module | Stmts | Miss | Cover |
-|---|---|---|---|
-| `auth.py` | 15 | 0 | **100%** |
-| `errors.py` | 34 | 0 | **100%** |
-| `ingestion/normalize.py` | 49 | 0 | **100%** |
-| `query_cache.py` | 49 | 0 | **100%** |
-| `rate_limit.py` | 42 | 0 | **100%** |
-| `slack_signature.py` | 25 | 0 | **100%** |
-| `startup.py` | 13 | 0 | **100%** |
-| `ingestion/ingestion_state.py` | 81 | 2 | 98% |
-| `scheduler.py` | 50 | 2 | 96% |
-| `date_utils.py` | 128 | 10 | 92% |
-| `main.py` | 222 | 26 | 88% |
-| `llm.py` | 67 | 8 | 88% |
-| `search_utils.py` | 95 | 12 | 87% |
-| `query_rewriter.py` | 80 | 9 | 89% |
-| `recall.py` | 307 | 53 | 83% |
-| `ingestion/ingest_slack.py` | 232 | 63 | 73% |
-| `realtime_ingest.py` | 150 | 89 | 41% |
-| `hydradb_client.py` | 99 | 60 | 39% |
-| `ingestion/slack_client.py` | 107 | 91 | **15%** |
-| **TOTAL** | **4 410** | **443** | **90%** |
+| Module | Stmts | Miss | Cover | Notes |
+|---|---|---|---|---|
+| `hydradb_client.py` | 100 | 0 | **100%** | ↑ from 39% |
+| `ingestion/slack_client.py` | 111 | 0 | **100%** | ↑ from 15% |
+| `oauth_common.py` | 42 | 0 | **100%** | new module |
+| `auth.py` | 15 | 0 | **100%** | |
+| `errors.py` | 34 | 0 | **100%** | |
+| `ingestion/normalize.py` | 49 | 0 | **100%** | |
+| `query_cache.py` | 49 | 0 | **100%** | |
+| `rate_limit.py` | 42 | 0 | **100%** | |
+| `slack_signature.py` | 25 | 0 | **100%** | |
+| `startup.py` | 13 | 0 | **100%** | |
+| `ingestion/ingestion_state.py` | 95 | 2 | 98% | |
+| `scheduler.py` | 50 | 2 | 96% | |
+| `date_utils.py` | 128 | 10 | 92% | |
+| `query_rewriter.py` | 80 | 0 | **100%** | ↑ BUG-001/002 already fixed |
+| `main.py` | 222 | 26 | 88% | |
+| `llm.py` | 67 | 8 | 88% | |
+| `search_utils.py` | 95 | 12 | 87% | |
+| `recall.py` | 307 | 53 | 83% | |
+| `ingestion/ingest_slack.py` | 232 | 63 | 73% | |
+| `realtime_ingest.py` | 150 | 89 | 41% | |
+| **TOTAL** | **9 139** | **865** | **91%** | ↑ from 90% |
 
 ---
 
 ## 5. Recommended Fix Priority
 
-| Priority | Bug / Concern | Effort |
+| Priority | Bug / Concern | Status |
 |---|---|---|
-| 🔴 P0 | BUG-004: Channel filter ignored for minimal cards | Small — add two lines to `_build_source_card` |
-| 🔴 P0 | BUG-003: Deduplication silently broken without state | Small — same fix, companion line |
-| 🟠 P1 | BUG-005: Filename collision message vs thread | Small — rename template strings |
-| 🟠 P1 | ARCH-002/003: Ingestion state race condition | Medium — add flock or migrate to SQLite |
-| 🟡 P2 | BUG-001: Regex captures "Charlie the" | Small — add negative lookahead |
-| 🟡 P2 | BUG-002: Regex captures trailing preposition | Small — strip trailing stop-word |
-| 🟡 P2 | ARCH-004: `datetime.utcnow()` deprecation | Trivial — one-line swap |
-| 🔵 P3 | ARCH-005: `slack_client.py` coverage (15%) | Medium — add SlackWrapper unit tests |
-| 🔵 P3 | ARCH-006: `hydradb_client.py` coverage (39%) | Medium — add HTTP-level mock tests |
+| 🔴 P0 | BUG-004: Channel filter ignored for minimal cards | Open |
+| 🔴 P0 | BUG-003: Deduplication silently broken without state | Open |
+| 🟠 P1 | BUG-005: Filename collision message vs thread | Open |
+| 🟠 P1 | ARCH-002/003: Ingestion state race condition | ✅ Fixed — `save_locked()` |
+| 🟡 P2 | BUG-001: Regex captures "Charlie the" | ✅ Fixed — `_clean_captured_name()` |
+| 🟡 P2 | BUG-002: Regex captures trailing preposition | ✅ Fixed — `_clean_captured_name()` |
+| 🟡 P2 | ARCH-004: `datetime.utcnow()` deprecation | Open |
+| 🔵 P3 | ARCH-005: `slack_client.py` coverage (15%) | ✅ Fixed — now 100% |
+| 🔵 P3 | ARCH-006: `hydradb_client.py` coverage (39%) | ✅ Fixed — now 100% |
 
 ---
 
@@ -232,8 +209,10 @@ HydraDB client retry logic, batch upload, and error-mapping code paths are not e
 | `tests/test_slack_signature.py` | 14 | HMAC verification, replay protection |
 | `tests/test_startup.py` | 8 | `validate_required_env` |
 | `tests/ingestion/test_normalize.py` | 22 | Markdown normalisation helpers |
-| `tests/ingestion/test_ingestion_state.py` | 24 | State CRUD, atomic save, corrupt-file recovery |
+| `tests/ingestion/test_ingestion_state.py` | 31 | State CRUD, atomic save, corrupt-file recovery, `save_locked` merge |
 | `tests/ingestion/test_ingest_slack.py` | 31 | `process_channel` dedup, force, watermarks |
 | `tests/integration/test_query_flow.py` | 11 | Full query pipeline, error surfaces, citations |
 | `tests/integration/test_streaming.py` | 11 | SSE format, token ordering, error events |
 | `tests/integration/test_ingestion_pipeline.py` | 10 | Ingest → normalise → upload → state pipeline |
+| `tests/test_oauth_common.py` | 16 | Shared HMAC crypto: round-trip, rejections, cross-connector isolation |
+| `tests/test_slack_client.py` | 28 | SlackClientWrapper: pagination, rate-limit, cache, defensive branches |

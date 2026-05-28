@@ -31,14 +31,9 @@ Email-body privacy:
 from __future__ import annotations
 
 import base64
-import hashlib
-import hmac
 import html
-import json
 import os
 import re
-import secrets
-import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
@@ -46,15 +41,14 @@ from urllib.parse import urlencode
 import requests
 
 from logging_config import get_logger
+from oauth_common import (
+    make_oauth_state as _core_make_state,
+    verify_oauth_state as _core_verify_state,
+)
 from observability import emit_dead_letter
 from retry import retry_with_backoff
 
 logger = get_logger(__name__)
-
-
-# OAuth state lifetime — five minutes is more than enough for the
-# Google consent screen.
-STATE_LIFETIME_SECONDS = 300
 
 # Minimal read-only Gmail scopes. We DO NOT request gmail.modify or
 # gmail.send -- Phase 8 is read-only. openid + email + profile give us
@@ -113,18 +107,9 @@ def gmail_oauth_configured() -> bool:
 # ---------------------------------------------------------------------- #
 # OAuth state — HMAC-signed token binding workspace_id + user_id + nonce
 # ---------------------------------------------------------------------- #
-# Same shape as slack_oauth.py; intentionally duplicated so the two
-# connectors stay independent (a bug in one shouldn't be able to
-# accidentally forge state for the other).
-
-def _b64url_encode(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
-
-
-def _b64url_decode(s: str) -> bytes:
-    padding = "=" * (-len(s) % 4)
-    return base64.urlsafe_b64decode(s + padding)
-
+# Thin wrappers around oauth_common. The shared crypto lives there so
+# a single fix applies to both Slack and Gmail; the connector-specific
+# secret lookup and fail-closed guard stay here.
 
 def make_oauth_state(workspace_id: str, user_id: str) -> str:
     """
@@ -135,16 +120,7 @@ def make_oauth_state(workspace_id: str, user_id: str) -> str:
     secret = _state_secret()
     if not secret:
         raise RuntimeError("GMAIL_OAUTH_STATE_SECRET is not set.")
-
-    payload = {
-        "workspace_id": workspace_id,
-        "user_id":      user_id,
-        "exp":          int(time.time()) + STATE_LIFETIME_SECONDS,
-        "nonce":        secrets.token_urlsafe(8),
-    }
-    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    sig = hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).digest()
-    return _b64url_encode(raw) + "." + _b64url_encode(sig)
+    return _core_make_state(secret, workspace_id, user_id)
 
 
 def verify_oauth_state(state: str) -> Optional[Dict[str, Any]]:
@@ -152,34 +128,7 @@ def verify_oauth_state(state: str) -> Optional[Dict[str, Any]]:
     Validate a state returned by Google. Returns the payload dict on
     success, None on any failure. Never raises -- callers branch on None.
     """
-    if not state or "." not in state:
-        return None
-    secret = _state_secret()
-    if not secret:
-        return None
-    try:
-        payload_b64, sig_b64 = state.split(".", 1)
-        raw = _b64url_decode(payload_b64)
-        sig = _b64url_decode(sig_b64)
-    except Exception:  # noqa: BLE001
-        return None
-
-    expected = hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).digest()
-    if not hmac.compare_digest(sig, expected):
-        return None
-    try:
-        payload = json.loads(raw.decode("utf-8"))
-    except Exception:  # noqa: BLE001
-        return None
-    if not isinstance(payload, dict):
-        return None
-
-    exp = payload.get("exp")
-    if not isinstance(exp, int) or exp < int(time.time()):
-        return None
-    if not payload.get("workspace_id") or not payload.get("user_id"):
-        return None
-    return payload
+    return _core_verify_state(_state_secret(), state)
 
 
 # ---------------------------------------------------------------------- #

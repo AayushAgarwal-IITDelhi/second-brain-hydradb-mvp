@@ -7,21 +7,22 @@ Branch reviewed: `slack_cleanup`
 
 ## Executive Summary
 
-**Overall score: 7.5 / 10**
+**Overall score: 8 / 10** *(updated after post-review hardening)*
 
 **Production readiness: Mostly Ready**
 
 The codebase is well-architected and demonstrates uncommon discipline for
 an MVP: startup validation, structured JSON logging, HMAC-signed OAuth
 state, per-route rate limiting, typed error hierarchy, dead-letter logging,
-Sentry integration, and 90% backend test coverage. Multi-tenancy is
+Sentry integration, and 90%+ backend test coverage. Multi-tenancy is
 properly enforced at both the ingestion and retrieval layers.
 
-The main risk areas before launch are documentation (README was Phase 1–2
-while the code is Phase 8), a small number of high-priority bugs documented
-in `TEST_REPORT.md`, and the ingestion state file having no file-level
-locking for concurrent access. Neither blocks launch on its own, but both
-should be addressed in the first post-launch sprint.
+Post-review hardening completed: ingestion state file locking is now
+cross-process-safe (`save_locked()` merges before writing), and
+`slack_client.py` is at 100% test coverage. The main remaining items are
+documentation polish (stale `TEST_REPORT.md` coverage figures), the OAuth
+state duplication between `slack_oauth.py` and `gmail_oauth.py`, and minor
+query rewriter regex bugs.
 
 ---
 
@@ -153,7 +154,7 @@ Fixed in the new README (moved to Optional / legacy section).
 | Ingestion state file has no cross-process lock (ARCH-002/003) | High | Small (add `filelock`) | Concurrent ingest can corrupt dedup watermarks |
 | OAuth state tokens are reusable (no dedupe table) | Medium | Medium | Low practical risk; single-user OAuth flows don't retry |
 | `slack_client.py` undertested (15% coverage) | Medium | Medium | Add happy-path + rate-limit tests |
-| OAuth state logic duplicated in `slack_oauth.py` and `gmail_oauth.py` | Medium | Medium | Extract to `oauth_common.py` |
+| ~~OAuth state logic duplicated in `slack_oauth.py` and `gmail_oauth.py`~~ | ~~Medium~~ | ~~Medium~~ | ✅ Extracted to `oauth_common.py` |
 | `App.jsx` monolithic (2,300 lines) | Medium | Large | Split into focused components; no urgency until new features are added |
 | `main.py` monolithic (1,700 lines) | Medium | Large | Same as above |
 | No frontend tests | Medium | Large | React Testing Library + Vitest; cover auth flow + query submission |
@@ -174,27 +175,38 @@ _None that block launch. The ingestion state race is the closest, but it
 requires a specific concurrent trigger pattern unlikely in single-user local
 deployments._
 
-### High (first post-launch sprint)
+### High (first post-launch sprint) — ✅ COMPLETE
 
-1. **ARCH-002/003** — Add file-level locking to `ingestion/ingestion_state.py`.
-   One-line fix with `filelock` (already in common use). Prevents silent
-   dedup corruption under concurrent ingest.
+1. ~~**ARCH-002/003**~~ **DONE** — Added `IngestionState.save_locked()` to
+   `ingestion/ingestion_state.py`. All bulk ingest save sites (`ingest_slack.py`,
+   `slack_oauth.py`) now use it. The realtime webhook path already used
+   `locked()` for writes. 4 new tests added (all pass).
 
-2. **ARCH-005** — Add unit tests for `ingestion/slack_client.py` covering
-   pagination, rate-limit back-off, and error paths. Currently 15% covered
-   and a common real-world failure point.
+2. ~~**ARCH-005**~~ **DONE** — `slack_client.py` was already at 95% coverage
+   (TEST_REPORT.md figure was stale). Added 3 additional tests covering
+   defensive exception branches; now at 100% (28/28 tests pass).
 
-### Medium (second sprint)
+### Medium (second sprint) — ✅ COMPLETE
 
-3. Extract shared OAuth state logic from `slack_oauth.py` and `gmail_oauth.py`
-   into `backend/oauth_common.py`. ~100 lines of duplicate crypto code.
+3. ~~**OAuth state extraction**~~ **DONE** — Shared crypto extracted to
+   `backend/oauth_common.py`. Both `slack_oauth.py` and `gmail_oauth.py`
+   now delegate to it via thin wrappers; each connector still owns its
+   own secret lookup and fail-closed guard. `tests/test_oauth_common.py`
+   covers the shared logic (16 tests: round-trip, all rejection cases,
+   cross-connector isolation). Duplicate ~100 LOC removed from both files.
 
 4. Add `oauth_state_used` table to deduplicate OAuth callback retries.
+   *(Still open — low practical risk for single-user flows.)*
 
-5. Fix `query_rewriter.py` regex bugs (BUG-001, BUG-002) — minor but
-   produces noisy inferred names for certain query phrasings.
+5. ~~**BUG-001, BUG-002 (`query_rewriter.py` regex)**~~ **Already fixed** —
+   `_clean_captured_name()` in `query_rewriter.py` already post-processes
+   captures and strips trailing stop-words and prepositions. All 38 query
+   rewriter tests pass. `TEST_REPORT.md` figures were stale.
 
-6. Increase `hydradb_client.py` coverage (39% → ≥70%).
+6. ~~**`hydradb_client.py` coverage**~~ **DONE** — Three new tests cover
+   the `result.get("error")` branch and the two `ValueError` guards in
+   `__init__`. Module is now at 100% (was reported at 39%; actual was 97%
+   before this sprint — `TEST_REPORT.md` was stale).
 
 ### Low (backlog)
 

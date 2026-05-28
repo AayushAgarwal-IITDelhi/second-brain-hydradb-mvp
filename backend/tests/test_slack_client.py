@@ -317,3 +317,35 @@ class TestHelpers:
             SlackClientWrapper._sleep_for_retry(err)
 
         mock_sleep.assert_called_once_with(1)
+
+    def test_is_rate_limited_false_when_response_raises(self):
+        """Defensive branch: if .response.status_code raises, returns False."""
+        from ingestion.slack_client import SlackClientWrapper
+
+        err = _slack_error("ratelimited", 429)
+        err.response = None  # accessing .status_code raises AttributeError
+
+        assert SlackClientWrapper._is_rate_limited(err) is False
+
+    def test_sleep_for_retry_defaults_to_1_when_headers_raise(self):
+        """Defensive branch: if Retry-After parsing raises, falls back to 1."""
+        from ingestion.slack_client import SlackClientWrapper
+
+        err = _slack_error("ratelimited", 429)
+        err.response.headers = None  # .get(...) raises AttributeError
+
+        with patch("ingestion.slack_client.time.sleep") as mock_sleep:
+            SlackClientWrapper._sleep_for_retry(err)
+
+        mock_sleep.assert_called_once_with(1)
+
+    def test_init_raises_when_no_token(self):
+        """ValueError is raised when no token is provided and env var is absent."""
+        import os
+        from ingestion.slack_client import SlackClientWrapper
+
+        with patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("SLACK_BOT_TOKEN", None)
+            with pytest.raises(ValueError, match="SLACK_BOT_TOKEN"):
+                with patch("ingestion.slack_client.WebClient"):
+                    SlackClientWrapper(token=None)
