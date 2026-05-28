@@ -41,65 +41,27 @@ All external systems (HydraDB, OpenAI, Slack API, filesystem state) are **fully 
 
 ---
 
-### BUG-003 · HIGH — Deduplication by stable key silently fails without ingestion state
+### BUG-003 — Deduplication by stable key silently fails without ingestion state
 
 **File:** `recall.py` → `dedupe_by_stable_key`  
 **Test:** `tests/test_recall_integration.py::TestPrepareRecallContext::test_deduplication_by_stable_key`  
-**Status:** FAILING (intentional)
-
-**Root cause:** `dedupe_by_stable_key` reads `source_card.get("stable_key")`. Minimal source cards — those built when HydraDB returns a chunk that has no match in the ingestion state file — only contain `{"index", "source", "score"}`. They never carry `stable_key`. As a result, all minimal cards have `stable_key = None`, which means they are all treated as unique and deduplication never fires.
-
-**Impact:** If HydraDB returns multiple chunks from the same original Slack message (e.g. because it was indexed twice with different `source_id` values), all copies will appear in the LLM context and in the UI sources list, inflating citations and token usage.
-
-**Recommended fix:** Promote `stable_key` from `chunk["metadata"]["stable_key"]` into the minimal source card:
-```python
-# In _build_source_card, minimal fallback branch:
-return {
-    "index":      index,
-    "source":     minimal_source,
-    "score":      score,
-    "stable_key": candidate_stable_key,   # already extracted above
-}
-```
+**Status:** ✅ Passing — `_build_source_card` already promotes `stable_key` from chunk metadata in the minimal fallback branch. The test passes without any `xfail` marker.
 
 ---
 
-### BUG-004 · HIGH — Channel filter ineffective for minimal source cards (xfail)
+### BUG-004 — Channel filter ineffective for minimal source cards
 
 **File:** `recall.py` → `_source_passes_filters`  
 **Test:** `tests/integration/test_query_flow.py::TestFullQueryPipeline::test_channel_filter_applied`  
-**Status:** xfailed (intentional)
-
-**Root cause:** `_source_passes_filters` only applies the channel guard when `isinstance(card_channel, str)`. Minimal source cards have no `"channel"` key, so `source_card.get("channel")` returns `None`, and the condition short-circuits — the source passes regardless of the requested channel filter.
-
-The chunk itself carries `chunk["metadata"]["channel"]`, but `_build_source_card` does not promote this field into the minimal card.
-
-**Impact:** When the ingestion state file is absent, empty, or doesn't recognise a returned chunk, the `channel=` query parameter is silently ignored. Users requesting channel-scoped answers receive results from all channels.
-
-**Recommended fix:** Promote `metadata.channel` into the minimal card (same fix as BUG-003 companion change):
-```python
-return {
-    "index":      index,
-    "source":     minimal_source,
-    "score":      score,
-    "stable_key": candidate_stable_key,
-    "channel":    _get_path(chunk, ("metadata", "channel")),
-}
-```
+**Status:** ✅ Passing — `_build_source_card` promotes `stable_key` and `channel` from raw chunk metadata in the minimal fallback path; the test passes without any `xfail` marker.
 
 ---
 
-### BUG-005 · LOW — Filename collision between standalone message and its thread (xfail)
+### BUG-005 — Filename collision between standalone message and its thread
 
 **File:** `ingestion/ingest_slack.py` → `build_message_file` / `build_thread_file`  
 **Test:** `tests/integration/test_ingestion_pipeline.py::TestNormalizationFidelity::test_filename_collision_between_message_and_thread`  
-**Status:** xfailed (intentional)
-
-**Root cause:** Both `build_message_file` and `build_thread_file` derive the filename from `slack_{channel_name}_{ts_int}.md`. For a message that is later replied to and becomes a thread, the standalone message file and the thread file share the same filename. When the thread file is uploaded it silently overwrites the standalone document in HydraDB.
-
-**Impact:** If a message is first ingested as standalone and later gains replies, incremental ingest writes a thread file with the same name, clobbering the original without updating the ingestion state's stable key mapping. This can cause stale citations.
-
-**Recommended fix:** Distinguish filenames: e.g. `slack_{channel}_msg_{ts}.md` vs `slack_{channel}_thread_{ts}.md`.
+**Status:** ✅ Passing — filenames use distinct `msg_` / `thread_` prefixes (`slack_{channel}_msg_{ts}.md` vs `slack_{channel}_thread_{ts}.md`), which eliminates the collision; the test passes without any `xfail` marker.
 
 ---
 
@@ -177,9 +139,9 @@ Three scheduler tests emit a `DeprecationWarning` because `scheduler.py:60` call
 
 | Priority | Bug / Concern | Status |
 |---|---|---|
-| 🔴 P0 | BUG-004: Channel filter ignored for minimal cards | Open |
-| 🔴 P0 | BUG-003: Deduplication silently broken without state | Open |
-| 🟠 P1 | BUG-005: Filename collision message vs thread | Open |
+| 🔴 P0 | BUG-004: Channel filter ignored for minimal cards | ✅ Fixed — test passes |
+| 🔴 P0 | BUG-003: Deduplication silently broken without state | ✅ Fixed — test passes |
+| 🟠 P1 | BUG-005: Filename collision message vs thread | ✅ Fixed — distinct `msg_`/`thread_` prefixes |
 | 🟠 P1 | ARCH-002/003: Ingestion state race condition | ✅ Fixed — `save_locked()` |
 | 🟡 P2 | BUG-001: Regex captures "Charlie the" | ✅ Fixed — `_clean_captured_name()` |
 | 🟡 P2 | BUG-002: Regex captures trailing preposition | ✅ Fixed — `_clean_captured_name()` |

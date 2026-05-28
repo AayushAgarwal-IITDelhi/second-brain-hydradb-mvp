@@ -159,8 +159,8 @@ Fixed in the new README (moved to Optional / legacy section).
 | `main.py` monolithic (1,700 lines) | Medium | Large | Same as above |
 | No frontend tests | Medium | Large | React Testing Library + Vitest; cover auth flow + query submission |
 | `supabase_client.py` monolithic (1,681 lines) | Low | Large | Functional; split by domain (auth, slack, gmail, chat) |
-| BUG-001: Person name regex captures trailing "the" (e.g. "Charlie the") | Low | Small | Fix regex in `query_rewriter.py` |
-| BUG-002: Person name regex captures trailing preposition | Low | Small | Same file |
+| ~~BUG-001: Person name regex captures trailing "the" (e.g. "Charlie the")~~ | ~~Low~~ | ~~Small~~ | ✅ Fixed — `_clean_captured_name()` in `query_rewriter.py` |
+| ~~BUG-002: Person name regex captures trailing preposition~~ | ~~Low~~ | ~~Small~~ | ✅ Fixed — same function |
 | BUG-004 (xfail): Channel filter ineffective for minimal source cards | Low | Medium | Only affects cards missing metadata |
 | BUG-005 (xfail): Filename collision between message and thread keys | Low | Small | Edge case |
 | `AuthContext.jsx` swallows session hydration errors silently | Low | Small | Show toast on Supabase auth failure |

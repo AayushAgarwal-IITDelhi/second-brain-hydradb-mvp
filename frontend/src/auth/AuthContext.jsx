@@ -17,6 +17,7 @@ const AuthContext = createContext(null);
 export function AuthProvider({ children }) {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [authError, setAuthError] = useState(null);
 
   useEffect(() => {
     let mounted = true;
@@ -29,8 +30,11 @@ export function AuthProvider({ children }) {
         setSession(data?.session ?? null);
         setLoading(false);
       })
-      .catch(() => {
-        if (mounted) setLoading(false);
+      .catch((err) => {
+        if (!mounted) return;
+        console.error("Supabase session hydration failed:", err);
+        setAuthError("Could not connect to authentication service. Please reload the page.");
+        setLoading(false);
       });
 
     // Stay in sync. Also fires on token refresh, so `accessToken`
@@ -53,6 +57,7 @@ export function AuthProvider({ children }) {
       user: session?.user ?? null,
       accessToken: session?.access_token ?? "",
       loading,
+      authError,
       async signIn(email, password) {
         const { error } = await supabase.auth.signInWithPassword({
           email,
@@ -72,7 +77,27 @@ export function AuthProvider({ children }) {
   );
 
   return (
-    <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+    <AuthContext.Provider value={value}>
+      {authError && !loading && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            background: "#fee2e2",
+            color: "#991b1b",
+            padding: "12px 16px",
+            textAlign: "center",
+            zIndex: 9999,
+            fontSize: "14px",
+          }}
+        >
+          🔒 {authError}
+        </div>
+      )}
+      {children}
+    </AuthContext.Provider>
   );
 }
 
