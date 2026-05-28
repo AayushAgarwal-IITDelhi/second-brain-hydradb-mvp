@@ -162,14 +162,22 @@ class TestRunAllWorkspacesOnce:
         with patch(
             "scheduler.list_active_workspaces_with_slack",
             return_value=[],
+        ), patch(
+            "scheduler.list_active_workspaces_with_gmail",
+            return_value=[],
         ):
             summary = run_all_workspaces_once()
-        assert summary == {
-            "workspaces_total":   0,
-            "workspaces_run":     0,
-            "workspaces_skipped": 0,
-            "workspaces_failed":  0,
-        }
+        # Slack-shaped legacy keys unchanged from Phase 4.
+        assert summary["workspaces_total"]   == 0
+        assert summary["workspaces_run"]     == 0
+        assert summary["workspaces_skipped"] == 0
+        assert summary["workspaces_failed"]  == 0
+        # Phase 11: Gmail summary lives under its own key so Slack
+        # consumers don't see new fields appearing in their loop.
+        assert "gmail" in summary
+        assert summary["gmail"]["connections_total"]  == 0
+        assert summary["gmail"]["connections_run"]    == 0
+        assert summary["gmail"]["connections_failed"] == 0
 
     def test_routes_each_workspace_to_its_own_sub_tenant(self):
         """

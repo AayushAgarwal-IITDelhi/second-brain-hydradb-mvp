@@ -228,6 +228,16 @@ export default function GmailSettings() {
   const connected = connections.length > 0;
   const busy = saving || ingesting || removing;
 
+  // Phase 11: render a "Last synced X ago" hint per active connection.
+  // The data comes from the enriched /api/gmail/connections response;
+  // we never make a separate fetch for this. Falls back to "Never
+  // synced" when no label has been processed yet.
+  const lastSyncedHint = useMemo(() => {
+    const ts = activeConn?.sync_summary?.last_synced_at;
+    if (!ts) return "Never synced";
+    return `Last synced ${formatRelativeTime(ts)}`;
+  }, [activeConn]);
+
   return (
     <section
       id="gmail-settings-panel"
@@ -240,6 +250,14 @@ export default function GmailSettings() {
           {connected
             ? `Connected as ${activeConn?.email || "Gmail"}. Pick labels to ingest.`
             : "Connect a Gmail account to ingest selected labels."}
+          {connected && (
+            <>
+              {" "}
+              <span className="slack-settings__muted">
+                ({lastSyncedHint})
+              </span>
+            </>
+          )}
         </span>
       </div>
 
@@ -440,4 +458,35 @@ function friendlyOauthError(reason) {
       ? `Gmail connection failed (${reason}).`
       : "Gmail connection failed.";
   }
+}
+/**
+ * Format an ISO 8601 timestamp as a short human-readable relative
+ * time ("2 min ago", "5 hours ago", "3 days ago"). Used by the
+ * Phase 11 "Last synced X ago" hint. Falls back to the raw value
+ * when parsing fails so the UI never shows "NaN".
+ */
+function formatRelativeTime(iso) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  const ms = Date.now() - date.getTime();
+  if (Number.isNaN(ms)) return iso;
+  if (ms < 0) return "just now";                // clock skew
+
+  const SEC = 1000;
+  const MIN = 60 * SEC;
+  const HOUR = 60 * MIN;
+  const DAY = 24 * HOUR;
+
+  if (ms < 30 * SEC)  return "just now";
+  if (ms < MIN)       return `${Math.floor(ms / SEC)} sec ago`;
+  if (ms < HOUR)      {
+    const n = Math.floor(ms / MIN);
+    return `${n} min ago`;
+  }
+  if (ms < DAY) {
+    const n = Math.floor(ms / HOUR);
+    return `${n} hour${n === 1 ? "" : "s"} ago`;
+  }
+  const n = Math.floor(ms / DAY);
+  return `${n} day${n === 1 ? "" : "s"} ago`;
 }

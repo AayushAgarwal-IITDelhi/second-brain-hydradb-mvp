@@ -100,6 +100,7 @@ from supabase_client import (  # noqa: E402
     ensure_workspace_sub_tenant,
     get_gmail_connection,
     get_gmail_connection_public,
+    get_gmail_connection_sync_summary,
     get_slack_installation,
     list_chat_messages,
     list_chat_sessions,
@@ -1544,12 +1545,34 @@ def gmail_connections_list(
     """
     List every Gmail connection in this workspace. The PUBLIC
     projection is used -- tokens are NEVER returned.
+
+    Phase 11: each connection is enriched with a `sync_summary`
+    sub-object carrying `{last_synced_at, labels_synced}`. The
+    timestamp is the most-recent `last_synced_at` across the
+    connection's per-label rows in gmail_ingestion_state; the
+    counter is how many labels have a recorded sync. The frontend
+    uses this to render "Last synced 5 min ago" without a second
+    round-trip. No tokens, no message ids, no PII.
     """
-    return {
-        "connections": list_gmail_connections_public(
-            workspace_id=workspace.workspace_id,
-        ),
-    }
+    connections = list_gmail_connections_public(
+        workspace_id=workspace.workspace_id,
+    )
+    enriched: List[Dict[str, Any]] = []
+    for conn in connections:
+        cid = conn.get("id") or ""
+        sync_summary: Dict[str, Any] = {
+            "last_synced_at": None, "labels_synced": 0,
+        }
+        if cid:
+            try:
+                sync_summary = get_gmail_connection_sync_summary(
+                    workspace_id=workspace.workspace_id,
+                    gmail_connection_id=cid,
+                )
+            except Exception:  # noqa: BLE001 -- never block listing
+                pass
+        enriched.append({**conn, "sync_summary": sync_summary})
+    return {"connections": enriched}
 
 
 @app.delete("/api/gmail/connections/{connection_id}")

@@ -205,6 +205,12 @@ class TestListConnections:
                     "token_expiry":   None,
                 },
             ],
+        ), patch(
+            "main.get_gmail_connection_sync_summary",
+            return_value={
+                "last_synced_at": "2025-02-01T12:00:00Z",
+                "labels_synced":  2,
+            },
         ):
             r = client.get(
                 "/api/gmail/connections", headers=jwt_auth_headers,
@@ -217,6 +223,10 @@ class TestListConnections:
         assert "access_token" not in rendered
         assert "refresh_token" not in rendered
         assert body["connections"][0]["email"] == "u@example.com"
+        # Phase 11: sync_summary enrichment is present and shape-stable.
+        sync = body["connections"][0]["sync_summary"]
+        assert sync["last_synced_at"] == "2025-02-01T12:00:00Z"
+        assert sync["labels_synced"]  == 2
 
     def test_empty_list_when_none(self, client, jwt_auth_headers):
         with patch(

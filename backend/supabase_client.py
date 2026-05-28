@@ -1061,6 +1061,197 @@ def list_active_workspaces_with_slack() -> List[Dict[str, Any]]:
         })
     return out
 
+
+# =====================================================================
+# Phase 11: scheduled Gmail ingestion.
+# =====================================================================
+# Mirrors list_active_workspaces_with_slack() in spirit but for Gmail.
+# One workspace can have MULTIPLE Gmail connections (personal mailbox
+# + shared inbox + ...), so the shape is one row per (workspace,
+# connection) instead of one row per workspace -- the scheduler
+# iterates connections, not workspaces, so each connection's failures
+# stay isolated.
+
+def list_active_workspaces_with_gmail() -> List[Dict[str, Any]]:
+    """
+    Return one row per active (workspace, Gmail connection) pair that
+    has BOTH a connection AND at least one selected label. Used by the
+    scheduler for the periodic Gmail sweep.
+
+    Shape:
+        [
+            {
+                "workspace_id":          str,
+                "hydradb_sub_tenant_id": str,
+                "connection": {                # full row WITH tokens
+                    "id":             str,
+                    "email":          str,
+                    "access_token":   str,     # may be expired -- _authed_request refreshes
+                    "refresh_token":  str,
+                    ...
+                },
+                "selected_label_ids":    List[str],
+            },
+            ...
+        ]
+
+    Connections with no selected labels are NOT returned -- there's
+    nothing for the scheduler to do for them. Connections that don't
+    join to an active workspace with a materialized sub_tenant_id are
+    also dropped (same defensive policy as the Slack version: we
+    never route to the global HydraDB bucket).
+    """
+    try:
+        client = get_supabase()
+
+        # Step 1: active workspaces -> sub_tenant_id.
+        ws_resp = (
+            client.table("workspaces")
+            .select("id, hydradb_sub_tenant_id, hydradb_status")
+            .eq("hydradb_status", "active")
+            .execute()
+        )
+        all_workspaces = getattr(ws_resp, "data", None) or []
+        if not all_workspaces:
+            return []
+
+        active_ws: Dict[str, str] = {}
+        for ws in all_workspaces:
+            wid = ws.get("id")
+            sub_tenant = (ws.get("hydradb_sub_tenant_id") or "").strip()
+            if wid and sub_tenant:
+                active_ws[wid] = sub_tenant
+
+        if not active_ws:
+            return []
+
+        # Step 2: all Gmail connections (tokens included -- this is
+        # service-role-only code, never reachable from a user request).
+        # Same shape get_gmail_connection returns.
+        conn_resp = (
+            client.table("gmail_connections")
+            .select("*")
+            .execute()
+        )
+        connections = getattr(conn_resp, "data", None) or []
+        if not connections:
+            return []
+
+        # Step 3: selected labels per connection.
+        label_resp = (
+            client.table("gmail_labels")
+            .select("gmail_connection_id, label_id")
+            .eq("is_selected", True)
+            .execute()
+        )
+        labels_by_conn: Dict[str, List[str]] = {}
+        for row in (getattr(label_resp, "data", None) or []):
+            cid = row.get("gmail_connection_id") or ""
+            lid = (row.get("label_id") or "").strip()
+            if cid and lid:
+                labels_by_conn.setdefault(cid, []).append(lid)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_list_active_workspaces_with_gmail_failed',
+            extra={'error': type(e).__name__},
+        )
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for conn in connections:
+        wid = conn.get("workspace_id")
+        if not wid or wid not in active_ws:
+            continue
+        cid = conn.get("id")
+        if not cid:
+            continue
+        labels = labels_by_conn.get(cid, [])
+        if not labels:
+            # No selected labels -- nothing to sync. Skip silently so
+            # the scheduler doesn't log "skipped" for every fresh
+            # Connect that hasn't picked any labels yet.
+            continue
+        out.append({
+            "workspace_id":          wid,
+            "hydradb_sub_tenant_id": active_ws[wid],
+            "connection":            conn,
+            "selected_label_ids":    labels,
+        })
+    return out
+
+
+def get_gmail_ingestion_state_map(
+    *, workspace_id: str, gmail_connection_id: str,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Return the per-label sync watermark map for one (workspace,
+    connection). Shape:
+
+        { label_id: {"last_history_id": str|None, "last_synced_at": str|None}, ... }
+
+    Empty dict when nothing is recorded yet (first sync ever). The
+    runner reads this to decide between incremental and full sync per
+    label.
+    """
+    if not workspace_id or not gmail_connection_id:
+        return {}
+    try:
+        client = get_supabase()
+        resp = (
+            client.table("gmail_ingestion_state")
+            .select("label_id, last_history_id, last_synced_at")
+            .eq("workspace_id", workspace_id)
+            .eq("gmail_connection_id", gmail_connection_id)
+            .execute()
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_get_gmail_ingestion_state_failed',
+            extra={
+                'workspace_id':  workspace_id,
+                'connection_id': gmail_connection_id,
+                'error':         type(e).__name__,
+            },
+        )
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for row in (getattr(resp, "data", None) or []):
+        lid = (row.get("label_id") or "").strip()
+        if not lid:
+            continue
+        out[lid] = {
+            "last_history_id": row.get("last_history_id"),
+            "last_synced_at":  row.get("last_synced_at"),
+        }
+    return out
+
+
+def get_gmail_connection_sync_summary(
+    *, workspace_id: str, gmail_connection_id: str,
+) -> Dict[str, Any]:
+    """
+    Lightweight UI projection: for one connection, return
+        {"last_synced_at": <max across labels or None>,
+         "labels_synced":  <count of labels with a non-null last_synced_at>}
+
+    Safe to surface publicly -- contains no tokens, no email body,
+    no message ids.
+    """
+    state = get_gmail_ingestion_state_map(
+        workspace_id=workspace_id,
+        gmail_connection_id=gmail_connection_id,
+    )
+    last: Optional[str] = None
+    synced_count = 0
+    for _lid, row in state.items():
+        ts = row.get("last_synced_at")
+        if ts:
+            synced_count += 1
+            if last is None or str(ts) > str(last):
+                last = ts
+    return {"last_synced_at": last, "labels_synced": synced_count}
+
+
 # =====================================================================
 # Phase 5: workspace-aware realtime Slack Events ingestion.
 # =====================================================================

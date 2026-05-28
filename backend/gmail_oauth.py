@@ -334,6 +334,14 @@ def _authed_request(
     retry. Returns (json, connection) where `connection` has been
     updated with the new access_token if a refresh occurred.
 
+    Phase 11: when a refresh happens we ALSO stamp the connection
+    dict with a sentinel `_token_refreshed=True`. The ingest runner
+    reads this at end-of-run and persists the new access_token back
+    to gmail_connections in ONE call regardless of how many requests
+    triggered refreshes. (Persisting per-request would cost a write
+    on every 401, and there can be many in a row right after an
+    access token expires.)
+
     Raises GmailApiError on persistent failure (so the ingest runner
     can dead-letter the job).
     """
@@ -345,6 +353,7 @@ def _authed_request(
             raise GmailApiError("Could not obtain Gmail access token.")
         access_token = refreshed["access_token"]
         connection["access_token"] = access_token
+        connection["_token_refreshed"] = True
 
     headers = {"Authorization": f"Bearer {access_token}"}
     try:
@@ -361,6 +370,7 @@ def _authed_request(
             raise GmailApiError("Gmail refresh failed (401).")
         access_token = refreshed["access_token"]
         connection["access_token"] = access_token
+        connection["_token_refreshed"] = True
         headers = {"Authorization": f"Bearer {access_token}"}
         try:
             resp = requests.request(
@@ -440,6 +450,143 @@ def list_message_ids_for_label(
         if not page_token:
             break
     return ids[:max_results]
+
+
+# ---------------------------------------------------------------------- #
+# Incremental sync (Phase 11)
+# ---------------------------------------------------------------------- #
+# Two helpers wrap the Gmail history API so the ingest runner can pull
+# only what changed since the last sync:
+#
+#   get_mailbox_profile -> users.getProfile
+#       Used on the very first sync (no last_history_id yet) to seed
+#       the watermark with the current high-water mark. After that we
+#       just call list_history_message_ids on each subsequent run.
+#
+#   list_history_message_ids -> users.history.list?historyTypes=messageAdded
+#       Returns the message ids that were ADDED (or labelAdded for the
+#       label we're tracking) since start_history_id. Limited to the
+#       given label so the deltas stay narrow. Returns a sentinel
+#       {"invalidated": True} on the 404 case Google emits when the
+#       watermark is older than ~7 days -- the runner then falls back
+#       to a full sync and clears the watermark.
+#
+# Both call _authed_request and inherit the 401-refresh + 429-retry
+# behavior. Neither requires new OAuth scopes -- gmail.readonly already
+# covers history.list.
+
+class GmailHistoryInvalidated(Exception):
+    """Raised internally when Gmail returns 404 for a history.list call.
+    The runner catches this, falls back to the listing path, and
+    clears the affected label's last_history_id."""
+
+
+def get_mailbox_profile(connection: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Fetch the mailbox profile. The interesting field is `historyId`,
+    used to seed last_history_id for incremental sync.
+
+    Shape: {"emailAddress": ..., "messagesTotal": int, "threadsTotal": int, "historyId": str}
+    """
+    data, _conn = _authed_request(
+        "GET",
+        "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+        connection,
+    )
+    return data or {}
+
+
+def list_history_message_ids(
+    connection: Dict[str, Any],
+    *,
+    start_history_id: str,
+    label_id: Optional[str] = None,
+    max_results: int = 100,
+) -> Dict[str, Any]:
+    """
+    Pull the delta since `start_history_id` and return:
+
+        {
+          "message_ids":      List[str],   # deduped, capped at max_results
+          "next_history_id":  str|None,    # the new high-water mark
+          "invalidated":      bool,        # True iff Gmail returned 404
+        }
+
+    `label_id` narrows the delta to one label so the runner can
+    process labels independently.
+
+    `invalidated`: Gmail garbage-collects history records after about
+    a week. A `last_history_id` older than that returns 404; we surface
+    that via the `invalidated` flag so the runner can fall back to a
+    full sync and reset the watermark.
+    """
+    if not start_history_id:
+        return {"message_ids": [], "next_history_id": None, "invalidated": False}
+
+    out_ids: List[str] = []
+    last_seen_history_id: Optional[str] = None
+    page_token: Optional[str] = None
+    seen: set = set()
+
+    while len(out_ids) < max_results:
+        params: Dict[str, Any] = {
+            "startHistoryId": str(start_history_id),
+            "historyTypes":   "messageAdded",
+            "maxResults":     min(500, max_results - len(out_ids)),
+        }
+        if label_id:
+            params["labelId"] = label_id
+        if page_token:
+            params["pageToken"] = page_token
+        try:
+            data, _conn = _authed_request(
+                "GET",
+                "https://gmail.googleapis.com/gmail/v1/users/me/history",
+                connection,
+                params=params,
+            )
+        except GmailApiError as e:
+            # 404 -> watermark too old. Surface invalidation so the
+            # caller can fall back. We detect 404 via the GmailApiError
+            # message which carries the status code; any non-404 error
+            # re-raises so the retry layer can deal with it.
+            msg = str(e)
+            if "HTTP 404" in msg:
+                return {
+                    "message_ids":     [],
+                    "next_history_id": None,
+                    "invalidated":     True,
+                }
+            raise
+
+        # Track the high-water mark even when no messages came back so
+        # we can advance the watermark and avoid re-scanning empty
+        # ranges next time.
+        new_history_id = (data or {}).get("historyId")
+        if new_history_id:
+            last_seen_history_id = str(new_history_id)
+
+        for entry in (data or {}).get("history") or []:
+            for added in entry.get("messagesAdded") or []:
+                m = added.get("message") or {}
+                mid = (m.get("id") or "").strip()
+                if mid and mid not in seen:
+                    seen.add(mid)
+                    out_ids.append(mid)
+                    if len(out_ids) >= max_results:
+                        break
+            if len(out_ids) >= max_results:
+                break
+
+        page_token = (data or {}).get("nextPageToken")
+        if not page_token:
+            break
+
+    return {
+        "message_ids":     out_ids[:max_results],
+        "next_history_id": last_seen_history_id,
+        "invalidated":     False,
+    }
 
 
 def fetch_message(
@@ -663,27 +810,56 @@ def run_workspace_gmail_ingest(
     label_ids: List[str],
     hydradb_sub_tenant_id: Optional[str] = None,
     max_messages: Optional[int] = None,
+    sync_mode: str = "auto",
 ) -> Dict[str, Any]:
     """
     Ingest the most recent messages from each selected label into the
-    workspace's HydraDB sub-tenant. Returns a small stats dict.
+    workspace's HydraDB sub-tenant. Returns a stats dict.
 
-    Behavior:
-      - Caps the total messages this run will pull at GMAIL_MAX_MESSAGES_PER_RUN
-        (or the explicit `max_messages` override). The cap is shared
-        across all labels in this call.
-      - Skips SPAM and TRASH labels even if explicitly selected, unless
-        the env GMAIL_ALLOW_SPAM_TRASH=true. Defensive default.
-      - On any permanent error per-label, emits a dead_letter event
-        but continues with other labels.
-      - Updates gmail_ingestion_state.last_synced_at for every label
-        we successfully processed (even if zero messages came back).
+    Phase 11 additions (incremental sync + observability):
+      - `sync_mode`:
+            "auto"        -> per label: incremental if a last_history_id
+                              exists, else full. (default; scheduler uses this)
+            "incremental" -> force history.list per label; if no
+                              last_history_id exists, behaves like "full"
+                              for that label and seeds the watermark.
+            "full"        -> force the legacy listing path. Used by the
+                              manual /api/gmail/ingest route so a user
+                              who clicked "Run ingest" always gets the
+                              most-recent N messages even if a recent
+                              run already advanced the watermark.
+
+      - If a Gmail history watermark is invalidated by Google (>= 7 days
+        old, returns 404), we log + clear the watermark + fall back to
+        the listing path for that label.
+
+      - A refreshed access_token is persisted back to gmail_connections
+        exactly once at end-of-run (whichever request triggered the
+        refresh stamps `connection["_token_refreshed"] = True`).
+
+      - Returns sync metadata: sync_mode_effective per label, total
+        duration_ms, refresh_token_used, incremental_label_count,
+        full_label_count, invalidations.
+
+    Behavior unchanged from Phase 8:
+      - Per-run cap (GMAIL_MAX_MESSAGES_PER_RUN) is shared across labels.
+      - SPAM/TRASH labels skipped unless GMAIL_ALLOW_SPAM_TRASH=true.
+      - Per-label permanent errors emit dead_letter and continue.
+      - gmail_ingestion_state.last_synced_at is stamped for every
+        label we successfully processed.
 
     The function returns a stats dict; it never raises to the caller.
     """
     from hydradb_client import HydraDBClient, summarize_upload_response  # noqa: PLC0415
-    from supabase_client import upsert_gmail_ingestion_state              # noqa: PLC0415
+    from supabase_client import (                                        # noqa: PLC0415
+        get_gmail_ingestion_state_map,
+        update_gmail_connection_tokens,
+        upsert_gmail_ingestion_state,
+    )
+    import time as _time                                                  # noqa: PLC0415
 
+    started_at = datetime.now(timezone.utc)
+    started_perf = _time.perf_counter()
     summary: Dict[str, Any] = {
         "labels_processed":   0,
         "labels_skipped":     0,
@@ -692,8 +868,19 @@ def run_workspace_gmail_ingest(
         "messages_uploaded":  0,
         "messages_failed":    0,
         "messages_skipped":   0,
+        # Phase 11 observability fields.
+        "sync_mode_requested":      sync_mode,
+        "sync_started_at":          started_at.isoformat(),
+        "sync_finished_at":         None,
+        "duration_ms":              0,
+        "refresh_token_used":       False,
+        "incremental_label_count":  0,
+        "full_label_count":         0,
+        "invalidations":            0,
+        "per_label":                [],     # one entry per label processed
     }
     if not label_ids:
+        summary["sync_finished_at"] = datetime.now(timezone.utc).isoformat()
         return summary
 
     refresh_token = (connection.get("refresh_token") or "").strip()
@@ -704,6 +891,7 @@ def run_workspace_gmail_ingest(
             error=RuntimeError("missing_refresh_token"),
             context={"connection_id": connection.get("id")},
         )
+        summary["sync_finished_at"] = datetime.now(timezone.utc).isoformat()
         return summary
 
     cap_total = max_messages if max_messages is not None else _max_messages_per_run()
@@ -725,13 +913,48 @@ def run_workspace_gmail_ingest(
     connection_id = connection.get("id")
     connection_email = (connection.get("email") or "").strip()
 
+    # Snapshot the access token we started with so we can detect a
+    # mid-run refresh and persist exactly once. _authed_request stamps
+    # connection["_token_refreshed"] = True when it refreshes; we also
+    # cross-check by comparing the access_token value so a stale
+    # sentinel can't lie.
+    initial_access_token = (connection.get("access_token") or "").strip()
+    connection.pop("_token_refreshed", None)
+
+    # Pull watermarks per label in ONE call. Empty dict for a fresh
+    # connection that has never been synced.
+    try:
+        state_map = get_gmail_ingestion_state_map(
+            workspace_id=workspace_id,
+            gmail_connection_id=connection_id,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "gmail_state_map_failed",
+            extra={
+                "workspace_id":  workspace_id,
+                "connection_id": connection_id,
+                "error":         type(e).__name__,
+            },
+        )
+        state_map = {}
+
+    # Seen-this-run set used to dedupe message ids if Gmail returns
+    # the same id under two labels in one sweep (rare but possible
+    # for cross-labeled messages).
+    seen_message_ids_this_run: set = set()
+
     logger.info(
         "gmail_ingest_start",
         extra={
-            "workspace_id":  workspace_id,
-            "connection_id": connection_id,
-            "label_count":   len(label_ids),
-            "cap_total":     cap_total,
+            "workspace_id":          workspace_id,
+            "connection_id":         connection_id,
+            "label_count":           len(label_ids),
+            "cap_total":             cap_total,
+            "sync_mode_requested":   sync_mode,
+            "labels_with_watermark": sum(
+                1 for v in state_map.values() if v.get("last_history_id")
+            ),
         },
     )
 
@@ -755,35 +978,129 @@ def run_workspace_gmail_ingest(
             summary["labels_skipped"] += 1
             continue
 
-        try:
-            message_ids = retry_with_backoff(
-                list_message_ids_for_label,
-                connection, label_id,
-                max_results=min(remaining, 100),
-                attempts=3,
-                initial_delay=0.5,
-                max_delay=4.0,
-                retry_on=(GmailApiError,),
-                op_name="gmail_list_messages",
-            )
-        except GmailApiError as e:
-            summary["labels_failed"] += 1
-            emit_dead_letter(
-                kind="gmail_ingest_label",
-                workspace_id=workspace_id,
-                error=e,
-                context={
-                    "connection_id": connection_id,
-                    "label_id":      label_id,
-                    "stage":         "list_messages",
-                },
-            )
-            continue
+        # Decide between incremental and full FOR THIS LABEL.
+        label_state = state_map.get(label_id) or {}
+        last_history_id = (label_state.get("last_history_id") or "").strip()
+
+        use_incremental = False
+        if sync_mode == "incremental":
+            use_incremental = bool(last_history_id)
+        elif sync_mode == "auto":
+            use_incremental = bool(last_history_id)
+        # sync_mode == "full" -> never use incremental.
+
+        message_ids: List[str] = []
+        new_history_id: Optional[str] = None
+        invalidated_this_label = False
+        effective_label_mode = "full"
+
+        if use_incremental:
+            try:
+                hist_result = retry_with_backoff(
+                    list_history_message_ids,
+                    connection,
+                    start_history_id=last_history_id,
+                    label_id=label_id,
+                    max_results=min(remaining, 100),
+                    attempts=3,
+                    initial_delay=0.5,
+                    max_delay=4.0,
+                    retry_on=(GmailApiError,),
+                    op_name="gmail_list_history",
+                )
+            except GmailApiError as e:
+                summary["labels_failed"] += 1
+                emit_dead_letter(
+                    kind="gmail_ingest_label",
+                    workspace_id=workspace_id,
+                    error=e,
+                    context={
+                        "connection_id": connection_id,
+                        "label_id":      label_id,
+                        "stage":         "list_history",
+                    },
+                )
+                continue
+
+            if hist_result.get("invalidated"):
+                # Watermark too old -- fall back to full listing and
+                # clear the stored last_history_id (we'll seed a fresh
+                # one below from the listing's high-water mark via
+                # getProfile).
+                invalidated_this_label = True
+                summary["invalidations"] += 1
+                logger.info(
+                    "gmail_history_invalidated",
+                    extra={
+                        "workspace_id":  workspace_id,
+                        "connection_id": connection_id,
+                        "label_id":      label_id,
+                    },
+                )
+                # Fall through to the full-listing path below.
+                use_incremental = False
+            else:
+                message_ids = hist_result.get("message_ids") or []
+                new_history_id = hist_result.get("next_history_id")
+                effective_label_mode = "incremental"
+
+        if not use_incremental:
+            # Full listing path. Same as Phase 8 behavior.
+            try:
+                message_ids = retry_with_backoff(
+                    list_message_ids_for_label,
+                    connection, label_id,
+                    max_results=min(remaining, 100),
+                    attempts=3,
+                    initial_delay=0.5,
+                    max_delay=4.0,
+                    retry_on=(GmailApiError,),
+                    op_name="gmail_list_messages",
+                )
+            except GmailApiError as e:
+                summary["labels_failed"] += 1
+                emit_dead_letter(
+                    kind="gmail_ingest_label",
+                    workspace_id=workspace_id,
+                    error=e,
+                    context={
+                        "connection_id": connection_id,
+                        "label_id":      label_id,
+                        "stage":         "list_messages",
+                    },
+                )
+                continue
+            effective_label_mode = "full"
+            # Seed a new high-water mark from the mailbox profile so
+            # the NEXT run can go incremental. Best-effort -- if this
+            # fails the next run just runs full again.
+            if new_history_id is None:
+                try:
+                    profile = retry_with_backoff(
+                        get_mailbox_profile,
+                        connection,
+                        attempts=2,
+                        initial_delay=0.5,
+                        max_delay=2.0,
+                        retry_on=(GmailApiError,),
+                        op_name="gmail_get_profile",
+                    )
+                    if profile and profile.get("historyId"):
+                        new_history_id = str(profile["historyId"])
+                except GmailApiError:
+                    new_history_id = None
+
+        # Dedupe across labels in this same run.
+        message_ids = [
+            mid for mid in message_ids
+            if mid and mid not in seen_message_ids_this_run
+        ]
 
         prepared: List[Dict[str, Any]] = []
         for mid in message_ids:
             if remaining <= 0:
                 break
+            seen_message_ids_this_run.add(mid)
             try:
                 msg = retry_with_backoff(
                     fetch_message,
@@ -832,13 +1149,14 @@ def run_workspace_gmail_ingest(
             summary["messages_uploaded"] += ok
             summary["messages_failed"] += max(0, len(prepared) - ok)
 
-        # Always touch the ingestion-state row so an operator can see
-        # which labels are warm, even if zero messages came back.
+        # Persist the ingestion-state row. Always stamp last_synced_at;
+        # advance last_history_id only when we have a fresh one.
         try:
             upsert_gmail_ingestion_state(
                 workspace_id=workspace_id,
                 gmail_connection_id=connection_id,
                 label_id=label_id,
+                last_history_id=new_history_id,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning(
@@ -852,13 +1170,67 @@ def run_workspace_gmail_ingest(
             )
 
         summary["labels_processed"] += 1
+        if effective_label_mode == "incremental":
+            summary["incremental_label_count"] += 1
+        else:
+            summary["full_label_count"] += 1
+        summary["per_label"].append({
+            "label_id":       label_id,
+            "mode":           effective_label_mode,
+            "invalidated":    invalidated_this_label,
+            "messages":       len(message_ids),
+            "new_history_id": new_history_id,
+        })
+
+    # Persist refreshed access token, if a refresh happened.
+    current_access_token = (connection.get("access_token") or "").strip()
+    refreshed = (
+        connection.get("_token_refreshed") is True
+        and current_access_token
+        and current_access_token != initial_access_token
+    )
+    if refreshed:
+        # Cross-workspace defense in depth: pass workspace_id explicitly.
+        try:
+            ok = update_gmail_connection_tokens(
+                connection_id=connection_id,
+                workspace_id=workspace_id,
+                access_token=current_access_token,
+            )
+        except Exception as e:  # noqa: BLE001
+            ok = False
+            logger.warning(
+                "gmail_token_persist_failed",
+                extra={
+                    "workspace_id":  workspace_id,
+                    "connection_id": connection_id,
+                    "error":         type(e).__name__,
+                },
+            )
+        summary["refresh_token_used"] = bool(ok)
+    # Always clear the sentinel so a future caller that reuses the
+    # same connection dict starts clean.
+    connection.pop("_token_refreshed", None)
+
+    finished_at = datetime.now(timezone.utc)
+    summary["sync_finished_at"] = finished_at.isoformat()
+    summary["duration_ms"] = int((_time.perf_counter() - started_perf) * 1000)
 
     logger.info(
         "gmail_ingest_complete",
         extra={
-            "workspace_id":  workspace_id,
-            "connection_id": connection_id,
-            **summary,
+            "workspace_id":             workspace_id,
+            "connection_id":            connection_id,
+            "duration_ms":              summary["duration_ms"],
+            "labels_processed":         summary["labels_processed"],
+            "labels_skipped":           summary["labels_skipped"],
+            "labels_failed":            summary["labels_failed"],
+            "messages_uploaded":        summary["messages_uploaded"],
+            "messages_failed":          summary["messages_failed"],
+            "incremental_label_count":  summary["incremental_label_count"],
+            "full_label_count":         summary["full_label_count"],
+            "invalidations":            summary["invalidations"],
+            "refresh_token_used":       summary["refresh_token_used"],
         },
     )
     return summary
