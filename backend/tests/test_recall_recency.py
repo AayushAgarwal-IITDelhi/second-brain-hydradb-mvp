@@ -305,11 +305,15 @@ class TestRealtimeBeatsSemantic:
 # Fallback behavior when recency intent fires but no Slack chunks exist
 # ---------------------------------------------------------------------- #
 class TestRecencyFallback:
-    def test_falls_back_to_semantic_when_only_non_slack_chunks(self):
-        """If the workspace has only email docs and the user asks for
-        the latest message, we don't want to drop the answer entirely
-        -- we fall back to semantic ranking so the question still
-        produces a response."""
+    def test_gmail_with_timestamp_participates_in_recency(self):
+        """Phase 10: a Gmail email WITH a parseable timestamp is a
+        valid recency candidate. "Latest message" + Gmail-only corpus
+        now returns the newest Gmail email via the recency path
+        (instead of silently falling back to semantic).
+
+        This is a deliberate behavior change from Phase 9 where the
+        rerank was Slack-only. See test_ranking_v2.py for the
+        Gmail-first tests that motivated this."""
         chunks = [
             _non_slack_chunk(
                 text="email subject: status update",
@@ -322,7 +326,29 @@ class TestRecencyFallback:
         ):
             result = _call("what is the latest message", top_k=1)
         assert result["ready"] is True
-        # Fallback path -> NOT "recency" mode in the response.
+        # NEW: Gmail email participates in recency rerank.
+        assert result["retrieval_mode"] == "recency"
+
+    def test_no_recency_eligible_chunks_falls_back_to_semantic(self):
+        """The "no eligible chunks" fallback is unchanged from Phase 9
+        in spirit -- it just covers a smaller set of cases now that
+        Gmail counts as eligible. Here we pass an unclassifiable chunk
+        (no document_type, no recognizable stable_key prefix) so
+        nothing qualifies for the recency rerank and semantic mode
+        wins."""
+        chunks = [{
+            "text":      "weird chunk with no source signals",
+            "score":     0.9,
+            "source_id": "weird-1",
+            "filename":  "weird-1.md",
+            "metadata":  {},  # no document_type, no stable_key
+        }]
+        with patch(
+            "hydradb_client.HydraDBClient.full_recall",
+            return_value={"chunks": chunks},
+        ):
+            result = _call("what is the latest message", top_k=1)
+        assert result["ready"] is True
         assert result["retrieval_mode"] != "recency"
 
     def test_slack_chunk_without_timestamp_falls_back(self):

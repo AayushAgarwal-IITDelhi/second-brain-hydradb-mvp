@@ -339,10 +339,12 @@ class TestRecencyStillWorksUnderSlackFilter:
 
     def test_gmail_only_under_recency_falls_back_to_semantic(self):
         # If the user asks for "latest message" but restricts to Gmail
-        # only, there are no Slack chunks to rerank by Slack ts. The
-        # pipeline must fall back to semantic ranking (existing
-        # _rerank_by_recency fallback contract) and NOT report mode
-        # "recency".
+        # only and the Gmail chunks have NO parseable timestamp (no
+        # Date header harvested, no `timestamp` in metadata), there
+        # are no recency-eligible candidates and the pipeline falls
+        # back to semantic mode. Phase 10 made Gmail eligible for
+        # recency in principle; the eligibility still depends on a
+        # timestamp being present.
         chunks = [
             _gmail_chunk(text="email A", source_id="ea", score=0.95),
             _gmail_chunk(text="email B", source_id="eb", score=0.30),

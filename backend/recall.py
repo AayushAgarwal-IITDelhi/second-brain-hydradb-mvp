@@ -19,7 +19,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hydradb_client import HydraDBClient
 from llm import generate_grounded_answer
@@ -400,18 +400,30 @@ def _build_source_card(
             if isinstance(chunk, dict) else None
         )
         # Last-resort: parse the markdown header body if metadata
-        # didn't carry the fields. The builder ALWAYS writes
-        # "Timestamp: <ts>" so this works for every legacy ingest.
+        # didn't carry the fields. We try Slack first (cheap regex
+        # against `# Slack Message` / `# Slack Thread`); if it's
+        # actually a Gmail doc, the Slack harvester returns {} and we
+        # try Gmail. Each harvester is a no-op on the other format.
+        gmail_fields: Dict[str, Any] = {}
         if chunk_timestamp is None or chunk_doc_type is None or not chunk_channel:
             body_text = _chunk_text(chunk) if isinstance(chunk, dict) else ""
-            harvested = _harvest_slack_header_fields(body_text)
+            slack_harvested = _harvest_slack_header_fields(body_text)
             if chunk_timestamp is None:
-                chunk_timestamp = harvested.get("timestamp")
+                chunk_timestamp = slack_harvested.get("timestamp")
             if chunk_doc_type is None:
-                chunk_doc_type = harvested.get("document_type")
+                chunk_doc_type = slack_harvested.get("document_type")
             if not chunk_channel:
-                chunk_channel = harvested.get("channel")
-        return {
+                chunk_channel = slack_harvested.get("channel")
+            # Gmail harvesting: only meaningful when the doc actually
+            # looks like an email. The harvester guards on `# Email`
+            # internally so this stays a no-op for Slack chunks.
+            if not slack_harvested:
+                gmail_fields = _harvest_gmail_header_fields(body_text)
+                if chunk_doc_type is None:
+                    chunk_doc_type = gmail_fields.get("document_type")
+                if chunk_timestamp is None and "timestamp" in gmail_fields:
+                    chunk_timestamp = gmail_fields["timestamp"]
+        card: Dict[str, Any] = {
             "index":         index,
             "source":        minimal_source,
             "score":         score,
@@ -420,6 +432,13 @@ def _build_source_card(
             "timestamp":     chunk_timestamp,
             "document_type": chunk_doc_type,
         }
+        # Attach Gmail-specific enrichments (sender, subject, labels,
+        # permalink) so the rankers can use them as boost signals.
+        # Stays on the card only when this chunk really is Gmail.
+        for k in ("subject", "from_name", "from_email", "labels", "permalink"):
+            if k in gmail_fields:
+                card[k] = gmail_fields[k]
+        return card
 
     # Rich source card backed by ingestion state.
     return {
@@ -470,6 +489,134 @@ def _harvest_slack_header_fields(body_text: str) -> Dict[str, Any]:
     m = _SLACK_DOC_HEADER_RE.search(body_text)
     if m:
         out["document_type"] = m.group(1).lower()  # "message" or "thread"
+    return out
+
+
+# ---------------------------------------------------------------------- #
+# Gmail markdown-header harvesting (Phase 10)
+# ---------------------------------------------------------------------- #
+# gmail_oauth.build_email_file emits a fixed header block for every
+# ingested email:
+#
+#   # Email
+#   Source Key: gmail:msg:<id>
+#   Message-Id: <id>
+#   Mailbox: <connection_email>
+#   Subject: <subject>
+#   From: <sender header>
+#   To: <to>
+#   Cc: <cc>                  (optional)
+#   Date: <RFC 2822 date>
+#   Labels: <comma-separated label ids>
+#   Snippet: <snippet>
+#   Permalink: <url>          (optional)
+#
+# We mirror the Slack harvester pattern: parse these lines back out so
+# the source card always has from_email / from_name / subject / labels
+# / timestamp / document_type populated, even when the ingestion-state
+# lookup misses. This is what powers the Gmail recency rerank below.
+_GMAIL_DOC_HEADER_RE     = re.compile(r"^#\s*Email\b", re.MULTILINE | re.IGNORECASE)
+_GMAIL_SUBJECT_RE        = re.compile(r"^Subject:\s*(.+)$", re.MULTILINE | re.IGNORECASE)
+_GMAIL_FROM_RE           = re.compile(r"^From:\s*(.+)$",    re.MULTILINE | re.IGNORECASE)
+_GMAIL_DATE_RE           = re.compile(r"^Date:\s*(.+)$",    re.MULTILINE | re.IGNORECASE)
+_GMAIL_LABELS_RE         = re.compile(r"^Labels:\s*(.+)$",  re.MULTILINE | re.IGNORECASE)
+_GMAIL_PERMALINK_RE      = re.compile(r"^Permalink:\s*(\S+)", re.MULTILINE | re.IGNORECASE)
+
+# Split "Display Name <user@example.com>" into the parts. The address
+# part is parsed without the angle brackets; if no `<...>` is present
+# we treat the whole string as the address and leave the name empty.
+_FROM_ADDR_RE = re.compile(r"<([^<>]+)>")
+
+
+def _parse_gmail_from(raw_from: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Parse a "Name <addr>" / "addr" / "Name" header into (name, addr).
+    Either part may be None; callers handle None gracefully. Names are
+    stripped of surrounding quotes and whitespace.
+    """
+    if not raw_from:
+        return None, None
+    s = raw_from.strip()
+    m = _FROM_ADDR_RE.search(s)
+    if m:
+        addr = m.group(1).strip() or None
+        name_part = (s[:m.start()] + s[m.end():]).strip().strip('"').strip()
+        name = name_part or None
+        return name, addr
+    # No angle brackets. Heuristic: if it looks like an email, treat as
+    # addr-only; otherwise treat the whole thing as a name.
+    if "@" in s and " " not in s:
+        return None, s
+    return s.strip('"').strip() or None, None
+
+
+def _parse_rfc2822_date_to_unix(date_str: str) -> Optional[float]:
+    """
+    Parse an RFC 2822 Date header ("Mon, 02 Sep 2024 13:45:00 +0000")
+    into unix seconds. Returns None on any failure -- the caller
+    treats a missing timestamp as "don't recency-sort this card".
+    """
+    if not date_str:
+        return None
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(date_str.strip())
+        if dt is None:
+            return None
+        return dt.timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _harvest_gmail_header_fields(body_text: str) -> Dict[str, Any]:
+    """
+    Parse the Gmail-doc markdown header (always written by
+    gmail_oauth.build_email_file) and return the fields that the
+    source-card builder needs:
+
+      - document_type: "email"
+      - subject:       string
+      - from_name:     parsed display name (or None)
+      - from_email:    parsed addr (or None)
+      - timestamp:     unix seconds from the Date header (float, or None)
+      - labels:        list[str] of label ids
+      - permalink:     string (or None)
+
+    Fields that aren't present in the header are simply omitted from
+    the returned dict.
+    """
+    out: Dict[str, Any] = {}
+    if not body_text:
+        return out
+    if not _GMAIL_DOC_HEADER_RE.search(body_text):
+        # Not a Gmail doc — bail early. This keeps the function safe
+        # to call unconditionally from the source-card builder.
+        return out
+    out["document_type"] = "email"
+
+    m = _GMAIL_SUBJECT_RE.search(body_text)
+    if m:
+        out["subject"] = m.group(1).strip()
+    m = _GMAIL_FROM_RE.search(body_text)
+    if m:
+        name, addr = _parse_gmail_from(m.group(1))
+        if name:
+            out["from_name"] = name
+        if addr:
+            out["from_email"] = addr
+    m = _GMAIL_DATE_RE.search(body_text)
+    if m:
+        ts = _parse_rfc2822_date_to_unix(m.group(1))
+        if ts is not None:
+            out["timestamp"] = ts
+    m = _GMAIL_LABELS_RE.search(body_text)
+    if m:
+        labels = [s.strip() for s in m.group(1).split(",") if s.strip()]
+        if labels:
+            out["labels"] = labels
+    m = _GMAIL_PERMALINK_RE.search(body_text)
+    if m:
+        out["permalink"] = m.group(1).strip()
     return out
 
 
@@ -736,14 +883,23 @@ def _source_passes_filters(
 # news" or "what's the most recent decision" continue to use semantic
 # recall. Boundary case "latest news" is pinned by an existing test.
 
-# Slack-message-like nouns. We DO NOT treat "decision" / "news" / "update"
-# as recency targets -- those are semantic-recall use cases.
+# Recency target nouns. Both Slack-message and Gmail-email nouns count
+# (Phase 10): the recency reranker is connector-agnostic and ranks any
+# candidate chunk that carries a parseable timestamp. We DO NOT treat
+# "decision" / "news" / "update" as recency targets -- those are
+# semantic-recall use cases.
 _RECENCY_TARGET_TOKENS = (
+    # Slack
     "message", "messages",
     "post", "posts",
     "chat", "chats",
     "ping", "pings",
     "slack",                # "latest in slack", "newest slack message"
+    # Gmail (Phase 10)
+    "email", "emails",
+    "mail", "mails",
+    "inbox",
+    "gmail",                # "latest in gmail", "newest gmail email"
 )
 
 # Recency cue words.
@@ -792,47 +948,76 @@ def _detect_recency_intent(question: str) -> bool:
 
 def _is_slack_message_card(card: Dict[str, Any]) -> bool:
     """
-    Heuristic: this source card came from a Slack message/thread
-    ingest. We check document_type first (set by build_message_file /
-    build_thread_file in ingestion.ingest_slack) and fall back to the
-    stable_key prefix.
+    Backwards-compatible: True iff the card came from a Slack
+    message / thread ingest. Used by tests + the Phase 1–9 surface
+    area. Recency reranking itself now uses _recency_source_kind()
+    below, which also returns "gmail" so emails participate.
     """
+    return _recency_source_kind(card) == "slack"
+
+
+def _recency_source_kind(card: Dict[str, Any]) -> Optional[str]:
+    """
+    Classify a source card for the recency reranker:
+
+      - "slack"  -> a Slack message/thread doc (timestamps == Slack ts)
+      - "gmail"  -> a Gmail email doc          (timestamps == Date header)
+      - None     -> unknown shape, exclude from the recency rerank
+
+    Heuristic order: document_type first (cheapest + most reliable),
+    stable_key prefix as a fallback. Mirrors _extract_source_kind in
+    spirit but is scoped to recency-eligible documents only (we want
+    `email` here, not just any Gmail doc that might exist in the
+    future).
+    """
+    if not isinstance(card, dict):
+        return None
     doc_type = card.get("document_type")
-    if isinstance(doc_type, str) and doc_type in ("message", "thread"):
-        return True
+    if isinstance(doc_type, str):
+        if doc_type in ("message", "thread"):
+            return "slack"
+        if doc_type == "email":
+            return "gmail"
     sk = card.get("stable_key")
-    if isinstance(sk, str) and sk.startswith("slack:"):
-        return True
-    # Pre-Phase-4 docs may carry no stable_key but a channel name.
-    # Not strong enough to count on its own.
-    return False
+    if isinstance(sk, str):
+        if sk.startswith("slack:"):
+            return "slack"
+        if sk.startswith("gmail:"):
+            return "gmail"
+    return None
 
 
 def _rerank_by_recency(
     chunks_with_meta: List[Dict[str, Any]], top_k: int,
 ) -> List[Dict[str, Any]]:
     """
-    Sort surviving chunks by Slack timestamp descending and cap at top_k.
+    Sort surviving recency-eligible chunks by timestamp DESC and cap
+    at top_k.
 
-    Slack-message chunks WITH a parseable timestamp dominate -- they're
-    the only candidates the user actually asked for. Chunks without a
-    timestamp are dropped from the recency result entirely; if no Slack
-    chunks survive, the caller falls back to semantic ranking.
+    Phase 10: both Slack-message and Gmail-email chunks participate.
+    Timestamp source per kind:
+      - Slack: chunk timestamp_float (Slack ts already in unix seconds)
+      - Gmail: timestamp_float harvested from the email's Date header
 
-    Returns a list with the same shape rerank_chunks would return (the
-    same dict keys: text, source_card, original_index, timestamp_float).
+    Chunks WITHOUT a parseable timestamp are dropped from the recency
+    result entirely; if no recency-eligible chunks survive, the
+    caller falls back to semantic ranking. This matches the original
+    "no Slack chunks -> fall back" contract; Gmail just expands the
+    set of eligible candidates.
+
+    Returns a list with the same shape rerank_chunks would return.
     """
-    slack_with_ts = [
+    eligible = [
         c for c in chunks_with_meta
-        if _is_slack_message_card(c["source_card"])
+        if _recency_source_kind(c["source_card"]) is not None
         and c.get("timestamp_float") is not None
     ]
-    if not slack_with_ts:
+    if not eligible:
         return []
-    slack_with_ts.sort(
+    eligible.sort(
         key=lambda c: c["timestamp_float"], reverse=True,
     )
-    return slack_with_ts[:top_k]
+    return eligible[:top_k]
 
 
 def prepare_recall_context(
@@ -1013,6 +1198,33 @@ def prepare_recall_context(
         'top_k': top_k,
     })
 
+    # Build a compact per-chunk ranking breakdown so test cases (and
+    # `DEBUG_RECALL=true` runs) can see *why* each surviving chunk
+    # ranked where it did. This is INTERNAL only -- main.py never
+    # forwards this field to the public API response, and tests read
+    # it directly off the prepare_recall_context return value. We
+    # never include row-level body text or any user-identifying free
+    # text here; only the source kind, the score breakdown, and the
+    # stable_key (already a public identifier).
+    rank_breakdown: List[Dict[str, Any]] = []
+    for i, chunk in enumerate(ranked, start=1):
+        card = chunk.get("source_card") or {}
+        entry: Dict[str, Any] = {
+            "rank":          i,
+            "source_kind":   _recency_source_kind(card),
+            "stable_key":    card.get("stable_key"),
+            "original_index": chunk.get("original_index"),
+            "timestamp":     chunk.get("timestamp_float"),
+            "score_breakdown": dict(chunk.get("_debug_score") or {}),
+            "retrieval_mode": retrieval_mode_effective,
+        }
+        rank_breakdown.append(entry)
+    if rank_breakdown:
+        logger.debug('recall_rank_breakdown', extra={
+            'mode':       retrieval_mode_effective,
+            'top_chunks': rank_breakdown[:5],   # cap to 5 to keep log volume sane
+        })
+
     if not ranked:
         first_chunk = chunks[0] if chunks else None
         first_chunk_keys = (
@@ -1057,6 +1269,11 @@ def prepare_recall_context(
         "retrieval_mode":   retrieval_mode_effective,
         "query_terms":      query_terms,
         "fallback_debug":   None,
+        # Phase 10: internal-only ranking breakdown for logs and
+        # tests. Never forwarded to the public API response (main.py
+        # builds its debug shape field-by-field rather than spreading
+        # this dict).
+        "rank_breakdown":   rank_breakdown,
     }
 
 
