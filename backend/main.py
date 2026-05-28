@@ -1253,16 +1253,21 @@ def slack_oauth_callback(
     return _redirect_with_status(frontend, "ok", row["slack_team_name"] or "")
 
 
-def _redirect_with_status(frontend: str, result: str, reason: str):
+def _oauth_redirect(frontend: str, connector: str, result: str, reason: str):
     """
     Build the post-callback redirect URL the user's browser lands on.
-    `reason` is included verbatim — never holds untrusted unbounded
-    input, since on success it's a Slack team name (already validated
-    by Slack) and on failure it's a short fixed code we choose.
+    `connector` is the query-param key (e.g. "slack_connect", "gmail_connect")
+    so the frontend can dispatch by connector type.
+    `reason` is never untrusted: on success it's a team name or email
+    (validated upstream); on failure it's a short fixed code we choose.
     """
     from fastapi.responses import RedirectResponse  # noqa: PLC0415
-    qs = urlencode_safely({"slack_connect": result, "reason": reason})
+    qs = urlencode_safely({connector: result, "reason": reason})
     return RedirectResponse(url=f"{frontend}/?{qs}", status_code=302)
+
+
+def _redirect_with_status(frontend: str, result: str, reason: str):
+    return _oauth_redirect(frontend, "slack_connect", result, reason)
 
 
 def urlencode_safely(d: Dict[str, str]) -> str:
@@ -1510,12 +1515,7 @@ def gmail_oauth_callback(
 
 
 def _gmail_redirect_with_status(frontend: str, result: str, reason: str):
-    """Same shape as the Slack callback redirect helper, separate
-    query-param name so a single frontend handler can dispatch by
-    connector."""
-    from fastapi.responses import RedirectResponse  # noqa: PLC0415
-    qs = urlencode_safely({"gmail_connect": result, "reason": reason})
-    return RedirectResponse(url=f"{frontend}/?{qs}", status_code=302)
+    return _oauth_redirect(frontend, "gmail_connect", result, reason)
 
 
 @app.get("/api/gmail/connections")

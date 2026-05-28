@@ -377,7 +377,7 @@ def _build_source_card(
         # render something even if state is missing or doesn't know the doc.
         # Also promote stable_key and channel from the raw chunk so that
         # dedupe_by_stable_key and _source_passes_filters work correctly even
-        # without a state-file entry. (BUG-003 / BUG-004 fix)
+        # without a state-file entry.
         #
         # Recency fix: ALSO promote `timestamp` and `document_type` so
         # the recency reranker can rank Slack messages by Slack ts even
