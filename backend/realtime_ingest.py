@@ -370,7 +370,7 @@ def _process_slack_payload_inner(payload: Dict[str, Any]) -> None:
         return
 
     workspace_id = (installation.get("workspace_id") or "").strip()
-    bot_token    = (installation.get("bot_token")    or "").strip()
+    bot_token = (installation.get("bot_token") or "").strip()
     if not workspace_id or not bot_token:
         logger.warning(
             'realtime_installation_incomplete',

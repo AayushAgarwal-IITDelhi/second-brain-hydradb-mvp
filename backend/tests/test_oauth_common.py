@@ -14,7 +14,7 @@ import pytest
 from oauth_common import make_oauth_state, verify_oauth_state
 
 SECRET = "test-secret-key-not-for-production"
-WS_ID  = "00000000-0000-0000-0000-000000000001"
+WS_ID = "00000000-0000-0000-0000-000000000001"
 USER_ID = "00000000-0000-0000-0000-000000000002"
 
 
@@ -27,7 +27,7 @@ class TestMakeAndVerify:
 
         assert payload is not None
         assert payload["workspace_id"] == WS_ID
-        assert payload["user_id"]      == USER_ID
+        assert payload["user_id"] == USER_ID
         assert payload["exp"] > int(time.time())
         assert "nonce" in payload
 

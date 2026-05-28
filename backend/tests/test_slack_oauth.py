@@ -30,7 +30,7 @@ class TestOauthState:
         payload = verify_oauth_state(token)
         assert payload is not None
         assert payload["workspace_id"] == TEST_WS_ID
-        assert payload["user_id"]      == TEST_USER_ID
+        assert payload["user_id"] == TEST_USER_ID
         assert payload["exp"] > int(time.time())
 
     def test_two_tokens_differ_due_to_nonce(self):
@@ -104,9 +104,9 @@ class TestBuildConnectUrl:
 
         qs = parse_qs(parsed.query)
         assert "client_id" in qs and qs["client_id"][0]
-        assert "scope"        in qs and qs["scope"][0]
+        assert "scope" in qs and qs["scope"][0]
         assert "redirect_uri" in qs and qs["redirect_uri"][0]
-        assert "state"        in qs and qs["state"][0]
+        assert "state" in qs and qs["state"][0]
 
     def test_state_in_url_is_verifiable(self):
         url = build_connect_url(
@@ -116,7 +116,7 @@ class TestBuildConnectUrl:
         payload = verify_oauth_state(state)
         assert payload is not None
         assert payload["workspace_id"] == TEST_WS_ID
-        assert payload["user_id"]      == TEST_USER_ID
+        assert payload["user_id"] == TEST_USER_ID
 
 
 # ── installation_from_oauth_response ─────────────────────────────────────
@@ -140,11 +140,11 @@ class TestProjectInstallation:
     def test_missing_fields_collapse_to_empty(self):
         row = installation_from_oauth_response({})
         assert row["slack_team_id"] == ""
-        assert row["bot_token"]     == ""
+        assert row["bot_token"] == ""
 
     def test_handles_missing_team_object(self):
         row = installation_from_oauth_response({"access_token": "xoxb-x"})
-        assert row["bot_token"]     == "xoxb-x"
+        assert row["bot_token"] == "xoxb-x"
         assert row["slack_team_id"] == ""
 
 
@@ -297,7 +297,7 @@ class TestUpsertSlackInstallationPayload:
                 data=exec_result or [{"id": "row-1"}],
             )
         upsert = MagicMock(return_value=MagicMock(execute=execute))
-        table  = MagicMock(return_value=MagicMock(upsert=upsert))
+        table = MagicMock(return_value=MagicMock(upsert=upsert))
         client = MagicMock(table=table)
         return client, upsert
 
@@ -319,7 +319,7 @@ class TestUpsertSlackInstallationPayload:
         # Inspect the payload the upsert was called with.
         args, kwargs = upsert.call_args
         sent = args[0]
-        assert "scope"  in sent
+        assert "scope" in sent
         assert "scopes" not in sent
         assert sent["scope"] == "channels:read,channels:history"
         assert kwargs.get("on_conflict") == "workspace_id"
@@ -404,7 +404,7 @@ class TestUpsertSlackInstallationPayload:
         assert len(records) == 1
         rec = records[0]
         # Real PostgREST error fields should be present.
-        assert getattr(rec, "pg_code")    == "PGRST204"
+        assert getattr(rec, "pg_code") == "PGRST204"
         assert "Could not find" in getattr(rec, "pg_message")
         assert "scope" in getattr(rec, "pg_hint")
         # The bot_token MUST NEVER appear anywhere in the log record.

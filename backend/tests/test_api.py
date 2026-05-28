@@ -198,6 +198,8 @@ class TestQueryAuth:
     # expired / wrong-signature / wrong-audience / malformed cases there.
 
 # ── /api/query/stream ─────────────────────────────────────────────────────
+
+
 class TestQueryStream:
     def test_no_key_returns_401(self, client):
         r = client.post("/api/query/stream", json={"question": "hello world"})

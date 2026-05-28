@@ -19,7 +19,7 @@ an explicit token + channel list instead of reading them from env.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 
 import requests
@@ -246,7 +246,7 @@ def list_slack_channels(bot_token: str) -> List[Dict[str, Any]]:
                     continue
                 # Slack returns topic/purpose as nested {value, creator,
                 # last_set} dicts. We only need the .value string.
-                topic_obj   = ch.get("topic")   or {}
+                topic_obj = ch.get("topic") or {}
                 purpose_obj = ch.get("purpose") or {}
                 # `num_members` may be missing on private channels the
                 # bot isn't a member of; default to 0 so we don't try to
@@ -258,14 +258,18 @@ def list_slack_channels(bot_token: str) -> List[Dict[str, Any]]:
                     member_count = 0
                 out.append({
                     "slack_channel_id": cid,
-                    "name":             (ch.get("name") or "").strip(),
-                    "is_archived":      bool(ch.get("is_archived")),
-                    "is_private":       bool(ch.get("is_private")),
-                    "member_count":     member_count,
-                    "topic":            (topic_obj.get("value") or "").strip()
-                                         if isinstance(topic_obj, dict) else "",
-                    "purpose":          (purpose_obj.get("value") or "").strip()
-                                         if isinstance(purpose_obj, dict) else "",
+                    "name": (ch.get("name") or "").strip(),
+                    "is_archived": bool(ch.get("is_archived")),
+                    "is_private": bool(ch.get("is_private")),
+                    "member_count": member_count,
+                    "topic": (
+                        (topic_obj.get("value") or "").strip()
+                        if isinstance(topic_obj, dict) else ""
+                    ),
+                    "purpose": (
+                        (purpose_obj.get("value") or "").strip()
+                        if isinstance(purpose_obj, dict) else ""
+                    ),
                 })
             cursor = (resp.get("response_metadata") or {}).get("next_cursor") or ""
             pages += 1

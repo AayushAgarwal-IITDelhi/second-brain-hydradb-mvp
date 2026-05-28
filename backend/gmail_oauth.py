@@ -589,10 +589,10 @@ def build_email_document(
     payload = message.get("payload") or {}
     headers = payload.get("headers") or []
     subject = _header_value(headers, "Subject") or "(no subject)"
-    sender  = _header_value(headers, "From")
-    to      = _header_value(headers, "To")
-    cc      = _header_value(headers, "Cc")
-    date    = _header_value(headers, "Date")
+    sender = _header_value(headers, "From")
+    to = _header_value(headers, "To")
+    cc = _header_value(headers, "Cc")
+    date = _header_value(headers, "Date")
     snippet = (message.get("snippet") or "").strip()
     label_ids = message.get("labelIds") or []
     body_text = _extract_text_from_payload(payload).strip()

@@ -100,7 +100,7 @@ class TestOauthCallback:
         )
         assert r.status_code == 302
         assert "gmail_connect=error" in r.headers["location"]
-        assert "access_denied"      in r.headers["location"]
+        assert "access_denied" in r.headers["location"]
 
     def test_missing_code_redirects_error(self, client):
         r = client.get(
@@ -214,7 +214,7 @@ class TestListConnections:
         # Defensive: tokens MUST NOT appear in the response body
         # anywhere, even as keys with null values.
         rendered = repr(body)
-        assert "access_token"  not in rendered
+        assert "access_token" not in rendered
         assert "refresh_token" not in rendered
         assert body["connections"][0]["email"] == "u@example.com"
 
@@ -341,9 +341,9 @@ class TestSaveLabels:
         assert r.status_code == 200
         assert r.json()["selected_count"] == 2
         kwargs = mock_save.call_args.kwargs
-        assert kwargs["workspace_id"]         == TEST_WS_ID
-        assert kwargs["gmail_connection_id"]  == "conn-1"
-        assert kwargs["selected_label_ids"]   == ["INBOX", "Label_5"]
+        assert kwargs["workspace_id"] == TEST_WS_ID
+        assert kwargs["gmail_connection_id"] == "conn-1"
+        assert kwargs["selected_label_ids"] == ["INBOX", "Label_5"]
 
     def test_saves_empty_set(self, client, jwt_auth_headers):
         with patch(
@@ -445,9 +445,9 @@ class TestRunIngest:
         assert body["labels_queued"] == 2
         mock_runner.assert_called_once()
         kwargs = mock_runner.call_args.kwargs
-        assert kwargs["workspace_id"]          == TEST_WS_ID
-        assert kwargs["connection"]["id"]      == "conn-1"
-        assert kwargs["label_ids"]             == ["INBOX", "Label_5"]
+        assert kwargs["workspace_id"] == TEST_WS_ID
+        assert kwargs["connection"]["id"] == "conn-1"
+        assert kwargs["label_ids"] == ["INBOX", "Label_5"]
         assert kwargs["hydradb_sub_tenant_id"] == "ws_test_abc"
 
     def test_no_connection_returns_400(self, client, jwt_auth_headers):
