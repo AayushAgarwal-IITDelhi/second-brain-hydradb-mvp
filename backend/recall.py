@@ -1462,6 +1462,12 @@ def answer_question(
             "debug": {"reason": "empty question"},
         }
 
+    # Phase 15: capture a coarse start timestamp so the analytics
+    # emit at the end of this function can report latency without
+    # needing the caller to time us.
+    import time as _t_init   # noqa: PLC0415
+    _start_ms = int(_t_init.perf_counter() * 1000)
+
     # IMPORTANT: retrieval uses only the current question. Conversation
     # history is intentionally NOT concatenated into the search query.
     prepared = prepare_recall_context(
@@ -1480,6 +1486,24 @@ def answer_question(
     )
 
     if not prepared["ready"]:
+        # Phase 15: emit retrieval_failure so the analytics view can
+        # surface empty-result patterns over time.
+        if workspace_id:
+            try:
+                from analytics_store import emit_event  # noqa: PLC0415
+                fallback_debug = prepared.get("fallback_debug") or {}
+                emit_event(
+                    workspace_id=workspace_id,
+                    kind="retrieval_failure",
+                    success=False,
+                    payload={
+                        "reason": str(fallback_debug.get("reason") or "no_chunks")[:200],
+                        "mode":   mode,
+                        "top_k":  top_k,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
         return {
             "answer": INSUFFICIENT_CONTEXT_ANSWER,
             "sources": [],
@@ -1500,7 +1524,7 @@ def answer_question(
     )
 
     history_used = bool(conversation_history)
-    return {
+    result = {
         "answer": finalized["answer"],
         "sources": finalized["cleaned_sources"],
         "debug": {
@@ -1518,3 +1542,44 @@ def answer_question(
             "history_turns":        len(conversation_history) if history_used else 0,
         },
     }
+
+    # Phase 15: emit a query_completed analytics event. Defensive:
+    # any analytics failure must NOT affect the answer (analytics is
+    # a fire-and-forget signal). We compute the per-event payload
+    # from data we already have here.
+    if workspace_id:
+        try:
+            import time as _t                                # noqa: PLC0415
+            from analytics_store import emit_event           # noqa: PLC0415
+            # The caller measured no latency; we approximate using the
+            # debug fields. For a more precise number we'd time the
+            # whole answer_question call, but the analytics consumer
+            # just needs an order-of-magnitude figure for stat trends.
+            sources_out = result["sources"] or []
+            source_kinds = sorted({
+                (s.get("source_kind") or _recency_source_kind(s) or "unknown")
+                for s in sources_out
+            })
+            memory_hit = any(
+                (s.get("memory_kind") or "") for s in sources_out
+            )
+            emit_event(
+                workspace_id=workspace_id,
+                kind="query_completed",
+                latency_ms=int(_t.perf_counter() * 1000) - _start_ms,
+                payload={
+                    "mode":           mode,
+                    "retrieval_mode": prepared.get("retrieval_mode", mode),
+                    "top_k":          top_k,
+                    "sources_count":  len(sources_out),
+                    "source_kinds":   source_kinds,
+                    "memory_hit":     bool(memory_hit),
+                    "history_used":   history_used,
+                },
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(
+                "analytics_query_emit_skipped",
+                extra={"error": type(e).__name__},
+            )
+    return result

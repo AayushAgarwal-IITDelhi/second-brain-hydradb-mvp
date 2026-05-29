@@ -1293,4 +1293,29 @@ def run_workspace_gmail_ingest(
             "refresh_token_used":       summary["refresh_token_used"],
         },
     )
+
+    # Phase 15: emit analytics. Defensive -- analytics failure must
+    # NOT affect the ingest summary.
+    try:
+        from analytics_store import emit_event   # noqa: PLC0415
+        emit_event(
+            workspace_id=workspace_id,
+            kind="ingest_completed",
+            source_kind="gmail",
+            latency_ms=summary["duration_ms"],
+            success=summary["labels_failed"] == 0,
+            payload={
+                "connection_id":           connection_id,
+                "labels_processed":        summary["labels_processed"],
+                "labels_failed":           summary["labels_failed"],
+                "messages_uploaded":       summary["messages_uploaded"],
+                "messages_failed":         summary["messages_failed"],
+                "incremental_label_count": summary["incremental_label_count"],
+                "full_label_count":        summary["full_label_count"],
+                "invalidations":           summary["invalidations"],
+                "sync_mode_requested":     summary["sync_mode_requested"],
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return summary

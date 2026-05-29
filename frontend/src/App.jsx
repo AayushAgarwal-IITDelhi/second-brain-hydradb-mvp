@@ -19,6 +19,7 @@ import {
 } from "./api.js";
 import SlackSettings from "./slack/SlackSettings.jsx";
 import GmailSettings from "./gmail/GmailSettings.jsx";
+import AnalyticsPanel from "./AnalyticsPanel.jsx";
 
 const MODES = [
   { value: "default",      label: "Default — concise answer" },
@@ -1118,6 +1119,8 @@ export default function App() {
   const [slackPanelOpen, setSlackPanelOpen] = useState(false);
   // Phase 8: Gmail settings panel. Same toggle pattern as Slack.
   const [gmailPanelOpen, setGmailPanelOpen] = useState(false);
+  // Phase 15: analytics panel.
+  const [analyticsPanelOpen, setAnalyticsPanelOpen] = useState(false);
 
   return (
     <div className="app">
@@ -1185,6 +1188,17 @@ export default function App() {
           >
             Gmail
           </button>
+          <button
+            type="button"
+            className={`btn btn--ghost ${analyticsPanelOpen ? "btn--active" : ""}`}
+            onClick={() => setAnalyticsPanelOpen((open) => !open)}
+            aria-expanded={analyticsPanelOpen}
+            aria-controls="analytics-panel"
+            disabled={submitting}
+            title="Workspace analytics: query stats, topics, insights"
+          >
+            Analytics
+          </button>
           <ArmedButton
             onConfirm={handleClearChat}
             label="Clear chat"
@@ -1218,6 +1232,10 @@ export default function App() {
       {slackPanelOpen && <SlackSettings />}
 
       {gmailPanelOpen && <GmailSettings />}
+
+      {analyticsPanelOpen && (
+        <AnalyticsPanel onClose={() => setAnalyticsPanelOpen(false)} />
+      )}
 
       {viewingSaved && (
         <SavedAnswerOverlay

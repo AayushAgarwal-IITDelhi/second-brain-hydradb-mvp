@@ -523,6 +523,55 @@ export function getWorkspaceStatus(signal) {
   return jsonFetch("/api/workspace/status", { signal });
 }
 
+
+// ----- Phase 15: analytics -----
+
+/**
+ * Aggregated query + ingest + retrieval-failure stats. `days`
+ * defaults to 7; backend clamps to [1, 90].
+ */
+export function getAnalyticsOverview(days, signal) {
+  const qs = days ? `?days=${encodeURIComponent(days)}` : "";
+  return jsonFetch(`/api/analytics/overview${qs}`, { signal });
+}
+
+/**
+ * Top entities + co-mentions + cluster count. `days` defaults to
+ * 30 (backend), `top_n` to 10.
+ */
+export function getAnalyticsTopics({ days, topN } = {}, signal) {
+  const params = new URLSearchParams();
+  if (days)  params.set("days",  String(days));
+  if (topN)  params.set("top_n", String(topN));
+  const qs = params.toString();
+  return jsonFetch(`/api/analytics/topics${qs ? "?" + qs : ""}`, { signal });
+}
+
+/**
+ * Chronological memory rows for an entity / kind. `kinds` can be
+ * an array; gets joined comma-separated for the query string.
+ */
+export function getAnalyticsTimeline(
+  { entity, kinds, days, limit } = {}, signal,
+) {
+  const params = new URLSearchParams();
+  if (entity) params.set("entity", entity);
+  if (kinds && kinds.length) params.set("kind", kinds.join(","));
+  if (days)  params.set("days",  String(days));
+  if (limit) params.set("limit", String(limit));
+  const qs = params.toString();
+  return jsonFetch(`/api/analytics/timeline${qs ? "?" + qs : ""}`, { signal });
+}
+
+/**
+ * Proactive insights: stale action items, dormant projects,
+ * surging entities, recurring patterns. All in one payload to
+ * keep the panel render to a single round-trip.
+ */
+export function getAnalyticsInsights(signal) {
+  return jsonFetch("/api/analytics/insights", { signal });
+}
+
 // ----- Slack Connect (Phase 3, workspace-scoped) -----
 
 /**

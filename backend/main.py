@@ -1414,6 +1414,125 @@ def workspace_status(
     return {"slack": slack_status, "gmail": gmail_status}
 
 
+# ---------- Phase 15: analytics ---------- #
+# Four read-only endpoints under /api/analytics. Each one delegates
+# to the analytics_store / analytics_intelligence layer, which is
+# workspace-scoped and degrades gracefully on Supabase failure.
+# None of these endpoints write -- they're pure projections over
+# data already on disk (analytics_events + extracted_memories).
+
+
+def _clamp_days(value: Any, default: int = 7, max_days: int = 90) -> int:
+    """Defensive parse of the ?days= query param."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(n, max_days))
+
+
+@app.get("/api/analytics/overview")
+def analytics_overview(
+    days: int = 7,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Combined query + ingest + retrieval-failure stats over the
+    configured window. The UI renders this as the top of the
+    analytics panel.
+    """
+    from analytics_store import (   # local import keeps boot fast
+        aggregate_query_stats,
+        aggregate_ingest_stats,
+        aggregate_retrieval_failure_stats,
+    )
+    safe_days = _clamp_days(days)
+    return {
+        "window_days":         safe_days,
+        "query":               aggregate_query_stats(
+            workspace_id=workspace.workspace_id, days=safe_days,
+        ),
+        "ingest":              aggregate_ingest_stats(
+            workspace_id=workspace.workspace_id, days=safe_days,
+        ),
+        "retrieval_failures":  aggregate_retrieval_failure_stats(
+            workspace_id=workspace.workspace_id, days=safe_days,
+        ),
+    }
+
+
+@app.get("/api/analytics/topics")
+def analytics_topics(
+    days: int = 30,
+    top_n: int = 10,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Top entities + their co-occurring entities (memory graph) plus
+    a cluster count. Drives the "Top Topics" card.
+    """
+    from analytics_intelligence import topic_overview
+    safe_days = _clamp_days(days, default=30)
+    safe_top = max(1, min(int(top_n or 10), 50))
+    return topic_overview(
+        workspace_id=workspace.workspace_id,
+        days=safe_days,
+        top_n=safe_top,
+    )
+
+
+@app.get("/api/analytics/timeline")
+def analytics_timeline(
+    entity: Optional[str] = None,
+    kind: Optional[str] = None,
+    days: int = 90,
+    limit: int = 50,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Chronological memory rows for one entity / kind. Used by the
+    timeline view when the user clicks a topic from the topics card.
+
+    `kind` accepts the same memory kinds as the /api/memories filter:
+    "action_item" | "decision" | "summary" | "entity". Multiple kinds
+    can be passed comma-separated.
+    """
+    from analytics_intelligence import reconstruct_timeline
+    kinds = None
+    if kind:
+        kinds = [k.strip() for k in kind.split(",") if k.strip()]
+    safe_days = _clamp_days(days, default=90, max_days=365)
+    safe_limit = max(1, min(int(limit or 50), 200))
+    rows = reconstruct_timeline(
+        workspace_id=workspace.workspace_id,
+        entity=entity,
+        kinds=kinds,
+        days=safe_days,
+        limit=safe_limit,
+    )
+    return {"rows": rows}
+
+
+@app.get("/api/analytics/insights")
+def analytics_insights(
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Combined proactive-intelligence payload:
+      stale action items, dormant projects, surging entities,
+      plus the recurring-pattern list. The UI renders these as
+      separate cards in the analytics panel.
+    """
+    from analytics_intelligence import (
+        proactive_insights, recurring_patterns,
+    )
+    insights = proactive_insights(workspace_id=workspace.workspace_id)
+    recurring = recurring_patterns(
+        workspace_id=workspace.workspace_id, days=7, min_mentions=3,
+    )
+    return {**insights, "recurring": recurring}
+
+
 # ---------- Slack Connect (Phase 3) ---------- #
 # Per-workspace Slack OAuth. The bot token Slack returns is stored in
 # Supabase (slack_installations.bot_token) and never echoed back to

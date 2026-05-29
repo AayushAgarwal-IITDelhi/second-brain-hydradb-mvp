@@ -485,6 +485,26 @@ def run_workspace_ingest(
             "skipped":            total_skipped,
         },
     )
+
+    # Phase 15: emit analytics. Defensive.
+    try:
+        from analytics_store import emit_event   # noqa: PLC0415
+        emit_event(
+            workspace_id=workspace_id,
+            kind="ingest_completed",
+            source_kind="slack",
+            success=total_failure == 0,
+            payload={
+                "channels_processed": processed,
+                "files_prepared":     total_files,
+                "messages_uploaded":  total_success,
+                "failures":           total_failure,
+                "skipped":            total_skipped,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
     return {
         "channels_processed": processed,
         "files_prepared":     total_files,
