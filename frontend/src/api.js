@@ -435,6 +435,94 @@ export function deleteSavedAnswer(id, signal) {
   );
 }
 
+// ----- Phase 13: share links + workspace status -----
+
+/**
+ * Mint a public share link for a saved answer. Returns
+ * {id, share_token, url, saved_answer_id, created_at}.
+ * The URL is suitable for direct rendering / copy-to-clipboard;
+ * the token alone authenticates the public read.
+ */
+export function shareSavedAnswer(savedId, signal) {
+  return jsonFetch(
+    `/api/saved-answers/${encodeURIComponent(savedId)}/share`,
+    { method: "POST", signal },
+  );
+}
+
+/**
+ * List active (non-revoked) shares for one saved answer. Returns
+ * {shares: [{id, share_token, url, created_at, expires_at, created_by}]}.
+ * The frontend uses this to badge already-shared answers and offer
+ * a Revoke button.
+ */
+export function listSharesForAnswer(savedId, signal) {
+  return jsonFetch(
+    `/api/saved-answers/${encodeURIComponent(savedId)}/shares`,
+    { signal },
+  );
+}
+
+/**
+ * Revoke a share link. Scoped server-side to the caller's user +
+ * workspace.
+ */
+export function revokeShareLink(token, signal) {
+  return jsonFetch(
+    `/api/saved-answers/share/${encodeURIComponent(token)}`,
+    { method: "DELETE", signal },
+  );
+}
+
+/**
+ * Fetch a publicly-shared answer by token. NO auth, NO workspace
+ * header -- the token itself is the credential. Returns
+ * {question, answer, sources, mode, created_at} or throws
+ * ApiError (404 collapses missing/revoked/expired).
+ *
+ * Implemented as a raw fetch (not via jsonFetch) because jsonFetch
+ * requires the auth + workspace headers we don't want to send here.
+ */
+export async function fetchPublicShare(token, signal) {
+  let response;
+  try {
+    response = await fetch(
+      `${API_BASE_URL}/api/shared/${encodeURIComponent(token)}`,
+      { method: "GET", signal },
+    );
+  } catch (err) {
+    if (isAbortError(err, signal)) throw err;
+    throw new ApiError(
+      `Could not reach the backend. Is it running on ${API_BASE_URL}?`,
+      { status: 0, errorType: "network_error" },
+    );
+  }
+  let data = null;
+  try { data = await response.json(); } catch { /* non-JSON */ }
+  if (!response.ok) {
+    throw new ApiError(messageForStatus(response.status, data), {
+      status: response.status,
+      errorType: (data && data.error_type) || "",
+    });
+  }
+  return data;
+}
+
+/**
+ * Lightweight workspace-level connector + sync snapshot. The
+ * frontend renders this in the connector hint bar; cheap enough
+ * to fetch on initial load and after each saved-answer / ingest
+ * action.
+ *
+ * Shape: {
+ *   slack: {connected, channels_selected, scheduler_enabled},
+ *   gmail: {connection_count, labels_selected, last_synced_at},
+ * }
+ */
+export function getWorkspaceStatus(signal) {
+  return jsonFetch("/api/workspace/status", { signal });
+}
+
 // ----- Slack Connect (Phase 3, workspace-scoped) -----
 
 /**

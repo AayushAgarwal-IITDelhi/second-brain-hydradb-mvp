@@ -474,6 +474,221 @@ def delete_saved_answer(
         return False
     return bool(getattr(resp, "data", []) or [])
 
+
+# =====================================================================
+# Phase 13: shared_links — public read-only share URLs for saved
+# answers. The `share_token` is an opaque random string minted by
+# secrets.token_urlsafe(32); see main.py for the routes.
+# =====================================================================
+
+def create_share_link(
+    *,
+    workspace_id: str,
+    saved_answer_id: str,
+    created_by: str,
+    share_token: str,
+    expires_at: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Insert a shared-link row. Returns the inserted row or None on
+    failure. The route is responsible for verifying that
+    saved_answer_id belongs to workspace_id BEFORE calling this --
+    we don't double-check here because the route already has the
+    workspace context and the FK enforces existence.
+    """
+    if not workspace_id or not saved_answer_id or not created_by or not share_token:
+        return None
+    row: Dict[str, Any] = {
+        "workspace_id":    workspace_id,
+        "saved_answer_id": saved_answer_id,
+        "created_by":      created_by,
+        "share_token":     share_token,
+    }
+    if expires_at:
+        row["expires_at"] = expires_at
+    try:
+        client = get_supabase()
+        resp = client.table("shared_links").insert(row).execute()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_create_share_link_failed',
+            extra={
+                'workspace_id': workspace_id,
+                'error':        type(e).__name__,
+            },
+        )
+        return None
+    rows = getattr(resp, "data", None) or []
+    return rows[0] if rows else None
+
+
+def get_share_link_by_token(*, share_token: str) -> Optional[Dict[str, Any]]:
+    """
+    PUBLIC read path: look up a share link by its token. Returns
+    the full row or None when:
+      - the token doesn't exist
+      - the link has been revoked (revoked_at is not null)
+      - the link has expired (expires_at < now())
+
+    The "not found" semantics intentionally collapse all three so
+    an attacker probing tokens can't distinguish "wrong" from
+    "revoked" from "expired".
+    """
+    if not share_token:
+        return None
+    try:
+        client = get_supabase()
+        resp = (
+            client.table("shared_links")
+            .select("*")
+            .eq("share_token", share_token)
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_get_share_link_failed',
+            extra={'error': type(e).__name__},
+        )
+        return None
+    rows = getattr(resp, "data", None) or []
+    if not rows:
+        return None
+    row = rows[0]
+    if row.get("revoked_at"):
+        return None
+    expires_at = row.get("expires_at")
+    if expires_at:
+        # Compare as ISO strings (lexical comparison is correct for
+        # ISO 8601 with the same timezone offset). For robust
+        # cross-timezone handling we'd parse, but our backend always
+        # writes UTC ISO strings.
+        try:
+            from datetime import datetime, timezone
+            exp = datetime.fromisoformat(
+                expires_at.replace("Z", "+00:00")
+            )
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) > exp:
+                return None
+        except (TypeError, ValueError):
+            # Bad timestamp on the row -> treat as expired/invalid.
+            return None
+    return row
+
+
+def get_saved_answer(
+    *, saved_id: str, workspace_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Fetch one saved answer by id. When workspace_id is supplied the
+    lookup is also bound to it (defense-in-depth). The public share
+    route uses this WITHOUT a user_id filter because the share token
+    itself is the credential; the route still pins workspace_id from
+    the share_link row so a leaked token can never read another
+    workspace's data.
+    """
+    if not saved_id:
+        return None
+    try:
+        client = get_supabase()
+        q = (
+            client.table("saved_answers")
+            .select(
+                "id, workspace_id, question, answer, sources, mode, "
+                "created_at"
+            )
+            .eq("id", saved_id)
+        )
+        if workspace_id:
+            q = q.eq("workspace_id", workspace_id)
+        resp = q.limit(1).execute()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_get_saved_answer_failed',
+            extra={'error': type(e).__name__},
+        )
+        return None
+    rows = getattr(resp, "data", None) or []
+    return rows[0] if rows else None
+
+
+def list_share_links_for_workspace(
+    *, workspace_id: str, user_id: Optional[str] = None,
+    saved_answer_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    List shared links in a workspace, newest first. Filter by
+    user_id (== created_by) when the UI wants only the caller's own
+    shares; filter by saved_answer_id when the UI wants "is THIS
+    answer currently shared?". Always workspace-scoped.
+    """
+    if not workspace_id:
+        return []
+    try:
+        client = get_supabase()
+        q = (
+            client.table("shared_links")
+            .select(
+                "id, share_token, saved_answer_id, created_by, "
+                "expires_at, revoked_at, created_at"
+            )
+            .eq("workspace_id", workspace_id)
+        )
+        if user_id:
+            q = q.eq("created_by", user_id)
+        if saved_answer_id:
+            q = q.eq("saved_answer_id", saved_answer_id)
+        resp = q.order("created_at", desc=True).limit(100).execute()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_list_share_links_failed',
+            extra={
+                'workspace_id': workspace_id,
+                'error':        type(e).__name__,
+            },
+        )
+        return []
+    return list(getattr(resp, "data", []) or [])
+
+
+def revoke_share_link(
+    *,
+    share_token: str,
+    workspace_id: str,
+    user_id: str,
+) -> bool:
+    """
+    Revoke a share by setting revoked_at = now(). Scoped to
+    (workspace_id, created_by) so one user can't revoke another's
+    share. Returns True when at least one row was updated.
+
+    Idempotent: revoking an already-revoked link is a no-op success.
+    """
+    if not share_token or not workspace_id or not user_id:
+        return False
+    try:
+        client = get_supabase()
+        resp = (
+            client.table("shared_links")
+            .update({"revoked_at": "now()"})
+            .eq("share_token", share_token)
+            .eq("workspace_id", workspace_id)
+            .eq("created_by", user_id)
+            .execute()
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            'supabase_revoke_share_failed',
+            extra={
+                'workspace_id': workspace_id,
+                'error':        type(e).__name__,
+            },
+        )
+        return False
+    return bool(getattr(resp, "data", []) or [])
+
 # =====================================================================
 # Phase 3: Slack installations + Slack channels.
 # =====================================================================

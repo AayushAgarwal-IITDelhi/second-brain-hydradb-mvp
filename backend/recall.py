@@ -1032,6 +1032,7 @@ def prepare_recall_context(
     metadata_bias: Optional[Dict[str, str]] = None,
     hydradb_sub_tenant_id: Optional[str] = None,
     allowed_sources: Optional[List[str]] = None,
+    workspace_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run HydraDB recall and build the LLM-ready context + parallel sources.
@@ -1163,7 +1164,108 @@ def prepare_recall_context(
             "timestamp_float": _coerce_to_unix_seconds(source_card.get("timestamp")),
         })
 
-    # ---- Step 2: dedupe by stable_key BEFORE ranking ----
+    # ---- Step 1.5: fold structured memory candidates into the pool ----
+    # Phase 12: extracted memories (action items, decisions, summaries,
+    # entities) live in `extracted_memories`. We pull a small batch
+    # matching the question and add them as candidates with the SAME
+    # shape as HydraDB chunks so the existing reranker treats them
+    # uniformly. Memories are AUGMENTATION -- they share the keyword-
+    # hit + metadata-bias signals with HydraDB chunks but never
+    # participate in the recency rerank (we don't want a 6-month-old
+    # decision outranking today's Slack message when the user asks
+    # "latest message"). The memory layer fails gracefully: a Supabase
+    # outage degrades to no memories but never blocks the answer.
+    memory_candidates: List[Dict[str, Any]] = []
+    if workspace_id and not recency_intent:
+        try:
+            # Defer the import so the test suite can mock at the
+            # memory_store boundary without forcing this module to
+            # eagerly construct a Supabase client at import time.
+            from memory_store import list_memories  # noqa: PLC0415
+            memory_rows = list_memories(
+                workspace_id=workspace_id,
+                # Pull from every kind by default; the question-text
+                # filter narrows down to relevant content.
+                query=question.strip() or None,
+                limit=10,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(
+                "memory_lookup_skipped",
+                extra={
+                    "workspace_id": workspace_id,
+                    "error":        type(e).__name__,
+                },
+            )
+            memory_rows = []
+        memory_start_index = len(chunks_with_meta) + 1
+        for offset, row in enumerate(memory_rows):
+            content = (row.get("content") or "").strip()
+            if not content:
+                continue
+            kind = (row.get("kind") or "").strip()
+            source_kind = row.get("source_kind")
+            source_stable_key = row.get("source_stable_key") or ""
+            source_ts = row.get("source_timestamp")
+            ts_float = _coerce_to_unix_seconds(source_ts) if source_ts else None
+            # Build a memory-flavored source card. The `source_kind`
+            # field carries the ORIGINAL connector ("slack"/"gmail")
+            # so existing source-filter logic keeps working --
+            # asking for slack-only correctly includes Slack-derived
+            # memories. We also stamp `memory_kind` for downstream
+            # consumers / log lines.
+            card: Dict[str, Any] = {
+                "index":        memory_start_index + offset,
+                "source":       source_stable_key or f"memory:{kind}",
+                "score":        0.5,                    # neutral semantic baseline
+                "stable_key":   source_stable_key,
+                "source_kind":  source_kind,
+                "document_type": f"memory_{kind}" if kind else "memory",
+                "memory_kind":  kind,
+                "memory_id":    row.get("id"),
+                "timestamp":    source_ts,
+                "owner":        row.get("owner") or None,
+                "entity_type":  row.get("entity_type") or None,
+            }
+            # Friendly LLM-facing text: prepend a small kind tag so
+            # the model knows it's reading structured memory and not
+            # raw conversation.
+            prefix = {
+                "action_item": "Action item",
+                "decision":    "Decision",
+                "summary":     "Summary",
+                "entity":      "Entity",
+            }.get(kind, "Memory")
+            owner = card.get("owner")
+            text_block = (
+                f"[{prefix}{' (owner: ' + owner + ')' if owner else ''}] "
+                f"{content}"
+            )
+            memory_candidates.append({
+                "text":            text_block,
+                "source_card":     card,
+                "original_index":  card["index"],
+                "timestamp_float": ts_float,
+            })
+
+    if memory_candidates:
+        # Apply the same workspace-scoped filters (channel/user/etc.)
+        # to memory candidates. Most memories carry no `channel` so
+        # the don't-silently-drop rule lets them through any channel
+        # filter; the source filter does honor them (e.g. slack-only
+        # gets memory rows where source_kind=="slack").
+        kept: List[Dict[str, Any]] = []
+        for mc in memory_candidates:
+            if _source_passes_filters(
+                mc["source_card"], channel, user, document_type,
+                start_unix, end_unix,
+                allowed_sources=normalized_sources,
+            ):
+                kept.append(mc)
+            else:
+                filtered_out += 1
+        chunks_with_meta.extend(kept)
+
     # Same Slack message that resurfaces twice in recall shouldn't get
     # twice the ranking boost.
     chunks_with_meta = dedupe_by_stable_key(chunks_with_meta)
@@ -1318,6 +1420,7 @@ def answer_question(
     metadata_bias: Optional[Dict[str, str]] = None,
     hydradb_sub_tenant_id: Optional[str] = None,
     allowed_sources: Optional[List[str]] = None,
+    workspace_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     End-to-end recall + grounded answer.
@@ -1373,6 +1476,7 @@ def answer_question(
         metadata_bias=metadata_bias,
         hydradb_sub_tenant_id=hydradb_sub_tenant_id,
         allowed_sources=allowed_sources,
+        workspace_id=workspace_id,
     )
 
     if not prepared["ready"]:

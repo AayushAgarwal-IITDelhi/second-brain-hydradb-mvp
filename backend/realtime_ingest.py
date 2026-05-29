@@ -449,10 +449,12 @@ def _process_slack_payload_inner(payload: Dict[str, Any]) -> None:
     if is_reply:
         _ingest_thread(
             slack, hydra, channel_id, channel_name, thread_ts, event,
+            workspace_id=workspace_id,
         )
     else:
         _ingest_standalone(
             slack, hydra, channel_id, channel_name, event,
+            workspace_id=workspace_id,
         )
 
 
@@ -465,6 +467,8 @@ def _ingest_standalone(
     channel_id: str,
     channel_name: str,
     message: Dict[str, Any],
+    *,
+    workspace_id: str = "",
 ) -> None:
     """Build + upload a single standalone-message doc."""
     ts = message.get("ts", "")
@@ -508,6 +512,21 @@ def _ingest_standalone(
             state.set_last_synced_ts(channel_id, ts)
             state.touch_last_ingested()
 
+    # Phase 12: extract structured memory. Realtime path mirrors the
+    # batch ingest hook -- any failure here MUST NOT block ingestion.
+    if workspace_id:
+        try:
+            _extract_memory_from_prepared(workspace_id, prepared)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "realtime_memory_extract_failed",
+                extra={
+                    "workspace_id": workspace_id,
+                    "stable_key":   stable_key,
+                    "error":        type(e).__name__,
+                },
+            )
+
 
 def _ingest_thread(
     slack: SlackClientWrapper,
@@ -516,6 +535,8 @@ def _ingest_thread(
     channel_name: str,
     thread_ts: str,
     triggering_event: Dict[str, Any],
+    *,
+    workspace_id: str = "",
 ) -> None:
     """
     Fetch the full thread (parent + all replies) and re-upload the
@@ -574,6 +595,56 @@ def _ingest_thread(
             if trigger_ts:
                 state.set_last_synced_ts(channel_id, trigger_ts)
             state.touch_last_ingested()
+
+    # Phase 12: extract structured memory. Re-extracting on a thread
+    # update is fine -- the persistence layer's unique key dedupes
+    # repeats, and any new action items / decisions added in the
+    # latest replies will surface as new rows.
+    if workspace_id:
+        try:
+            _extract_memory_from_prepared(workspace_id, prepared)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "realtime_memory_extract_failed",
+                extra={
+                    "workspace_id": workspace_id,
+                    "stable_key":   stable_key,
+                    "error":        type(e).__name__,
+                },
+            )
+
+
+def _extract_memory_from_prepared(
+    workspace_id: str, prepared: Dict[str, Any],
+) -> None:
+    """
+    Shared helper for the realtime path: pull out structured memory
+    from a freshly-uploaded Slack doc and persist it. Slack ts is a
+    unix-seconds string; convert to ISO so the timestamptz column
+    accepts it.
+    """
+    from datetime import datetime as _dt, timezone as _tz  # noqa: PLC0415
+    from memory_store import extract_and_persist            # noqa: PLC0415
+
+    stable_key = prepared.get("stable_key") or ""
+    if not stable_key:
+        return
+    ts = prepared.get("ts") or prepared.get("timestamp")
+    try:
+        source_iso = (
+            _dt.fromtimestamp(float(ts), tz=_tz.utc).isoformat()
+            if ts else None
+        )
+    except (TypeError, ValueError):
+        source_iso = None
+    extract_and_persist(
+        workspace_id=workspace_id,
+        source_kind="slack",
+        source_stable_key=stable_key,
+        source_timestamp=source_iso,
+        text=prepared.get("content") or "",
+        default_owner=prepared.get("user_name") or None,
+    )
 
 
 # ---------------------------------------------------------------------- #

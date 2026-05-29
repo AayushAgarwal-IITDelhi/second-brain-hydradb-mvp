@@ -8,8 +8,13 @@ import {
   createChatSession,
   createSavedAnswer,
   deleteSavedAnswer,
+  fetchPublicShare,
   getAdminStatus,
+  getWorkspaceStatus,
   listSavedAnswers,
+  listSharesForAnswer,
+  revokeShareLink,
+  shareSavedAnswer,
   streamQuery,
 } from "./api.js";
 import SlackSettings from "./slack/SlackSettings.jsx";
@@ -559,6 +564,21 @@ function buildHistoryFromEntries(entries) {
 }
 
 export default function App() {
+  // Phase 13: pathname-based public-share routing.
+  // The `/shared/<token>` route renders a standalone read-only view
+  // with NO auth + NO workspace chrome. We do this BEFORE any auth
+  // hooks fire so the public view works for unauthenticated visitors.
+  // Hooks order: keep this `useState` always called, even when the
+  // value isn't used, so React's hook-order invariant holds.
+  const [publicSharePath] = useState(() => {
+    if (typeof window === "undefined") return null;
+    const m = window.location.pathname.match(/^\/shared\/([^/?#]+)$/);
+    return m ? m[1] : null;
+  });
+  if (publicSharePath) {
+    return <PublicShareView token={publicSharePath} />;
+  }
+
   // Form state
   const [question, setQuestion] = useState("");
   const [mode, setMode] = useState("default");
@@ -580,6 +600,15 @@ export default function App() {
 
   // Admin status snapshot (refreshed periodically and after each query).
   const [adminStatus, setAdminStatus] = useState(null);
+
+  // Phase 13: workspace-level connector + sync snapshot for the
+  // status bar at the top of the chat surface. We refresh after
+  // each query so the "last synced X ago" hint stays roughly fresh.
+  const [workspaceStatus, setWorkspaceStatus] = useState(null);
+
+  // Phase 13: which saved-answer id is currently in the share modal,
+  // if any. The modal owns its own loading/error state.
+  const [sharingSavedId, setSharingSavedId] = useState(null);
 
   // Query history — the user's previous questions + filters, persisted
   // to localStorage. Initial value comes from disk via a lazy initializer
@@ -721,6 +750,27 @@ export default function App() {
     async function refresh() {
       const data = await getAdminStatus();
       if (!cancelled) setAdminStatus(data);
+    }
+    refresh();
+    const id = setInterval(refresh, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+
+  // Phase 13: workspace-level status. Refreshes on mount, after
+  // queries, and on the same 30s cadence as adminStatus.
+  useEffect(() => {
+    let cancelled = false;
+    async function refresh() {
+      try {
+        const data = await getWorkspaceStatus();
+        if (!cancelled && data) setWorkspaceStatus(data);
+      } catch {
+        // Silent: a 401/network blip just keeps the bar hidden until
+        // the next refresh succeeds.
+      }
     }
     refresh();
     const id = setInterval(refresh, 30000);
@@ -877,6 +927,12 @@ export default function App() {
       getAdminStatus().then((data) => {
         if (data) setAdminStatus(data);
       });
+      // Phase 13: refresh workspace status too so the status bar
+      // shows fresh "last synced X ago" right after a query that
+      // followed a sync.
+      getWorkspaceStatus()
+        .then((data) => { if (data) setWorkspaceStatus(data); })
+        .catch(() => { /* silent: status bar degrades to hidden */ });
     }
   }
 
@@ -1168,13 +1224,22 @@ export default function App() {
           item={viewingSaved}
           onClose={() => setViewingSaved(null)}
           onDelete={() => handleDeleteSavedItem(viewingSaved.id)}
+          onShare={(id) => setSharingSavedId(id)}
+        />
+      )}
+
+      {sharingSavedId && (
+        <ShareModal
+          savedId={sharingSavedId}
+          onClose={() => setSharingSavedId(null)}
         />
       )}
 
       <AdminStatus status={adminStatus} />
+      <WorkspaceStatusBar status={workspaceStatus} />
 
       <main className="chat">
-        {entries.length === 0 && <EmptyState />}
+        {entries.length === 0 && <EmptyState workspaceStatus={workspaceStatus} />}
         {entries.map((entry, idx) => {
           if (entry.role === "user") {
             return <UserBubble key={entry.id} entry={entry} />;
@@ -1626,7 +1691,7 @@ function savedItemMatchesFilter(item, needle) {
  * behavior achievable via fixed positioning + z-index. Keyboard:
  * Escape closes the overlay.
  */
-function SavedAnswerOverlay({ item, onClose, onDelete }) {
+function SavedAnswerOverlay({ item, onClose, onDelete, onShare }) {
   useEffect(() => {
     function onKeydown(e) {
       if (e.key === "Escape") onClose();
@@ -1697,6 +1762,16 @@ function SavedAnswerOverlay({ item, onClose, onDelete }) {
               className="btn btn--ghost btn--small"
               copiedClassName="bubble__copy--copied"
             />
+            {onShare && item.id && (
+              <button
+                type="button"
+                className="btn btn--ghost btn--small"
+                onClick={() => onShare(item.id)}
+                title="Create a public share link"
+              >
+                Share
+              </button>
+            )}
             <ArmedButton
               onConfirm={onDelete}
               label="Delete"
@@ -1793,14 +1868,55 @@ function AdminStatus({ status }) {
   );
 }
 
-function EmptyState() {
+function EmptyState({ workspaceStatus }) {
+  // Phase 13: smarter empty state. If no connectors are linked yet,
+  // surface "connect Slack / Gmail first" guidance instead of example
+  // questions the user can't possibly run.
+  const slackConnected = workspaceStatus?.slack?.connected;
+  const gmailConnected = (workspaceStatus?.gmail?.connection_count || 0) > 0;
+  const anyConnected = slackConnected || gmailConnected;
+
+  if (workspaceStatus && !anyConnected) {
+    return (
+      <div className="empty">
+        <p className="empty__lead">Welcome to Second Brain.</p>
+        <p className="empty__sub">
+          Connect a data source to get started. Your messages stay in
+          your workspace — nothing is shared across workspaces.
+        </p>
+        <ul className="empty__examples">
+          <li>
+            <strong>Connect Slack</strong> — index public-channel
+            history and ask "what did we decide?"
+          </li>
+          <li>
+            <strong>Connect Gmail</strong> — surface action items and
+            decisions across selected labels.
+          </li>
+        </ul>
+      </div>
+    );
+  }
+
+  // Sources connected — show example questions tuned to what they
+  // actually have.
+  const examples = [];
+  if (slackConnected) {
+    examples.push("\"What did we decide about the memory layer?\"");
+    examples.push("\"Summary of yesterday's design discussion\"");
+  }
+  if (gmailConnected) {
+    examples.push("\"Latest email from Rahul about deployment\"");
+    examples.push("\"Pending action items from this week\"");
+  }
+  if (examples.length === 0) {
+    examples.push("\"Who said they would document the API contract?\"");
+  }
   return (
     <div className="empty">
-      <p className="empty__lead">Ask anything from your Slack workspace.</p>
+      <p className="empty__lead">Ask anything from your workspace.</p>
       <ul className="empty__examples">
-        <li>"What did we decide about the memory layer?"</li>
-        <li>"Summary of yesterday's design discussion"</li>
-        <li>"Who said they would document the API contract?"</li>
+        {examples.map((ex) => <li key={ex}>{ex}</li>)}
       </ul>
     </div>
   );
@@ -2350,6 +2466,314 @@ function FilterBox({
           ? `${matchCount} / ${totalCount}`
           : `${totalCount}`}
       </span>
+    </div>
+  );
+}
+// ====================================================================== //
+// Phase 13: workspace status bar + share modal + public share view
+// ====================================================================== //
+
+/**
+ * Lightweight connector + sync hint bar. Renders along the top of
+ * the chat surface. No fancy charts -- just connector state and a
+ * "Last Gmail sync X ago" hint. Self-fetches on mount; the caller
+ * can pass an `intervalMs` prop to enable periodic refresh.
+ */
+function WorkspaceStatusBar({ status }) {
+  if (!status) return null;
+  const { slack, gmail } = status;
+  const pills = [];
+  if (slack) {
+    pills.push({
+      key:   "slack",
+      tone:  slack.connected ? "ok" : "off",
+      label: slack.connected
+        ? `Slack · ${slack.channels_selected} channel${
+            slack.channels_selected === 1 ? "" : "s"
+          }`
+        : "Slack disconnected",
+      title: slack.connected
+        ? (slack.scheduler_enabled
+            ? "Slack connected, scheduler running"
+            : "Slack connected, scheduler off")
+        : "Connect Slack to ingest channel history",
+    });
+  }
+  if (gmail) {
+    if (gmail.connection_count > 0) {
+      const lastSynced = gmail.last_synced_at
+        ? `synced ${formatIsoRelative(gmail.last_synced_at)}`
+        : "no sync yet";
+      pills.push({
+        key:   "gmail",
+        tone:  gmail.last_synced_at ? "ok" : "warn",
+        label: `Gmail · ${gmail.labels_selected} label${
+          gmail.labels_selected === 1 ? "" : "s"
+        } · ${lastSynced}`,
+        title: gmail.last_synced_at
+          ? `Last Gmail sync: ${gmail.last_synced_at}`
+          : "Gmail connected; first sync hasn't completed yet",
+      });
+    } else {
+      pills.push({
+        key:   "gmail",
+        tone:  "off",
+        label: "Gmail disconnected",
+        title: "Connect Gmail to ingest selected labels",
+      });
+    }
+  }
+  return (
+    <section className="ws-status" aria-live="polite">
+      {pills.map((p) => (
+        <span
+          key={p.key}
+          className={`ws-status__pill ws-status__pill--${p.tone}`}
+          title={p.title}
+        >
+          {p.label}
+        </span>
+      ))}
+    </section>
+  );
+}
+
+
+/**
+ * Modal that renders the share URL for one saved answer, with a
+ * Copy button and a Revoke button. Re-fetches the active shares
+ * on open so it always shows the live state.
+ *
+ * Props:
+ *   savedId: the saved-answer id to share (required)
+ *   onClose: () => void
+ */
+function ShareModal({ savedId, onClose }) {
+  const [shares, setShares] = useState(null);   // null = loading
+  const [error, setError]   = useState("");
+  const [busy, setBusy]     = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    function load() {
+      setShares(null); setError("");
+      listSharesForAnswer(savedId)
+        .then((data) => {
+          if (cancelled) return;
+          setShares((data && data.shares) || []);
+        })
+        .catch((e) => {
+          if (cancelled) return;
+          setError(e?.message || "Could not load shares.");
+          setShares([]);
+        });
+    }
+    load();
+    return () => { cancelled = true; };
+  }, [savedId]);
+
+  useEffect(() => {
+    function onKey(e) { if (e.key === "Escape") onClose(); }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  async function handleCreate() {
+    setBusy(true); setError("");
+    try {
+      const out = await shareSavedAnswer(savedId);
+      setShares((prev) => [
+        {
+          id:          out.id,
+          share_token: out.share_token,
+          url:         out.url,
+          created_at:  out.created_at,
+        },
+        ...(prev || []),
+      ]);
+    } catch (e) {
+      setError(e?.message || "Could not create share link.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRevoke(token) {
+    setBusy(true); setError("");
+    try {
+      await revokeShareLink(token);
+      setShares((prev) => (prev || []).filter((s) => s.share_token !== token));
+    } catch (e) {
+      setError(e?.message || "Could not revoke share link.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      className="saved-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Share saved answer"
+      onClick={onClose}
+    >
+      <div
+        className="saved-overlay__card share-modal"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="saved-overlay__header">
+          <div className="saved-overlay__meta">
+            <strong>Share this saved answer</strong>
+          </div>
+          <div className="saved-overlay__actions">
+            <button
+              type="button"
+              className="btn btn--ghost btn--small"
+              onClick={onClose}
+              aria-label="Close"
+            >
+              Close ✕
+            </button>
+          </div>
+        </header>
+
+        <p className="share-modal__hint">
+          Anyone with the link can read this answer. No login required.
+          Tokens stay valid until you revoke them.
+        </p>
+
+        {error && (
+          <div className="share-modal__error" role="alert">{error}</div>
+        )}
+
+        {shares === null && (
+          <div className="share-modal__loading">Loading…</div>
+        )}
+
+        {shares !== null && shares.length === 0 && (
+          <button
+            type="button"
+            className="btn btn--primary"
+            onClick={handleCreate}
+            disabled={busy}
+          >
+            {busy ? "Creating…" : "Create share link"}
+          </button>
+        )}
+
+        {shares !== null && shares.length > 0 && (
+          <>
+            <ul className="share-modal__list">
+              {shares.map((s) => (
+                <li key={s.share_token} className="share-modal__row">
+                  <input
+                    type="text"
+                    readOnly
+                    value={s.url}
+                    className="share-modal__url"
+                    onFocus={(e) => e.target.select()}
+                    aria-label="Public share URL"
+                  />
+                  <CopyButton
+                    text={s.url}
+                    label="Copy"
+                    copiedLabel="Copied!"
+                    className="btn btn--ghost btn--small"
+                  />
+                  <ArmedButton
+                    onConfirm={() => handleRevoke(s.share_token)}
+                    label="Revoke"
+                    confirmLabel="Confirm revoke?"
+                    size="small"
+                  />
+                </li>
+              ))}
+            </ul>
+            <button
+              type="button"
+              className="btn btn--ghost btn--small share-modal__add"
+              onClick={handleCreate}
+              disabled={busy}
+            >
+              + Create another link
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+/**
+ * Public read-only view rendered at /shared/{token}. Self-contained:
+ * fetches the public payload (no auth, no workspace header), renders
+ * the question + answer + sources without any of the app's controls.
+ * If the token is bad / revoked / expired the backend 404s and we
+ * surface a clean error instead of crashing.
+ */
+function PublicShareView({ token }) {
+  const [data, setData]   = useState(null);    // null = loading
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchPublicShare(token)
+      .then((d) => { if (!cancelled) setData(d); })
+      .catch((e) => {
+        if (cancelled) return;
+        if (e?.status === 404) {
+          setError("This shared link is no longer available.");
+        } else {
+          setError(e?.message || "Could not load shared answer.");
+        }
+      });
+    return () => { cancelled = true; };
+  }, [token]);
+
+  return (
+    <div className="public-share">
+      <header className="public-share__header">
+        <strong>Second Brain</strong>
+        <span className="public-share__hint">Shared answer · read only</span>
+      </header>
+
+      {error && (
+        <div className="public-share__error" role="alert">
+          {error}
+        </div>
+      )}
+
+      {!error && data === null && (
+        <div className="public-share__loading">Loading…</div>
+      )}
+
+      {!error && data && (
+        <article className="public-share__card">
+          <h2 className="public-share__question">{data.question}</h2>
+          {data.created_at && (
+            <div className="public-share__meta">
+              Shared from {formatIsoRelative(data.created_at)}
+            </div>
+          )}
+          <div className="public-share__answer answer">
+            <AnswerMarkdown text={data.answer || ""} />
+          </div>
+          {Array.isArray(data.sources) && data.sources.length > 0 && (
+            <div className="sources">
+              <div className="sources__heading">
+                Sources ({data.sources.length})
+              </div>
+              <div className="sources__list">
+                {data.sources.map((s, idx) => (
+                  <SourceCard key={`share-${idx}`} source={s} />
+                ))}
+              </div>
+            </div>
+          )}
+        </article>
+      )}
     </div>
   );
 }

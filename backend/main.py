@@ -43,6 +43,7 @@ HMAC-SHA256 request signature — see slack_signature.py.
 
 import json
 import os
+import secrets
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Literal, Optional, Union
 
@@ -101,6 +102,8 @@ from supabase_client import (  # noqa: E402
     get_gmail_connection,
     get_gmail_connection_public,
     get_gmail_connection_sync_summary,
+    get_saved_answer,
+    get_share_link_by_token,
     get_slack_installation,
     list_chat_messages,
     list_chat_sessions,
@@ -109,14 +112,17 @@ from supabase_client import (  # noqa: E402
     list_saved_answers,
     list_selected_channel_ids,
     list_selected_gmail_label_ids,
+    list_share_links_for_workspace,
     list_user_workspaces,
     list_workspace_channels,
+    revoke_share_link,
     set_selected_channels,
     set_selected_gmail_labels,
     upsert_gmail_connection,
     upsert_gmail_labels,
     upsert_slack_channels,
     upsert_slack_installation,
+    create_share_link,
 )
 from slack_oauth import (  # noqa: E402
     build_connect_url,
@@ -164,6 +170,12 @@ ALLOWED_ORIGINS = _parse_cors_origins()
 auth_rate_limit = make_rate_limit_dependency("auth")
 slack_webhook_rate_limit = make_rate_limit_dependency("slack_webhook")
 slack_ingest_rate_limit = make_rate_limit_dependency("ingest")
+# Phase 13: public share-link reads have no auth, so they get their
+# own rate-limit bucket. The bucket name is unknown to rate_limit.py's
+# defaults table -- which just means it falls back to the global
+# default limit. That's the right behavior; we don't want to be more
+# generous to public anonymous traffic than to authenticated users.
+public_share_rate_limit = make_rate_limit_dependency("public_share")
 
 
 # ---------- Lifespan: startup checks + scheduler ---------- #
@@ -626,6 +638,10 @@ def query(
         # Phase 9: source filter (Slack / Gmail). None = all sources,
         # matching pre-Phase-9 behavior.
         allowed_sources=req.allowed_sources,
+        # Phase 12: workspace_id reaches the recall layer so it can
+        # pull matching structured memories (action items / decisions
+        # / summaries / entities) alongside the HydraDB chunks.
+        workspace_id=workspace.workspace_id,
         # Phase 4: route this query to the workspace's HydraDB
         # sub-tenant. ensure_workspace_sub_tenant materializes the row
         # value on the fly for any pre-Phase-4 workspace that missed
@@ -744,6 +760,8 @@ def query_stream(
                 metadata_bias=rewrite["metadata_bias"],
                 # Phase 9: source filter (Slack / Gmail).
                 allowed_sources=req.allowed_sources,
+                # Phase 12: workspace_id for structured-memory lookup.
+                workspace_id=workspace.workspace_id,
                 # Phase 4: workspace-isolated recall.
                 hydradb_sub_tenant_id=ensure_workspace_sub_tenant(
                     workspace_id=workspace.workspace_id,
@@ -1153,6 +1171,247 @@ def saved_answers_delete(
             detail="Saved answer not found.",
         )
     return {"id": saved_id, "deleted": True}
+
+
+# ---------- Phase 13: share links + workspace status ---------- #
+# Three authenticated routes (create/list/revoke) and one PUBLIC route
+# (read by token). The public route is the only place in the API
+# surface that doesn't require auth -- its security comes entirely
+# from the share_token's entropy (256 bits via secrets.token_urlsafe(32)).
+#
+# Public-route projection rules:
+#   - NEVER include workspace_id, created_by, user_id, debug
+#   - NEVER include any cross-record data
+#   - Revoked or expired -> 404 (collapsed, never distinguishable)
+
+
+# Built once so the share-link URL builder doesn't re-read env each
+# call. It still respects FRONTEND_BASE_URL override via the helper.
+def _share_url_for(token: str) -> str:
+    """Build the user-visible share URL the frontend renders the
+    standalone read view at."""
+    base = _frontend_base_url()
+    return f"{base}/shared/{token}"
+
+
+@app.post(
+    "/api/saved-answers/{saved_id}/share",
+    status_code=status.HTTP_201_CREATED,
+)
+def saved_answers_share(
+    saved_id: str,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Mint a share link for a saved answer the caller owns. The token
+    is opaque (URL-safe base64 of 32 random bytes -> 43 chars) and
+    serves as the public read credential.
+
+    Ownership check: we require the saved answer to live in this
+    workspace. We do NOT require the caller to be the same user_id
+    that originally saved it -- workspace members can share each
+    other's bookmarks. (Revoke is still tied to created_by.)
+    """
+    saved = get_saved_answer(
+        saved_id=saved_id, workspace_id=workspace.workspace_id,
+    )
+    if not saved:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Saved answer not found.",
+        )
+    token = secrets.token_urlsafe(32)
+    row = create_share_link(
+        workspace_id=workspace.workspace_id,
+        saved_answer_id=saved_id,
+        created_by=workspace.user.id,
+        share_token=token,
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not create share link.",
+        )
+    return {
+        "id":              row.get("id"),
+        "share_token":     token,
+        "url":             _share_url_for(token),
+        "saved_answer_id": saved_id,
+        "created_at":      row.get("created_at"),
+    }
+
+
+@app.get("/api/saved-answers/{saved_id}/shares")
+def saved_answers_shares_list(
+    saved_id: str,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    List active (non-revoked) shares for one saved answer. The
+    frontend uses this to render a "this answer is shared" badge +
+    revoke button on saved answers.
+    """
+    rows = list_share_links_for_workspace(
+        workspace_id=workspace.workspace_id,
+        saved_answer_id=saved_id,
+    )
+    # Hide revoked shares from the listing -- once revoked, a share
+    # link is effectively gone from the user's perspective.
+    active = [
+        {
+            "id":          r.get("id"),
+            "share_token": r.get("share_token"),
+            "url":         _share_url_for(r.get("share_token") or ""),
+            "created_at":  r.get("created_at"),
+            "expires_at":  r.get("expires_at"),
+            "created_by":  r.get("created_by"),
+        }
+        for r in rows
+        if not r.get("revoked_at")
+    ]
+    return {"shares": active}
+
+
+@app.delete("/api/saved-answers/share/{share_token}")
+def saved_answers_share_revoke(
+    share_token: str,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Revoke a share link. Scoped to (workspace_id, created_by) so one
+    user can't revoke another user's share. Returns 404 if the token
+    doesn't exist in this workspace or wasn't created by the caller --
+    we don't distinguish those cases to avoid leaking existence.
+    """
+    ok = revoke_share_link(
+        share_token=share_token,
+        workspace_id=workspace.workspace_id,
+        user_id=workspace.user.id,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Share link not found.",
+        )
+    return {"revoked": True}
+
+
+@app.get(
+    "/api/shared/{share_token}",
+    dependencies=[Depends(public_share_rate_limit)],
+)
+def shared_answer_public(
+    share_token: str,
+) -> Dict[str, Any]:
+    """
+    PUBLIC read-only fetch. No auth -- the share_token IS the
+    credential. The response NEVER includes workspace_id, created_by,
+    debug payload, or any cross-record data.
+
+    Returns 404 for: missing / revoked / expired tokens. Collapsed
+    so an attacker probing tokens can't distinguish the three cases.
+    """
+    link = get_share_link_by_token(share_token=share_token)
+    if not link:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Shared link not found.",
+        )
+    saved = get_saved_answer(
+        saved_id=link.get("saved_answer_id") or "",
+        workspace_id=link.get("workspace_id") or "",
+    )
+    if not saved:
+        # The saved answer was deleted but the share link row outlived
+        # it (FK cascade should prevent this in practice; defensive).
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Shared link not found.",
+        )
+    # PUBLIC projection allowlist -- nothing here ties back to a
+    # workspace or user.
+    return {
+        "question":   saved.get("question") or "",
+        "answer":     saved.get("answer") or "",
+        "sources":    saved.get("sources") or [],
+        "mode":       saved.get("mode"),
+        "created_at": saved.get("created_at"),
+    }
+
+
+@app.get("/api/workspace/status")
+def workspace_status(
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Lightweight snapshot the frontend uses to render the
+    "connectors + sync health" hint bar. Workspace-scoped, no
+    secrets, no internal details.
+
+    Shape:
+      {
+        "slack": {
+            "connected":         bool,
+            "channels_selected": int,
+            "scheduler_enabled": bool,
+        },
+        "gmail": {
+            "connection_count": int,
+            "labels_selected":  int,
+            "last_synced_at":   ISO str | null,
+        },
+      }
+    """
+    # ---- Slack ----
+    slack_install = get_slack_installation(workspace_id=workspace.workspace_id)
+    slack_channels = list_selected_channel_ids(
+        workspace_id=workspace.workspace_id,
+    )
+    slack_status = {
+        "connected":         bool(slack_install),
+        "channels_selected": len(slack_channels),
+        "scheduler_enabled": auto_ingest_enabled(),
+    }
+
+    # ---- Gmail ----
+    # Aggregate per-connection summary into a single workspace-level
+    # snapshot: max last_synced_at, summed labels_selected. This is
+    # the smallest payload the hint bar can render without further
+    # round-trips.
+    gmail_conns = list_gmail_connections_public(
+        workspace_id=workspace.workspace_id,
+    )
+    last_synced: Optional[str] = None
+    labels_total = 0
+    for c in gmail_conns:
+        cid = c.get("id") or ""
+        if not cid:
+            continue
+        try:
+            summary = get_gmail_connection_sync_summary(
+                workspace_id=workspace.workspace_id,
+                gmail_connection_id=cid,
+            )
+        except Exception:  # noqa: BLE001
+            summary = {"last_synced_at": None, "labels_synced": 0}
+        ts = summary.get("last_synced_at")
+        if ts and (last_synced is None or str(ts) > str(last_synced)):
+            last_synced = ts
+        try:
+            label_ids = list_selected_gmail_label_ids(
+                workspace_id=workspace.workspace_id,
+                gmail_connection_id=cid,
+            )
+            labels_total += len(label_ids or [])
+        except Exception:  # noqa: BLE001
+            pass
+    gmail_status = {
+        "connection_count": len(gmail_conns),
+        "labels_selected":  labels_total,
+        "last_synced_at":   last_synced,
+    }
+
+    return {"slack": slack_status, "gmail": gmail_status}
 
 
 # ---------- Slack Connect (Phase 3) ---------- #

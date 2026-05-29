@@ -693,6 +693,28 @@ def _header_value(headers: List[Dict[str, str]], name: str) -> str:
     return ""
 
 
+def _gmail_ts_to_iso(value: Any) -> Optional[str]:
+    """
+    Phase 12: convert a Gmail email timestamp (stored as unix seconds
+    by build_email_document) into an ISO 8601 string. Returns None on
+    any parse failure so the persistence layer falls back to null.
+    """
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            return datetime.fromtimestamp(
+                float(value), tz=timezone.utc,
+            ).isoformat()
+        if isinstance(value, str) and value.strip():
+            return datetime.fromtimestamp(
+                float(value.strip()), tz=timezone.utc,
+            ).isoformat()
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+    return None
+
+
 def stable_key_for_gmail_message(message_id: str) -> str:
     """
     Stable, unique key for HydraDB dedupe. Gmail's `id` is globally
@@ -1148,6 +1170,44 @@ def run_workspace_gmail_ingest(
             )
             summary["messages_uploaded"] += ok
             summary["messages_failed"] += max(0, len(prepared) - ok)
+
+            # Phase 12: extract structured memory from each ingested
+            # email. Defensive: any failure here MUST NOT block the
+            # ingest pass. The subject is included in the body (the
+            # email builder always writes it as a header line) so the
+            # extractor sees it.
+            try:
+                from memory_store import extract_and_persist        # noqa: PLC0415
+                for f in prepared:
+                    stable_key = f.get("stable_key") or ""
+                    if not stable_key:
+                        continue
+                    extract_and_persist(
+                        workspace_id=workspace_id,
+                        source_kind="gmail",
+                        source_stable_key=stable_key,
+                        # Gmail's source_timestamp is the email's Date
+                        # header (the builder stamps it under
+                        # `timestamp` as a unix-seconds float). Convert
+                        # to ISO for the timestamptz column.
+                        source_timestamp=_gmail_ts_to_iso(f.get("timestamp")),
+                        text=f.get("content") or "",
+                        # Sender owns any "I will..." action item in
+                        # their email by default.
+                        default_owner=(
+                            f.get("from_name") or f.get("from_email") or None
+                        ),
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "gmail_memory_extract_failed",
+                    extra={
+                        "workspace_id":  workspace_id,
+                        "connection_id": connection_id,
+                        "label_id":      label_id,
+                        "error":         type(e).__name__,
+                    },
+                )
 
         # Persist the ingestion-state row. Always stamp last_synced_at;
         # advance last_history_id only when we have a fresh one.

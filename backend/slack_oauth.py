@@ -19,6 +19,7 @@ an explicit token + channel list instead of reading them from env.
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 
@@ -423,6 +424,48 @@ def run_workspace_ingest(
             )
             total_failure += 1
             continue
+
+        # Phase 12: extract structured memory from every Slack doc we
+        # just uploaded. Defensive: any failure here MUST NOT block
+        # the ingest pass -- the second-brain layer is augmenting,
+        # never blocking. We piggyback on the same workspace_id +
+        # source_stable_key the chunks already carry.
+        try:
+            from memory_store import extract_and_persist  # noqa: PLC0415
+            for f in files:
+                stable_key = f.get("stable_key") or ""
+                if not stable_key:
+                    continue
+                ts = f.get("ts") or f.get("timestamp")
+                # Slack ts is a unix-seconds string; convert to ISO so
+                # the memory row's source_timestamp column (timestamptz)
+                # accepts it cleanly. Fall back to None on parse error.
+                try:
+                    source_iso = (
+                        datetime.fromtimestamp(
+                            float(ts), tz=timezone.utc,
+                        ).isoformat()
+                        if ts else None
+                    )
+                except (TypeError, ValueError):
+                    source_iso = None
+                extract_and_persist(
+                    workspace_id=workspace_id,
+                    source_kind="slack",
+                    source_stable_key=stable_key,
+                    source_timestamp=source_iso,
+                    text=f.get("content") or "",
+                    default_owner=f.get("user_name") or None,
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "slack_memory_extract_failed",
+                extra={
+                    "workspace_id": workspace_id,
+                    "channel_id":   channel_id,
+                    "error":        type(e).__name__,
+                },
+            )
         total_success += stats.get("successes", 0)
         total_failure += stats.get("failures", 0)
 
