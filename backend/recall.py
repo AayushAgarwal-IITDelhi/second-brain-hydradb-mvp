@@ -19,7 +19,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hydradb_client import HydraDBClient
 from ingestion.ingestion_state import IngestionState
@@ -386,14 +386,68 @@ def _build_source_card(
         # render something even if state is missing or doesn't know the doc.
         # Also promote stable_key and channel from the raw chunk so that
         # dedupe_by_stable_key and _source_passes_filters work correctly even
-        # without a state-file entry. (BUG-003 / BUG-004 fix)
-        return {
-            "index": index,
-            "source": minimal_source,
-            "score": score,
-            "stable_key": candidate_stable_key,
-            "channel": _get_path(chunk, ("metadata", "channel")) if isinstance(chunk, dict) else None,
+        # without a state-file entry.
+        #
+        # Recency fix: ALSO promote `timestamp` and `document_type` so
+        # the recency reranker can rank Slack messages by Slack ts even
+        # when no IngestionState entry exists yet. Realtime-ingested
+        # messages frequently hit this path because state.json may not
+        # have been re-read since the upload finished. We harvest from
+        # chunk metadata first (cheap, structured), and fall back to
+        # parsing the markdown header that the builder always writes
+        # ("Timestamp: <ts>" / "# Slack Message" / "# Slack Thread").
+        chunk_channel = (
+            _get_path(chunk, ("metadata", "channel"))
+            if isinstance(chunk, dict) else None
+        )
+        chunk_timestamp = (
+            _get_path(chunk, ("metadata", "timestamp"))
+            if isinstance(chunk, dict) else None
+        )
+        chunk_doc_type = (
+            _get_path(chunk, ("metadata", "document_type"))
+            if isinstance(chunk, dict) else None
+        )
+        # Last-resort: parse the markdown header body if metadata
+        # didn't carry the fields. We try Slack first (cheap regex
+        # against `# Slack Message` / `# Slack Thread`); if it's
+        # actually a Gmail doc, the Slack harvester returns {} and we
+        # try Gmail. Each harvester is a no-op on the other format.
+        gmail_fields: Dict[str, Any] = {}
+        if chunk_timestamp is None or chunk_doc_type is None or not chunk_channel:
+            body_text = _chunk_text(chunk) if isinstance(chunk, dict) else ""
+            slack_harvested = _harvest_slack_header_fields(body_text)
+            if chunk_timestamp is None:
+                chunk_timestamp = slack_harvested.get("timestamp")
+            if chunk_doc_type is None:
+                chunk_doc_type = slack_harvested.get("document_type")
+            if not chunk_channel:
+                chunk_channel = slack_harvested.get("channel")
+            # Gmail harvesting: only meaningful when the doc actually
+            # looks like an email. The harvester guards on `# Email`
+            # internally so this stays a no-op for Slack chunks.
+            if not slack_harvested:
+                gmail_fields = _harvest_gmail_header_fields(body_text)
+                if chunk_doc_type is None:
+                    chunk_doc_type = gmail_fields.get("document_type")
+                if chunk_timestamp is None and "timestamp" in gmail_fields:
+                    chunk_timestamp = gmail_fields["timestamp"]
+        card: Dict[str, Any] = {
+            "index":         index,
+            "source":        minimal_source,
+            "score":         score,
+            "stable_key":    candidate_stable_key,
+            "channel":       chunk_channel,
+            "timestamp":     chunk_timestamp,
+            "document_type": chunk_doc_type,
         }
+        # Attach Gmail-specific enrichments (sender, subject, labels,
+        # permalink) so the rankers can use them as boost signals.
+        # Stays on the card only when this chunk really is Gmail.
+        for k in ("subject", "from_name", "from_email", "labels", "permalink"):
+            if k in gmail_fields:
+                card[k] = gmail_fields[k]
+        return card
 
     # Rich source card backed by ingestion state.
     return {
@@ -409,6 +463,170 @@ def _build_source_card(
         "document_type": entry.get("document_type"),
         "score": score,
     }
+
+
+# Compiled once at import: the markdown header lines build_message_file
+# / build_thread_file always emit. We use these to harvest Slack
+# metadata back out of the doc body when chunk metadata is missing.
+_SLACK_HEADER_TIMESTAMP_RE = re.compile(
+    r"^Timestamp:\s*(\S+)", re.MULTILINE | re.IGNORECASE,
+)
+_SLACK_HEADER_CHANNEL_RE = re.compile(
+    r"^Channel:\s*(\S+)", re.MULTILINE | re.IGNORECASE,
+)
+_SLACK_DOC_HEADER_RE = re.compile(
+    r"^#\s*Slack\s+(Message|Thread)\b", re.MULTILINE | re.IGNORECASE,
+)
+
+
+def _harvest_slack_header_fields(body_text: str) -> Dict[str, Any]:
+    """
+    Parse the Slack-doc markdown header (always written by the
+    ingestion builder) to recover channel + timestamp + document_type
+    when chunk metadata didn't carry them. Returns a dict with any
+    fields that were found.
+    """
+    out: Dict[str, Any] = {}
+    if not body_text:
+        return out
+    m = _SLACK_HEADER_TIMESTAMP_RE.search(body_text)
+    if m:
+        out["timestamp"] = m.group(1)
+    m = _SLACK_HEADER_CHANNEL_RE.search(body_text)
+    if m:
+        out["channel"] = m.group(1)
+    m = _SLACK_DOC_HEADER_RE.search(body_text)
+    if m:
+        out["document_type"] = m.group(1).lower()  # "message" or "thread"
+    return out
+
+
+# ---------------------------------------------------------------------- #
+# Gmail markdown-header harvesting (Phase 10)
+# ---------------------------------------------------------------------- #
+# gmail_oauth.build_email_file emits a fixed header block for every
+# ingested email:
+#
+#   # Email
+#   Source Key: gmail:msg:<id>
+#   Message-Id: <id>
+#   Mailbox: <connection_email>
+#   Subject: <subject>
+#   From: <sender header>
+#   To: <to>
+#   Cc: <cc>                  (optional)
+#   Date: <RFC 2822 date>
+#   Labels: <comma-separated label ids>
+#   Snippet: <snippet>
+#   Permalink: <url>          (optional)
+#
+# We mirror the Slack harvester pattern: parse these lines back out so
+# the source card always has from_email / from_name / subject / labels
+# / timestamp / document_type populated, even when the ingestion-state
+# lookup misses. This is what powers the Gmail recency rerank below.
+_GMAIL_DOC_HEADER_RE     = re.compile(r"^#\s*Email\b", re.MULTILINE | re.IGNORECASE)
+_GMAIL_SUBJECT_RE        = re.compile(r"^Subject:\s*(.+)$", re.MULTILINE | re.IGNORECASE)
+_GMAIL_FROM_RE           = re.compile(r"^From:\s*(.+)$",    re.MULTILINE | re.IGNORECASE)
+_GMAIL_DATE_RE           = re.compile(r"^Date:\s*(.+)$",    re.MULTILINE | re.IGNORECASE)
+_GMAIL_LABELS_RE         = re.compile(r"^Labels:\s*(.+)$",  re.MULTILINE | re.IGNORECASE)
+_GMAIL_PERMALINK_RE      = re.compile(r"^Permalink:\s*(\S+)", re.MULTILINE | re.IGNORECASE)
+
+# Split "Display Name <user@example.com>" into the parts. The address
+# part is parsed without the angle brackets; if no `<...>` is present
+# we treat the whole string as the address and leave the name empty.
+_FROM_ADDR_RE = re.compile(r"<([^<>]+)>")
+
+
+def _parse_gmail_from(raw_from: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Parse a "Name <addr>" / "addr" / "Name" header into (name, addr).
+    Either part may be None; callers handle None gracefully. Names are
+    stripped of surrounding quotes and whitespace.
+    """
+    if not raw_from:
+        return None, None
+    s = raw_from.strip()
+    m = _FROM_ADDR_RE.search(s)
+    if m:
+        addr = m.group(1).strip() or None
+        name_part = (s[:m.start()] + s[m.end():]).strip().strip('"').strip()
+        name = name_part or None
+        return name, addr
+    # No angle brackets. Heuristic: if it looks like an email, treat as
+    # addr-only; otherwise treat the whole thing as a name.
+    if "@" in s and " " not in s:
+        return None, s
+    return s.strip('"').strip() or None, None
+
+
+def _parse_rfc2822_date_to_unix(date_str: str) -> Optional[float]:
+    """
+    Parse an RFC 2822 Date header ("Mon, 02 Sep 2024 13:45:00 +0000")
+    into unix seconds. Returns None on any failure -- the caller
+    treats a missing timestamp as "don't recency-sort this card".
+    """
+    if not date_str:
+        return None
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(date_str.strip())
+        if dt is None:
+            return None
+        return dt.timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _harvest_gmail_header_fields(body_text: str) -> Dict[str, Any]:
+    """
+    Parse the Gmail-doc markdown header (always written by
+    gmail_oauth.build_email_file) and return the fields that the
+    source-card builder needs:
+
+      - document_type: "email"
+      - subject:       string
+      - from_name:     parsed display name (or None)
+      - from_email:    parsed addr (or None)
+      - timestamp:     unix seconds from the Date header (float, or None)
+      - labels:        list[str] of label ids
+      - permalink:     string (or None)
+
+    Fields that aren't present in the header are simply omitted from
+    the returned dict.
+    """
+    out: Dict[str, Any] = {}
+    if not body_text:
+        return out
+    if not _GMAIL_DOC_HEADER_RE.search(body_text):
+        # Not a Gmail doc — bail early. This keeps the function safe
+        # to call unconditionally from the source-card builder.
+        return out
+    out["document_type"] = "email"
+
+    m = _GMAIL_SUBJECT_RE.search(body_text)
+    if m:
+        out["subject"] = m.group(1).strip()
+    m = _GMAIL_FROM_RE.search(body_text)
+    if m:
+        name, addr = _parse_gmail_from(m.group(1))
+        if name:
+            out["from_name"] = name
+        if addr:
+            out["from_email"] = addr
+    m = _GMAIL_DATE_RE.search(body_text)
+    if m:
+        ts = _parse_rfc2822_date_to_unix(m.group(1))
+        if ts is not None:
+            out["timestamp"] = ts
+    m = _GMAIL_LABELS_RE.search(body_text)
+    if m:
+        labels = [s.strip() for s in m.group(1).split(",") if s.strip()]
+        if labels:
+            out["labels"] = labels
+    m = _GMAIL_PERMALINK_RE.search(body_text)
+    if m:
+        out["permalink"] = m.group(1).strip()
+    return out
 
 
 def _load_state_safely() -> Optional[IngestionState]:
@@ -541,6 +759,59 @@ def _coerce_to_unix_seconds(value: Any) -> Optional[float]:
     return None
 
 
+# ---------------------------------------------------------------------- #
+# Source-kind detection for the allowed_sources filter
+# ---------------------------------------------------------------------- #
+# A small helper that classifies a source card as coming from Slack or
+# Gmail. Detection order:
+#   1. document_type — set by the Slack ingest builder ("message" /
+#      "thread") and the Gmail ingest builder ("email"). This is the
+#      cheapest, most reliable signal.
+#   2. stable_key prefix — "slack:..." for Slack, "gmail:..." for Gmail.
+#      Used as a fallback when document_type didn't make it onto the
+#      card (rare: ingestion-state lookup miss).
+# Cards we can't classify return None, and the caller decides how to
+# handle them. The current policy (see _source_passes_filters) treats
+# unknown-source cards as "pass through" — better to over-include than
+# to silently drop legitimate matches.
+
+# Document types that count as a Slack source. Kept narrow so a future
+# new doc_type doesn't accidentally classify as Slack.
+_SLACK_DOC_TYPES = {"message", "thread"}
+# Document types that count as a Gmail source.
+_GMAIL_DOC_TYPES = {"email"}
+
+
+def _extract_source_kind(card: Dict[str, Any]) -> Optional[str]:
+    """
+    Classify a source card as "slack" or "gmail" (or None if unknown).
+
+    The classification is intentionally conservative — we'd rather
+    return None and let an unknown card pass than mislabel one. The
+    `allowed_sources` filter relies on this exactly: when the result
+    is None, we don't filter the card out, we let it through.
+    """
+    if not isinstance(card, dict):
+        return None
+    doc_type = card.get("document_type")
+    if isinstance(doc_type, str):
+        if doc_type in _SLACK_DOC_TYPES:
+            return "slack"
+        if doc_type in _GMAIL_DOC_TYPES:
+            return "gmail"
+    # Fallback: stable_key prefix. The Slack message builder uses
+    # "slack:msg:..." / "slack:thread:..."; the Gmail builder uses
+    # "gmail:msg:...". Both prefixes are stable parts of the wire
+    # format the backend writes -- safe to rely on.
+    sk = card.get("stable_key")
+    if isinstance(sk, str):
+        if sk.startswith("slack:"):
+            return "slack"
+        if sk.startswith("gmail:"):
+            return "gmail"
+    return None
+
+
 def _source_passes_filters(
     source_card: Dict[str, Any],
     channel: Optional[str],
@@ -548,6 +819,7 @@ def _source_passes_filters(
     document_type: Optional[str],
     start_unix: Optional[float] = None,
     end_unix: Optional[float] = None,
+    allowed_sources: Optional[List[str]] = None,
 ) -> bool:
     """
     Return True if this source card should be kept given the filters.
@@ -558,12 +830,23 @@ def _source_passes_filters(
     let it through for the metadata-style filters — better to over-
     include than to silently drop legitimate matches.
 
+    `allowed_sources` is a small whitelist like ["slack"] or
+    ["slack", "gmail"]. None / empty list means "all sources" and is
+    the default behavior. Unknown-source cards (no document_type AND
+    no recognizable stable_key prefix) pass through even when the
+    filter is set — same "don't silently drop" principle.
+
     Date filters are slightly stricter: a card with no parseable
     timestamp is also let through, on the same "don't drop" principle.
     """
     if channel:
+        # Strip a leading "#" so "#engineering" and "engineering" both
+        # match the stored channel name. The query rewriter normalizes
+        # this for inferred channels, but a user may also pass an
+        # explicit `channel` argument carrying the prefix.
+        wanted = channel.lstrip("#").lower()
         card_channel = source_card.get("channel")
-        if isinstance(card_channel, str) and card_channel.lower() != channel.lower():
+        if isinstance(card_channel, str) and card_channel.lower() != wanted:
             return False
     if user:
         card_user = source_card.get("user")
@@ -572,6 +855,13 @@ def _source_passes_filters(
     if document_type:
         card_type = source_card.get("document_type")
         if isinstance(card_type, str) and card_type != document_type:
+            return False
+    if allowed_sources:
+        # None/empty -> "all sources allowed" (default behavior).
+        # Otherwise we filter, but only when we can actually classify
+        # the card. Unknown-source cards pass.
+        kind = _extract_source_kind(source_card)
+        if kind is not None and kind not in allowed_sources:
             return False
     if start_unix is not None or end_unix is not None:
         ts_value = _coerce_to_unix_seconds(source_card.get("timestamp"))
@@ -584,8 +874,157 @@ def _source_passes_filters(
 
 
 # ---------------------------------------------------------------------- #
-# Reusable building blocks: streaming and non-streaming endpoints share these
+# Recency intent: "latest message" / "most recent message in #engineering"
 # ---------------------------------------------------------------------- #
+# When the user asks for the latest / newest / most recent Slack message
+# we override semantic ranking and sort candidates by Slack timestamp
+# descending. Pure semantic recall (top_k=5 from HydraDB) often misses
+# the newest message because a brand-new "REALTIME TEST" line is short,
+# semantically thin, and easily out-ranked by older but lexically richer
+# messages. The fix: widen the candidate set, then sort by timestamp.
+#
+# Detection is deliberately conservative -- we only fire when both a
+# recency word AND a Slack-message noun appear, so phrases like "latest
+# news" or "what's the most recent decision" continue to use semantic
+# recall. Boundary case "latest news" is pinned by an existing test.
+
+# Recency target nouns. Both Slack-message and Gmail-email nouns count
+# (Phase 10): the recency reranker is connector-agnostic and ranks any
+# candidate chunk that carries a parseable timestamp. We DO NOT treat
+# "decision" / "news" / "update" as recency targets -- those are
+# semantic-recall use cases.
+_RECENCY_TARGET_TOKENS = (
+    # Slack
+    "message", "messages",
+    "post", "posts",
+    "chat", "chats",
+    "ping", "pings",
+    "slack",                # "latest in slack", "newest slack message"
+    # Gmail (Phase 10)
+    "email", "emails",
+    "mail", "mails",
+    "inbox",
+    "gmail",                # "latest in gmail", "newest gmail email"
+)
+
+# Recency cue words.
+_RECENCY_CUE_TOKENS = (
+    "latest", "newest", "recent", "last",
+)
+
+# Multi-word cues that don't fit the single-token loop above.
+_RECENCY_CUE_PHRASES = (
+    "most recent",
+    "what's new",
+    "whats new",
+)
+
+# Widened HydraDB candidate set when the recency intent fires. The
+# default user-facing top_k is small (5) for LLM context-budget
+# reasons; for recency reranking we want a much larger pool to pick
+# from, since the newest message may sit far down the semantic ranking.
+_RECENCY_CANDIDATE_POOL = 50
+
+
+def _detect_recency_intent(question: str) -> bool:
+    """
+    True iff the question is asking for the latest Slack message (or
+    similar). Conservative: requires a recency cue AND a Slack-message
+    target noun. "latest news" alone returns False (no chat-like noun).
+    """
+    if not question:
+        return False
+    q = question.lower()
+
+    has_target = any(tok in q for tok in _RECENCY_TARGET_TOKENS)
+    if not has_target:
+        return False
+
+    # Token-level cue match using word boundaries so "lastly" doesn't
+    # trip "last".
+    for cue in _RECENCY_CUE_TOKENS:
+        if re.search(rf"\b{re.escape(cue)}\b", q):
+            return True
+    for phrase in _RECENCY_CUE_PHRASES:
+        if phrase in q:
+            return True
+    return False
+
+
+def _is_slack_message_card(card: Dict[str, Any]) -> bool:
+    """
+    Backwards-compatible: True iff the card came from a Slack
+    message / thread ingest. Used by tests + the Phase 1–9 surface
+    area. Recency reranking itself now uses _recency_source_kind()
+    below, which also returns "gmail" so emails participate.
+    """
+    return _recency_source_kind(card) == "slack"
+
+
+def _recency_source_kind(card: Dict[str, Any]) -> Optional[str]:
+    """
+    Classify a source card for the recency reranker:
+
+      - "slack"  -> a Slack message/thread doc (timestamps == Slack ts)
+      - "gmail"  -> a Gmail email doc          (timestamps == Date header)
+      - None     -> unknown shape, exclude from the recency rerank
+
+    Heuristic order: document_type first (cheapest + most reliable),
+    stable_key prefix as a fallback. Mirrors _extract_source_kind in
+    spirit but is scoped to recency-eligible documents only (we want
+    `email` here, not just any Gmail doc that might exist in the
+    future).
+    """
+    if not isinstance(card, dict):
+        return None
+    doc_type = card.get("document_type")
+    if isinstance(doc_type, str):
+        if doc_type in ("message", "thread"):
+            return "slack"
+        if doc_type == "email":
+            return "gmail"
+    sk = card.get("stable_key")
+    if isinstance(sk, str):
+        if sk.startswith("slack:"):
+            return "slack"
+        if sk.startswith("gmail:"):
+            return "gmail"
+    return None
+
+
+def _rerank_by_recency(
+    chunks_with_meta: List[Dict[str, Any]], top_k: int,
+) -> List[Dict[str, Any]]:
+    """
+    Sort surviving recency-eligible chunks by timestamp DESC and cap
+    at top_k.
+
+    Phase 10: both Slack-message and Gmail-email chunks participate.
+    Timestamp source per kind:
+      - Slack: chunk timestamp_float (Slack ts already in unix seconds)
+      - Gmail: timestamp_float harvested from the email's Date header
+
+    Chunks WITHOUT a parseable timestamp are dropped from the recency
+    result entirely; if no recency-eligible chunks survive, the
+    caller falls back to semantic ranking. This matches the original
+    "no Slack chunks -> fall back" contract; Gmail just expands the
+    set of eligible candidates.
+
+    Returns a list with the same shape rerank_chunks would return.
+    """
+    eligible = [
+        c for c in chunks_with_meta
+        if _recency_source_kind(c["source_card"]) is not None
+        and c.get("timestamp_float") is not None
+    ]
+    if not eligible:
+        return []
+    eligible.sort(
+        key=lambda c: c["timestamp_float"], reverse=True,
+    )
+    return eligible[:top_k]
+
+
 def prepare_recall_context(
     question: str,
     top_k: int,
@@ -596,6 +1035,9 @@ def prepare_recall_context(
     start_timestamp: Any = None,
     end_timestamp: Any = None,
     metadata_bias: Optional[Dict[str, str]] = None,
+    hydradb_sub_tenant_id: Optional[str] = None,
+    allowed_sources: Optional[List[str]] = None,
+    workspace_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run HydraDB recall and build the LLM-ready context + parallel sources.
@@ -642,8 +1084,42 @@ def prepare_recall_context(
         rerank_chunks,
     )
 
-    hydra = HydraDBClient()
-    raw_response = hydra.full_recall(query=question, top_k=top_k)
+    # Phase 4: workspace-isolated HydraDB. When a caller passes a
+    # sub-tenant id we use it explicitly; otherwise the client falls
+    # back to its env default (HYDRADB_SUB_TENANT_ID) — that path is
+    # only used by the legacy CLI ingestion + the existing test
+    # mocks, never by user-facing routes.
+    hydra = HydraDBClient(sub_tenant_id=hydradb_sub_tenant_id) \
+        if hydradb_sub_tenant_id else HydraDBClient()
+
+    # Normalize the allowed_sources whitelist. Input shapes we accept:
+    #   None                      -> all sources allowed (default)
+    #   []                        -> all sources allowed (same as None)
+    #   ["slack"]                 -> Slack only
+    #   ["gmail"]                 -> Gmail only
+    #   ["slack","gmail"]         -> both (= all currently known)
+    #   ["Slack", " slack ", ""]  -> ["slack"] (trimmed, lowercased, deduped)
+    # Anything that normalizes to an empty set is collapsed to None so
+    # the filter becomes a no-op downstream.
+    normalized_sources: Optional[List[str]] = None
+    if allowed_sources:
+        cleaned = {
+            s.strip().lower()
+            for s in allowed_sources
+            if isinstance(s, str) and s.strip()
+        }
+        normalized_sources = sorted(cleaned) if cleaned else None
+
+    # Recency intent: widen the candidate pool BEFORE the HydraDB call.
+    # Pure semantic top_k=5 frequently misses the newest message
+    # because brand-new short messages are lexically thin and lose to
+    # older but more-keyword-dense docs. We pull a much larger pool
+    # and re-sort by Slack timestamp below.
+    recency_intent = _detect_recency_intent(question)
+    effective_top_k = (
+        max(top_k, _RECENCY_CANDIDATE_POOL) if recency_intent else top_k
+    )
+    raw_response = hydra.full_recall(query=question, top_k=effective_top_k)
     chunks = _extract_chunks(raw_response)
     debug_on = _debug_recall_enabled()
 
@@ -686,12 +1162,8 @@ def prepare_recall_context(
         source_card = _build_source_card(chunk, original_index, score, state)
 
         if not _source_passes_filters(
-            source_card,
-            channel,
-            user,
-            document_type,
-            start_unix,
-            end_unix,
+            source_card, channel, user, document_type, start_unix, end_unix,
+            allowed_sources=normalized_sources,
         ):
             filtered_out += 1
             continue
@@ -705,29 +1177,168 @@ def prepare_recall_context(
             }
         )
 
-    # ---- Step 2: dedupe by stable_key BEFORE ranking ----
+    # ---- Step 1.5: fold structured memory candidates into the pool ----
+    # Phase 12: extracted memories (action items, decisions, summaries,
+    # entities) live in `extracted_memories`. We pull a small batch
+    # matching the question and add them as candidates with the SAME
+    # shape as HydraDB chunks so the existing reranker treats them
+    # uniformly. Memories are AUGMENTATION -- they share the keyword-
+    # hit + metadata-bias signals with HydraDB chunks but never
+    # participate in the recency rerank (we don't want a 6-month-old
+    # decision outranking today's Slack message when the user asks
+    # "latest message"). The memory layer fails gracefully: a Supabase
+    # outage degrades to no memories but never blocks the answer.
+    memory_candidates: List[Dict[str, Any]] = []
+    if workspace_id and not recency_intent:
+        try:
+            # Defer the import so the test suite can mock at the
+            # memory_store boundary without forcing this module to
+            # eagerly construct a Supabase client at import time.
+            from memory_store import list_memories  # noqa: PLC0415
+            memory_rows = list_memories(
+                workspace_id=workspace_id,
+                # Pull from every kind by default; the question-text
+                # filter narrows down to relevant content.
+                query=question.strip() or None,
+                limit=10,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(
+                "memory_lookup_skipped",
+                extra={
+                    "workspace_id": workspace_id,
+                    "error":        type(e).__name__,
+                },
+            )
+            memory_rows = []
+        memory_start_index = len(chunks_with_meta) + 1
+        for offset, row in enumerate(memory_rows):
+            content = (row.get("content") or "").strip()
+            if not content:
+                continue
+            kind = (row.get("kind") or "").strip()
+            source_kind = row.get("source_kind")
+            source_stable_key = row.get("source_stable_key") or ""
+            source_ts = row.get("source_timestamp")
+            ts_float = _coerce_to_unix_seconds(source_ts) if source_ts else None
+            # Build a memory-flavored source card. The `source_kind`
+            # field carries the ORIGINAL connector ("slack"/"gmail")
+            # so existing source-filter logic keeps working --
+            # asking for slack-only correctly includes Slack-derived
+            # memories. We also stamp `memory_kind` for downstream
+            # consumers / log lines.
+            card: Dict[str, Any] = {
+                "index":        memory_start_index + offset,
+                "source":       source_stable_key or f"memory:{kind}",
+                "score":        0.5,                    # neutral semantic baseline
+                "stable_key":   source_stable_key,
+                "source_kind":  source_kind,
+                "document_type": f"memory_{kind}" if kind else "memory",
+                "memory_kind":  kind,
+                "memory_id":    row.get("id"),
+                "timestamp":    source_ts,
+                "owner":        row.get("owner") or None,
+                "entity_type":  row.get("entity_type") or None,
+            }
+            # Friendly LLM-facing text: prepend a small kind tag so
+            # the model knows it's reading structured memory and not
+            # raw conversation.
+            prefix = {
+                "action_item": "Action item",
+                "decision":    "Decision",
+                "summary":     "Summary",
+                "entity":      "Entity",
+            }.get(kind, "Memory")
+            owner = card.get("owner")
+            text_block = (
+                f"[{prefix}{' (owner: ' + owner + ')' if owner else ''}] "
+                f"{content}"
+            )
+            memory_candidates.append({
+                "text":            text_block,
+                "source_card":     card,
+                "original_index":  card["index"],
+                "timestamp_float": ts_float,
+            })
+
+    if memory_candidates:
+        # Apply the same workspace-scoped filters (channel/user/etc.)
+        # to memory candidates. Most memories carry no `channel` so
+        # the don't-silently-drop rule lets them through any channel
+        # filter; the source filter does honor them (e.g. slack-only
+        # gets memory rows where source_kind=="slack").
+        kept: List[Dict[str, Any]] = []
+        for mc in memory_candidates:
+            if _source_passes_filters(
+                mc["source_card"], channel, user, document_type,
+                start_unix, end_unix,
+                allowed_sources=normalized_sources,
+            ):
+                kept.append(mc)
+            else:
+                filtered_out += 1
+        chunks_with_meta.extend(kept)
+
     # Same Slack message that resurfaces twice in recall shouldn't get
     # twice the ranking boost.
     chunks_with_meta = dedupe_by_stable_key(chunks_with_meta)
 
     # ---- Step 3: rerank if the mode asks for it; otherwise just cap ----
-    ranked, exact_matches_found = rerank_chunks(
-        chunks_with_meta,
-        query_terms,
-        mode,
-        top_k,
-        metadata_bias=metadata_bias,
-    )
+    # Recency intent overrides the normal modes. If the recency
+    # reranker returns chunks, we use them; if it returns nothing
+    # (no surviving Slack-message chunks with timestamps -- e.g. the
+    # workspace has only Gmail docs), we fall back to the normal
+    # semantic rerank so the query still gets answered.
+    if recency_intent:
+        recency_ranked = _rerank_by_recency(chunks_with_meta, top_k)
+    else:
+        recency_ranked = []
 
-    logger.debug(
-        'recall_context_ready',
-        extra={
-            'chunks_count': len(chunks),
-            'filtered_out': filtered_out,
-            'mode': mode,
-            'top_k': top_k,
-        },
-    )
+    if recency_ranked:
+        ranked = recency_ranked
+        exact_matches_found = 0
+        retrieval_mode_effective = "recency"
+    else:
+        ranked, exact_matches_found = rerank_chunks(
+            chunks_with_meta, query_terms, mode, top_k,
+            metadata_bias=metadata_bias,
+        )
+        retrieval_mode_effective = mode
+
+    logger.debug('recall_context_ready', extra={
+        'chunks_count': len(chunks),
+        'filtered_out': filtered_out,
+        'mode': retrieval_mode_effective,
+        'recency_intent': recency_intent,
+        'top_k': top_k,
+    })
+
+    # Build a compact per-chunk ranking breakdown so test cases (and
+    # `DEBUG_RECALL=true` runs) can see *why* each surviving chunk
+    # ranked where it did. This is INTERNAL only -- main.py never
+    # forwards this field to the public API response, and tests read
+    # it directly off the prepare_recall_context return value. We
+    # never include row-level body text or any user-identifying free
+    # text here; only the source kind, the score breakdown, and the
+    # stable_key (already a public identifier).
+    rank_breakdown: List[Dict[str, Any]] = []
+    for i, chunk in enumerate(ranked, start=1):
+        card = chunk.get("source_card") or {}
+        entry: Dict[str, Any] = {
+            "rank":          i,
+            "source_kind":   _recency_source_kind(card),
+            "stable_key":    card.get("stable_key"),
+            "original_index": chunk.get("original_index"),
+            "timestamp":     chunk.get("timestamp_float"),
+            "score_breakdown": dict(chunk.get("_debug_score") or {}),
+            "retrieval_mode": retrieval_mode_effective,
+        }
+        rank_breakdown.append(entry)
+    if rank_breakdown:
+        logger.debug('recall_rank_breakdown', extra={
+            'mode':       retrieval_mode_effective,
+            'top_chunks': rank_breakdown[:5],   # cap to 5 to keep log volume sane
+        })
 
     if not ranked:
         first_chunk = chunks[0] if chunks else None
@@ -759,15 +1370,20 @@ def prepare_recall_context(
         sources.append(card)
 
     return {
-        "ready": True,
-        "context_text": "\n\n".join(context_blocks),
-        "sources": sources,
-        "chunks_count": len(chunks),
-        "filtered_out": filtered_out,
-        "exact_matches": exact_matches_found,
-        "retrieval_mode": mode,
-        "query_terms": query_terms,
-        "fallback_debug": None,
+        "ready":            True,
+        "context_text":     "\n\n".join(context_blocks),
+        "sources":          sources,
+        "chunks_count":     len(chunks),
+        "filtered_out":     filtered_out,
+        "exact_matches":    exact_matches_found,
+        "retrieval_mode":   retrieval_mode_effective,
+        "query_terms":      query_terms,
+        "fallback_debug":   None,
+        # Phase 10: internal-only ranking breakdown for logs and
+        # tests. Never forwarded to the public API response (main.py
+        # builds its debug shape field-by-field rather than spreading
+        # this dict).
+        "rank_breakdown":   rank_breakdown,
     }
 
 
@@ -807,6 +1423,9 @@ def answer_question(
     end_timestamp: Any = None,
     conversation_history: Optional[List[Any]] = None,
     metadata_bias: Optional[Dict[str, str]] = None,
+    hydradb_sub_tenant_id: Optional[str] = None,
+    allowed_sources: Optional[List[str]] = None,
+    workspace_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     End-to-end recall + grounded answer.
@@ -848,6 +1467,12 @@ def answer_question(
             "debug": {"reason": "empty question"},
         }
 
+    # Phase 15: capture a coarse start timestamp so the analytics
+    # emit at the end of this function can report latency without
+    # needing the caller to time us.
+    import time as _t_init   # noqa: PLC0415
+    _start_ms = int(_t_init.perf_counter() * 1000)
+
     # IMPORTANT: retrieval uses only the current question. Conversation
     # history is intentionally NOT concatenated into the search query.
     prepared = prepare_recall_context(
@@ -860,9 +1485,30 @@ def answer_question(
         start_timestamp=start_timestamp,
         end_timestamp=end_timestamp,
         metadata_bias=metadata_bias,
+        hydradb_sub_tenant_id=hydradb_sub_tenant_id,
+        allowed_sources=allowed_sources,
+        workspace_id=workspace_id,
     )
 
     if not prepared["ready"]:
+        # Phase 15: emit retrieval_failure so the analytics view can
+        # surface empty-result patterns over time.
+        if workspace_id:
+            try:
+                from analytics_store import emit_event  # noqa: PLC0415
+                fallback_debug = prepared.get("fallback_debug") or {}
+                emit_event(
+                    workspace_id=workspace_id,
+                    kind="retrieval_failure",
+                    success=False,
+                    payload={
+                        "reason": str(fallback_debug.get("reason") or "no_chunks")[:200],
+                        "mode":   mode,
+                        "top_k":  top_k,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
         return {
             "answer": INSUFFICIENT_CONTEXT_ANSWER,
             "sources": [],
@@ -883,7 +1529,7 @@ def answer_question(
     )
 
     history_used = bool(conversation_history)
-    return {
+    result = {
         "answer": finalized["answer"],
         "sources": finalized["cleaned_sources"],
         "debug": {
@@ -901,3 +1547,44 @@ def answer_question(
             "history_turns": len(conversation_history) if history_used else 0,
         },
     }
+
+    # Phase 15: emit a query_completed analytics event. Defensive:
+    # any analytics failure must NOT affect the answer (analytics is
+    # a fire-and-forget signal). We compute the per-event payload
+    # from data we already have here.
+    if workspace_id:
+        try:
+            import time as _t                                # noqa: PLC0415
+            from analytics_store import emit_event           # noqa: PLC0415
+            # The caller measured no latency; we approximate using the
+            # debug fields. For a more precise number we'd time the
+            # whole answer_question call, but the analytics consumer
+            # just needs an order-of-magnitude figure for stat trends.
+            sources_out = result["sources"] or []
+            source_kinds = sorted({
+                (s.get("source_kind") or _recency_source_kind(s) or "unknown")
+                for s in sources_out
+            })
+            memory_hit = any(
+                (s.get("memory_kind") or "") for s in sources_out
+            )
+            emit_event(
+                workspace_id=workspace_id,
+                kind="query_completed",
+                latency_ms=int(_t.perf_counter() * 1000) - _start_ms,
+                payload={
+                    "mode":           mode,
+                    "retrieval_mode": prepared.get("retrieval_mode", mode),
+                    "top_k":          top_k,
+                    "sources_count":  len(sources_out),
+                    "source_kinds":   source_kinds,
+                    "memory_hit":     bool(memory_hit),
+                    "history_used":   history_used,
+                },
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(
+                "analytics_query_emit_skipped",
+                extra={"error": type(e).__name__},
+            )
+    return result

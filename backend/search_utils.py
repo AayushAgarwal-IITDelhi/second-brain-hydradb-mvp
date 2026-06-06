@@ -185,6 +185,48 @@ def _ts_to_float(value: Any) -> Optional[float]:
     return None
 
 
+# ---------------------------------------------------------------------- #
+# Ranking weights (Phase 10)
+# ---------------------------------------------------------------------- #
+# Explicit, named, tunable. All ranking decisions in this module use
+# these constants -- no magic numbers in the sort keys. The defaults
+# were picked so the relative ordering reproduces the Phase 9
+# behavior for legacy callers (channel + user metadata bias as the
+# only signal beyond keyword hits + recency).
+#
+# In the hybrid mode sort, the final score for a chunk is:
+#
+#   score = (keyword_hits      * W_KEYWORD_HIT)
+#         + (subject_hits      * W_SUBJECT_HIT)
+#         + (channel_match     * W_CHANNEL_MATCH)
+#         + (sender_match      * W_SENDER_MATCH)
+#         + (label_match       * W_LABEL_MATCH)
+#         + (normalized_recency * W_RECENCY)
+#
+# Body-text hits stay the dominant signal (a verbatim keyword match
+# in the doc body is the strongest evidence of relevance we have).
+# Subject hits are a strong second because email subjects are
+# semantically loaded. Sender/channel matches are weak filters --
+# they refine ordering when the question implies a person or
+# channel, but never override raw relevance. Recency is the gentlest
+# signal: it acts as a tiebreaker, not a primary driver, outside
+# the dedicated recency-rerank mode (which uses its own pure
+# timestamp sort).
+W_KEYWORD_HIT     = 100
+W_SUBJECT_HIT     = 80
+W_CHANNEL_MATCH   = 50
+W_SENDER_MATCH    = 50
+W_LABEL_MATCH     = 30
+W_RECENCY         = 1.0
+
+
+def _string_match_ci(a: Any, b: Any) -> bool:
+    """Case-insensitive equality, robust to non-string inputs."""
+    if not isinstance(a, str) or not isinstance(b, str):
+        return False
+    return a.strip().lower() == b.strip().lower()
+
+
 def _metadata_bias_score(
     source_card: Dict[str, Any],
     bias: Optional[Dict[str, str]],
@@ -195,8 +237,16 @@ def _metadata_bias_score(
     string values; missing card fields don't penalize, they just don't
     contribute.
 
-    Returns an integer 0..len(bias) — used by the sort key in rerank_chunks
-    to push matching chunks up.
+    Phase 10: when `bias["user"]` is set, we ALSO check Gmail sender
+    fields (`from_name`, `from_email`) so a question like "what did
+    Rahul say about Kafka" promotes both Slack messages from Rahul
+    AND Gmail emails from Rahul. The boost stays at the same
+    per-field magnitude either way -- a sender match contributes
+    exactly one point, same as a Slack user match -- so the existing
+    Slack-only tests keep their relative ordering.
+
+    Returns an integer 0..len(bias) -- used by the sort key in
+    rerank_chunks to push matching chunks up.
     """
     if not bias:
         return 0
@@ -204,11 +254,39 @@ def _metadata_bias_score(
     for key, value in bias.items():
         if not value:
             continue
+        if key == "user":
+            # Slack: card["user"] is the user_name. Gmail: the sender
+            # lives in from_name OR from_email (we accept either). Any
+            # one match counts.
+            if (
+                _string_match_ci(source_card.get("user"), value)
+                or _string_match_ci(source_card.get("from_name"), value)
+                or _string_match_ci(source_card.get("from_email"), value)
+            ):
+                score += 1
+            continue
         card_value = source_card.get(key)
         if isinstance(card_value, str) and isinstance(value, str):
             if card_value.lower() == value.lower():
                 score += 1
     return score
+
+
+def _subject_keyword_hits(source_card: Dict[str, Any], terms: List[str]) -> int:
+    """
+    Count how many query terms appear in the card's subject (Gmail)
+    or in a Slack equivalent slot if one ever gets attached. Slack
+    docs don't carry an explicit subject today, so this is
+    effectively a Gmail-only boost -- emails whose subject lines
+    contain the query keywords surface higher than emails whose only
+    matches are in the body. Returns 0 when nothing applies.
+    """
+    if not terms:
+        return 0
+    subject = source_card.get("subject")
+    if not isinstance(subject, str) or not subject:
+        return 0
+    return count_keyword_hits(subject, terms)
 
 
 def rerank_chunks(
@@ -227,7 +305,8 @@ def rerank_chunks(
                   by metadata bias, then timestamp (newest first). If no
                   chunk has any hit, fall back to semantic order biased by
                   metadata.
-      - "hybrid": Score each chunk = (hits*100) + (bias*50) + (newer_score).
+      - "hybrid": Score each chunk with the configurable weights
+                  (W_KEYWORD_HIT, W_SUBJECT_HIT, W_SENDER_MATCH, etc).
                   Even chunks with 0 hits stay, deprioritized.
       - anything else (incl. "default"): preserve semantic order, but push
                   chunks matching `metadata_bias` ahead of the rest. This
@@ -236,7 +315,15 @@ def rerank_chunks(
 
     `metadata_bias` looks like `{"channel": "product", "user": "rahul"}`.
     Each matching key adds to a per-chunk bias score. Comparisons are
-    case-insensitive; non-string card values are ignored.
+    case-insensitive; non-string card values are ignored. Phase 10:
+    the `user` key also matches Gmail sender fields (`from_name`,
+    `from_email`).
+
+    Side effect: every chunk gets an internal `_debug_score` dict
+    populated, capturing the per-signal breakdown the sort key uses.
+    This is what powers the optional `rank_breakdown` debug payload
+    in prepare_recall_context; it is NOT included in the public
+    sources[] API response.
 
     Returns (ranked_chunks, exact_matches_found).
       `ranked_chunks` is capped at `top_k`. `exact_matches_found` is the
@@ -245,23 +332,42 @@ def rerank_chunks(
     if not chunks_with_meta:
         return [], 0
 
-    # Annotate every chunk with its hit count + metadata bias score so the
-    # mode-specific sort keys below can use both signals.
+    # Annotate every chunk with its per-signal scores so the
+    # mode-specific sort keys below can use them. Also stash a
+    # per-chunk debug breakdown so prepare_recall_context can surface
+    # the ranking rationale in logs and the (private) debug payload.
+    max_ts = max(
+        (c.get("timestamp_float") or 0.0) for c in chunks_with_meta
+    ) or 1.0
     for chunk in chunks_with_meta:
-        chunk["_hits"] = count_keyword_hits(chunk.get("text", ""), terms)
-        chunk["_bias"] = _metadata_bias_score(
-            chunk.get("source_card", {}),
-            metadata_bias,
-        )
+        card = chunk.get("source_card", {}) or {}
+        hits = count_keyword_hits(chunk.get("text", ""), terms)
+        subj_hits = _subject_keyword_hits(card, terms)
+        bias = _metadata_bias_score(card, metadata_bias)
+        ts = chunk.get("timestamp_float") or 0.0
+        chunk["_hits"] = hits
+        chunk["_subject_hits"] = subj_hits
+        chunk["_bias"] = bias
+        chunk["_debug_score"] = {
+            "keyword_hits":   hits,
+            "subject_hits":   subj_hits,
+            "metadata_bias":  bias,
+            "timestamp":      ts,
+            "normalized_recency": (ts / max_ts) if max_ts else 0.0,
+        }
     matched_count = sum(1 for c in chunks_with_meta if c["_hits"] > 0)
 
     if mode == "exact":
         matched = [c for c in chunks_with_meta if c["_hits"] > 0]
         if matched:
-            # Sort key: (hits desc, bias desc, newer first, stable index).
+            # Sort key: (hits desc, subject-hits desc, bias desc, newer
+            # first, stable index). Subject hits act as a secondary
+            # signal -- two chunks with the same body-hit count, but
+            # one with the keyword in the subject too, surfaces first.
             matched.sort(
                 key=lambda c: (
                     -c["_hits"],
+                    -c["_subject_hits"],
                     -c["_bias"],
                     -(c.get("timestamp_float") or 0.0),
                     c["original_index"],
@@ -280,10 +386,22 @@ def rerank_chunks(
         return ranked[:top_k], 0
 
     if mode == "hybrid":
-        max_ts = max((c.get("timestamp_float") or 0.0) for c in chunks_with_meta) or 1.0
+        # Composite score using the named weights. Stable: the
+        # original_index disambiguator means two chunks with the same
+        # composite score keep semantic order.
+        def _hybrid_score(c: Dict[str, Any]) -> float:
+            ts = c.get("timestamp_float") or 0.0
+            return (
+                c["_hits"]         * W_KEYWORD_HIT
+                + c["_subject_hits"] * W_SUBJECT_HIT
+                + c["_bias"]         * W_CHANNEL_MATCH  # generic bias-magnitude
+                + (ts / max_ts)      * W_RECENCY
+            )
+        for c in chunks_with_meta:
+            c["_debug_score"]["hybrid_score"] = _hybrid_score(c)
         ranked = sorted(
             chunks_with_meta,
-            key=lambda c: -(c["_hits"] * 100 + c["_bias"] * 50 + (c.get("timestamp_float") or 0.0) / max_ts),
+            key=lambda c: (-_hybrid_score(c), c["original_index"]),
         )
         return ranked[:top_k], matched_count
 

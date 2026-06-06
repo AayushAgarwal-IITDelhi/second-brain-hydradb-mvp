@@ -203,16 +203,15 @@ class TestQueryAuth:
         r = client.post("/api/query", json={"question": "hello world"})
         assert r.status_code == 401
 
-    def test_wrong_key_returns_401(self, client):
-        r = client.post(
-            "/api/query",
-            json={"question": "hello world"},
-            headers={"X-API-Key": "wrongkey"},
-        )
-        assert r.status_code == 401
-
+    # NOTE: The Phase 1 Supabase migration replaced X-API-Key with
+    # Authorization: Bearer <jwt> on /api/query. The "wrong key" case
+    # (i.e. presenting an invalid token) is covered in detail by
+    # tests/test_supabase_auth.py::TestRequireUserFailures — see the
+    # expired / wrong-signature / wrong-audience / malformed cases there.
 
 # ── /api/query/stream ─────────────────────────────────────────────────────
+
+
 class TestQueryStream:
     def test_no_key_returns_401(self, client):
         r = client.post("/api/query/stream", json={"question": "hello world"})

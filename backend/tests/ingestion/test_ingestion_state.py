@@ -233,3 +233,78 @@ class TestWatermarks:
         state = IngestionState(populated_state_path)
         ts = state.get_last_ingested_at()
         assert ts == "2026-01-02T00:00:00+00:00"
+
+
+# ── save_locked (concurrent merge) ───────────────────────────────────────
+class TestSaveLocked:
+    def test_save_locked_preserves_concurrent_entry(self, tmp_path):
+        """A concurrent write to the file is preserved when save_locked merges."""
+        from ingestion.ingestion_state import IngestionState
+
+        path = tmp_path / "state.json"
+
+        # Process A: load state, mark one upload (not yet saved)
+        state_a = IngestionState(path)
+        state_a.mark_uploaded("slack:C1:1.0", "a.md", "C1", "general")
+
+        # Process B: meanwhile writes its own entry and saves directly
+        state_b = IngestionState(path)
+        state_b.mark_uploaded("slack:C1:2.0", "b.md", "C1", "general")
+        state_b.save()  # B commits first
+
+        # Process A saves with merge — B's entry must survive
+        state_a.save_locked()
+
+        final = IngestionState(path)
+        assert final.has("slack:C1:1.0"), "A's entry must be present"
+        assert final.has("slack:C1:2.0"), "B's concurrent entry must be preserved"
+
+    def test_save_locked_keeps_newer_watermark(self, tmp_path):
+        """A stale in-memory watermark must not overwrite a newer one on disk."""
+        from ingestion.ingestion_state import IngestionState
+
+        path = tmp_path / "state.json"
+
+        # Concurrent write advances the watermark to a newer ts
+        state_b = IngestionState(path)
+        state_b.set_last_synced_ts("C1", "1000000500.000000")
+        state_b.save()
+
+        # Our in-memory copy has an older watermark
+        state_a = IngestionState(path)
+        state_a.set_last_synced_ts("C1", "1000000100.000000")
+        state_a.save_locked()
+
+        final = IngestionState(path)
+        assert final.get_last_synced_ts("C1") == "1000000500.000000", (
+            "Newer watermark from concurrent write must be preserved"
+        )
+
+    def test_save_locked_advances_newer_watermark(self, tmp_path):
+        """A newer watermark in-memory wins over an older one on disk."""
+        from ingestion.ingestion_state import IngestionState
+
+        path = tmp_path / "state.json"
+
+        state_b = IngestionState(path)
+        state_b.set_last_synced_ts("C1", "1000000100.000000")
+        state_b.save()
+
+        state_a = IngestionState(path)
+        state_a.set_last_synced_ts("C1", "1000000500.000000")  # newer
+        state_a.save_locked()
+
+        final = IngestionState(path)
+        assert final.get_last_synced_ts("C1") == "1000000500.000000"
+
+    def test_save_locked_no_existing_file(self, tmp_path):
+        """save_locked works correctly when no state file exists yet."""
+        from ingestion.ingestion_state import IngestionState
+
+        path = tmp_path / "state.json"
+        state = IngestionState(path)
+        state.mark_uploaded("slack:C1:1.0", "a.md", "C1", "general")
+        state.save_locked()
+
+        final = IngestionState(path)
+        assert final.has("slack:C1:1.0")

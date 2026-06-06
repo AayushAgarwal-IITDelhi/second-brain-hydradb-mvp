@@ -2,22 +2,50 @@
 FastAPI app for the Second Brain MVP.
 
 Endpoints:
-    GET  /                    -> service info card             (public)
-    GET  /api/health/live     -> liveness probe               (public)
-    GET  /api/health/ready    -> readiness probe              (public)
-    GET  /api/health          -> detailed diagnostics         (public)
-    POST /api/query           -> {"answer", "sources", ...}   (X-API-Key + rate limited)
-    POST /api/query/stream    -> Server-Sent Events           (X-API-Key + rate limited)
-    GET  /api/admin/status    -> ingestion status snapshot    (X-API-Key)
-    POST /slack/events        -> Slack Events API webhook     (Slack signature)
+    GET    /                                              -> service info card             (public)
+    GET    /api/health/live                               -> liveness probe               (public)
+    GET    /api/health/ready                              -> readiness probe              (public)
+    GET    /api/health                                    -> {"status": "ok", ...}         (public)
+    POST   /api/query                                     -> {"answer", "sources", ...}    (Supabase JWT + Workspace)
+    POST   /api/query/stream                              -> Server-Sent Events            (Supabase JWT + Workspace)
+    GET    /api/me                                        -> {"id", "email"}               (Supabase JWT)
+    GET    /api/me/workspaces                             -> [{"id","name","slug","role"}] (Supabase JWT)
+    GET    /api/chat/sessions                             -> [{...sessions...}]            (Supabase JWT + Workspace)
+    POST   /api/chat/sessions                             -> created session row           (Supabase JWT + Workspace)
+    GET    /api/chat/sessions/{id}/messages               -> [{...messages...}]            (Supabase JWT + Workspace)
+    POST   /api/chat/sessions/{id}/messages               -> created message row           (Supabase JWT + Workspace)
+    GET    /api/saved-answers                             -> [{...saved answers...}]       (Supabase JWT + Workspace)
+    POST   /api/saved-answers                             -> created saved answer row      (Supabase JWT + Workspace)
+    DELETE /api/saved-answers/{id}                        -> {"id","deleted":true}         (Supabase JWT + Workspace)
+    GET    /api/slack/connect-url                         -> {"url": "..."}                (Supabase JWT + Workspace)
+    GET    /api/slack/oauth/callback                      -> redirect to frontend          (signed state token)
+    GET    /api/slack/channels                            -> {"connected", "channels"}     (Supabase JWT + Workspace)
+    POST   /api/slack/channels                            -> {"selected_count"}            (Supabase JWT + Workspace)
+    POST   /api/slack/ingest                              -> {"status": "started"}         (Supabase JWT + Workspace)
+    GET    /api/admin/status                              -> ingestion status snapshot     (X-API-Key, legacy)
+    POST   /slack/events                                  -> Slack Events API webhook      (Slack signature)
 
-The frontend MUST send `X-API-Key: <APP_API_KEY>` on every protected call.
+User-facing routes require:
+    Authorization: Bearer <supabase_jwt>
+    X-Workspace-Id: <uuid of an active workspace the user is a member of>
+
+The admin/internal `/api/admin/status` route is still gated by the
+shared APP_API_KEY (X-API-Key) — moving it to Supabase admin-role is
+deferred.
+
+The /slack/oauth/callback route is browser-redirected by Slack itself,
+so it cannot require an Authorization header. Instead the state
+parameter is a signed token binding the OAuth attempt to a specific
+workspace + user; the handler verifies that signature before storing
+the installation.
+
 The /slack/events endpoint is public but authenticated via Slack's
 HMAC-SHA256 request signature — see slack_signature.py.
 """
 
 import json
 import os
+import secrets
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Literal, Optional, Union
 
@@ -27,19 +55,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import (  # noqa: E402
-    BackgroundTasks,
-    Depends,
-    FastAPI,
-    Header,
-    HTTPException,
-    Request,
-    status,
+    BackgroundTasks, Depends, FastAPI, Header, HTTPException,
+    Request, Response, status,
 )
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse  # noqa: E402
 from pydantic import BaseModel, ConfigDict, Field  # noqa: E402
 
 from auth import require_api_key  # noqa: E402
+from auth_supabase import (  # noqa: E402
+    SupabaseUser,
+    WorkspaceContext,
+    require_user,
+    require_workspace,
+)
 from date_utils import parse_date_query  # noqa: E402
 from errors import AppError, app_error_handler  # noqa: E402
 from health import router as health_router  # noqa: E402
@@ -49,7 +78,10 @@ from prompts import INSUFFICIENT_CONTEXT_ANSWER  # noqa: E402
 from query_cache import build_cache_key, get_cached  # noqa: E402
 from query_cache import put as cache_put  # noqa: E402
 from query_rewriter import rewrite_query  # noqa: E402
-from rate_limit import rate_limit_dependency  # noqa: E402
+from rate_limit import (  # noqa: E402
+    make_rate_limit_dependency,
+    rate_limit_dependency,
+)
 from realtime_ingest import (  # noqa: E402
     _event_already_seen,
     admin_status_snapshot,
@@ -64,6 +96,60 @@ from request_context import RequestContextMiddleware  # noqa: E402
 from scheduler import auto_ingest_enabled, start_scheduler, stop_scheduler  # noqa: E402
 from slack_signature import verify_slack_signature  # noqa: E402
 from startup import validate_required_env  # noqa: E402
+from supabase_client import (  # noqa: E402
+    create_chat_message,
+    create_chat_session,
+    create_saved_answer,
+    delete_gmail_connection,
+    delete_saved_answer,
+    ensure_workspace_sub_tenant,
+    get_gmail_connection,
+    get_gmail_connection_public,
+    get_gmail_connection_sync_summary,
+    get_saved_answer,
+    get_share_link_by_token,
+    get_slack_installation,
+    list_chat_messages,
+    list_chat_sessions,
+    list_gmail_connections_public,
+    list_gmail_labels,
+    list_saved_answers,
+    list_selected_channel_ids,
+    list_selected_gmail_label_ids,
+    list_share_links_for_workspace,
+    list_user_workspaces,
+    list_workspace_channels,
+    revoke_share_link,
+    set_selected_channels,
+    set_selected_gmail_labels,
+    upsert_gmail_connection,
+    upsert_gmail_labels,
+    upsert_slack_channels,
+    upsert_slack_installation,
+    create_share_link,
+)
+from slack_oauth import (  # noqa: E402
+    build_connect_url,
+    exchange_code,
+    installation_from_oauth_response,
+    list_slack_channels,
+    run_workspace_ingest,
+    slack_oauth_configured,
+    verify_oauth_state,
+)
+# Phase 8: Gmail connector. Aliased on import so the symbol names don't
+# clash with the Slack helpers above (both modules expose
+# build_connect_url, exchange_code, verify_oauth_state, etc.).
+from gmail_oauth import (  # noqa: E402
+    build_connect_url as gmail_build_connect_url,
+    exchange_code as gmail_exchange_code,
+    fetch_user_info as gmail_fetch_user_info,
+    gmail_oauth_configured,
+    installation_from_token_response as gmail_installation_from_token_response,
+    list_labels as list_gmail_labels_from_api,
+    run_workspace_gmail_ingest,
+    verify_oauth_state as verify_gmail_oauth_state,
+)
 
 configure_logging(level=os.getenv('LOG_LEVEL', 'INFO'))
 logger = get_logger(__name__)
@@ -81,10 +167,30 @@ def _parse_cors_origins() -> List[str]:
 ALLOWED_ORIGINS = _parse_cors_origins()
 
 
+# ---------- Phase 7: per-route rate-limit dependencies ---------- #
+# Each one targets a named bucket so a flood in one area can't starve
+# the others. The factory reads its limit from env at request time, so
+# operators can retune limits without a restart.
+auth_rate_limit = make_rate_limit_dependency("auth")
+slack_webhook_rate_limit = make_rate_limit_dependency("slack_webhook")
+slack_ingest_rate_limit = make_rate_limit_dependency("ingest")
+# Phase 13: public share-link reads have no auth, so they get their
+# own rate-limit bucket. The bucket name is unknown to rate_limit.py's
+# defaults table -- which just means it falls back to the global
+# default limit. That's the right behavior; we don't want to be more
+# generous to public anonymous traffic than to authenticated users.
+public_share_rate_limit = make_rate_limit_dependency("public_share")
+
+
 # ---------- Lifespan: startup checks + scheduler ---------- #
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_required_env()
+    # Phase 7: opt-in Sentry init (no-op when SENTRY_DSN unset).
+    # Initialized AFTER env validation so a startup config error
+    # surfaces in stdout logs, not Sentry.
+    from observability import init_sentry  # noqa: PLC0415
+    init_sentry()
     start_scheduler()
     try:
         yield
@@ -106,8 +212,16 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "X-API-Key"],
+    # DELETE is needed for /api/saved-answers/{id}. PATCH is included for
+    # forward-compat; PUT and HEAD are too. OPTIONS is what CORS uses
+    # for the preflight itself.
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    allow_headers=[
+        "Content-Type",
+        "X-API-Key",
+        "Authorization",
+        "X-Workspace-Id",
+    ],
 )
 app.add_middleware(RequestContextMiddleware)
 
@@ -124,6 +238,11 @@ QueryMode = Literal[
 ]
 DocumentType = Literal["message", "thread"]
 HistoryRole = Literal["user", "assistant"]
+# Sources the user can restrict a query to. None / empty = all sources.
+# Currently the backend writes only Slack ("message" / "thread"
+# documents) and Gmail ("email" documents); the literal is closed so a
+# typo in the JSON body becomes a 422 instead of a silent no-op.
+SourceKind = Literal["slack", "gmail"]
 
 
 # Cap on conversation_history entries from the request. Frontend keeps the
@@ -184,6 +303,18 @@ class QueryRequest(BaseModel):
     document_type: Optional[DocumentType] = Field(
         None,
         description="Optional filter: 'message' or 'thread'.",
+    )
+    # Optional restriction on which connector source a candidate must
+    # come from. None / omitted / empty list means "all sources" (the
+    # default and the pre-Phase-9 behavior). Each list item is one of
+    # SourceKind ("slack", "gmail"). Pydantic enforces the literal so
+    # an unknown source name in the body returns 422.
+    allowed_sources: Optional[List[SourceKind]] = Field(
+        None,
+        description="Optional restriction on connector source(s). "
+                    "Omit or pass null for all sources; pass ['slack'] "
+                    "or ['gmail'] to filter to one connector; pass "
+                    "['slack','gmail'] to allow both explicitly.",
     )
     # Date range — accept either a Slack ts string ("1778775842.876209")
     # or a unix-timestamp number. recall.py normalizes both. Explicit
@@ -420,19 +551,74 @@ def root() -> Dict[str, str]:
     }
 
 
+@app.get("/api/health")
+def health() -> Dict[str, str]:
+    """
+    Liveness probe for load balancers (Render, Railway) + uptime
+    monitors. Intentionally cheap: no DB calls, no third-party
+    reach-out. Returns 200 as long as the process can serve HTTP.
+
+    Production hosts can poll this every few seconds without budget
+    concerns. Use /api/admin/status (X-API-Key gated) for richer
+    ingestion telemetry.
+    """
+    return {
+        "status":      "ok",
+        "service":     "second-brain-api",
+        # ENVIRONMENT lets dashboards distinguish prod vs preview vs
+        # local. Blank when unset rather than guessing.
+        "environment": (os.getenv("ENVIRONMENT") or "").strip(),
+        # APP_VERSION is set by the host's build step (e.g. Render's
+        # RENDER_GIT_COMMIT, Railway's RAILWAY_GIT_COMMIT_SHA). Falling
+        # back to "dev" makes local responses obvious in logs.
+        "version": (
+            os.getenv("APP_VERSION")
+            or os.getenv("RENDER_GIT_COMMIT")
+            or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+            or "dev"
+        ).strip(),
+    }
+
+
+@app.get("/api/ready")
+def ready(response: Response) -> Dict[str, Any]:
+    """
+    Readiness probe. Confirms the backend's CRITICAL upstream
+    dependencies (Supabase, HydraDB, OpenAI/compatible) are reachable.
+
+    Distinct from /api/health (liveness):
+      - /api/health  -> "the process can serve HTTP"  (cheap, always 200 once boot completes)
+      - /api/ready   -> "the process can serve TRAFFIC" (200 only when all deps OK)
+
+    Returns 200 with check details when all deps are healthy, or 503
+    with the same shape when any dep fails. The body always includes a
+    per-check breakdown so a probe failure is debuggable from logs.
+    """
+    from observability import check_dependencies  # noqa: PLC0415
+    result = check_dependencies()
+    if not result.get("ok"):
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return result
+
+
 # ---------- Protected routes ---------- #
 @app.post(
     "/api/query",
-    dependencies=[Depends(require_api_key), Depends(rate_limit_dependency)],
+    dependencies=[Depends(rate_limit_dependency)],
 )
-def query(req: QueryRequest) -> Dict[str, Any]:
+def query(
+    req: QueryRequest,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
     """
     Retrieve Slack context from HydraDB, ask the cloud LLM for a grounded
     answer, and return it along with the source list.
 
     Cached responses are flagged via debug.cache_hit=true.
 
-    Requires header:  X-API-Key: <APP_API_KEY>
+    Requires headers:
+        Authorization: Bearer <supabase_jwt>
+        X-Workspace-Id: <uuid>
     """
     resolved = _resolve_date_filters(req)
     history = _normalize_history(req)
@@ -468,6 +654,20 @@ def query(req: QueryRequest) -> Dict[str, Any]:
         # Weak inference becomes a ranking bias (matching chunks float up
         # but non-matching chunks aren't dropped).
         metadata_bias=rewrite["metadata_bias"],
+        # Phase 9: source filter (Slack / Gmail). None = all sources,
+        # matching pre-Phase-9 behavior.
+        allowed_sources=req.allowed_sources,
+        # Phase 12: workspace_id reaches the recall layer so it can
+        # pull matching structured memories (action items / decisions
+        # / summaries / entities) alongside the HydraDB chunks.
+        workspace_id=workspace.workspace_id,
+        # Phase 4: route this query to the workspace's HydraDB
+        # sub-tenant. ensure_workspace_sub_tenant materializes the row
+        # value on the fly for any pre-Phase-4 workspace that missed
+        # the migration backfill.
+        hydradb_sub_tenant_id=ensure_workspace_sub_tenant(
+            workspace_id=workspace.workspace_id,
+        ),
     )
 
     # Mark non-cached on the way out so the UI can render a "fresh" badge
@@ -507,9 +707,13 @@ def _sse_event(event: str, data: Any) -> bytes:
 
 @app.post(
     "/api/query/stream",
-    dependencies=[Depends(require_api_key), Depends(rate_limit_dependency)],
+    dependencies=[Depends(rate_limit_dependency)],
 )
-def query_stream(req: QueryRequest, request: Request) -> StreamingResponse:
+def query_stream(
+    req: QueryRequest,
+    request: Request,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> StreamingResponse:
     """
     Same request schema as POST /api/query, but the answer is streamed
     via Server-Sent Events. Event types:
@@ -573,6 +777,14 @@ def query_stream(req: QueryRequest, request: Request) -> StreamingResponse:
                 start_timestamp=resolved["start_timestamp"],
                 end_timestamp=resolved["end_timestamp"],
                 metadata_bias=rewrite["metadata_bias"],
+                # Phase 9: source filter (Slack / Gmail).
+                allowed_sources=req.allowed_sources,
+                # Phase 12: workspace_id for structured-memory lookup.
+                workspace_id=workspace.workspace_id,
+                # Phase 4: workspace-isolated recall.
+                hydradb_sub_tenant_id=ensure_workspace_sub_tenant(
+                    workspace_id=workspace.workspace_id,
+                ),
             )
         except AppError as e:
             yield _sse_event(
@@ -706,7 +918,10 @@ def query_stream(req: QueryRequest, request: Request) -> StreamingResponse:
 # Public route — authenticated by Slack's HMAC signature, not X-API-Key.
 # Slack expects us to ACK within 3 seconds, so we verify, queue the
 # ingestion as a BackgroundTask, and return 200 immediately.
-@app.post("/slack/events")
+@app.post(
+    "/slack/events",
+    dependencies=[Depends(slack_webhook_rate_limit)],
+)
 async def slack_events(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -756,15 +971,64 @@ async def slack_events(
             logger.debug('slack_events_duplicate', extra={'event_id': event_id})
             return JSONResponse(content={"ok": True})
 
-        event = payload.get("event") or {}
-        # Dispatch ingestion in the background so Slack gets its 200 ack
-        # within 3 seconds even if HydraDB / Slack API calls are slow.
-        background_tasks.add_task(process_slack_event, event)
+        # Phase 5: pass the FULL payload (not just the inner event) so
+        # the realtime handler can read `team_id` / `authorizations`
+        # and route to the right workspace. The handler then resolves
+        # the workspace's bot_token + HydraDB sub_tenant_id internally
+        # — we never need workspace context on the webhook itself.
+        background_tasks.add_task(process_slack_event, payload)
         return JSONResponse(content={"ok": True})
 
     # Unknown top-level type. Ack 200 so Slack stops retrying.
     logger.debug('slack_events_unknown_type', extra={'payload_type': payload.get('type')})
     return JSONResponse(content={"ok": True})
+
+
+# ---------- Phase 2 request models (chat history + saved answers) ---------- #
+class ChatSessionCreate(BaseModel):
+    """Body for POST /api/chat/sessions."""
+    model_config = ConfigDict(extra="forbid")
+    title: Optional[str] = Field(default=None, max_length=200)
+
+
+class ChatMessageCreate(BaseModel):
+    """Body for POST /api/chat/sessions/{session_id}/messages."""
+    model_config = ConfigDict(extra="forbid")
+    role:    Literal["user", "assistant"]
+    content: str = Field(default="", max_length=200_000)
+    sources: Optional[List[Dict[str, Any]]] = None
+
+
+class SavedAnswerCreate(BaseModel):
+    """Body for POST /api/saved-answers."""
+    model_config = ConfigDict(extra="forbid")
+    question: str = Field(default="", max_length=5000)
+    answer:   str = Field(default="", max_length=200_000)
+    sources:  Optional[List[Dict[str, Any]]] = None
+    mode:     Optional[str] = Field(default=None, max_length=64)
+    filters:  Optional[Dict[str, Any]] = None
+    debug:    Optional[Dict[str, Any]] = None
+
+
+# ---------- Phase 3 request models (Slack Connect) ---------- #
+class SlackChannelSelection(BaseModel):
+    """Body for POST /api/slack/channels."""
+    model_config = ConfigDict(extra="forbid")
+    selected_channel_ids: List[str] = Field(default_factory=list)
+
+
+# ---------- Phase 8: Gmail request models ---------- #
+class GmailLabelSelection(BaseModel):
+    """Body for POST /api/gmail/labels."""
+    model_config = ConfigDict(extra="forbid")
+    connection_id:      str
+    selected_label_ids: List[str] = Field(default_factory=list)
+
+
+class GmailIngestRequest(BaseModel):
+    """Body for POST /api/gmail/ingest."""
+    model_config = ConfigDict(extra="forbid")
+    connection_id: str
 
 
 # ---------- Admin status (light, read-only) ---------- #
@@ -778,3 +1042,1113 @@ def admin_status() -> Dict[str, Any]:
     Does NOT expose any per-document content — only counters and flags.
     """
     return admin_status_snapshot(scheduler_enabled=auto_ingest_enabled())
+
+
+# ---------- User profile + workspaces (Phase 1 multi-user) ---------- #
+@app.get("/api/me", dependencies=[Depends(auth_rate_limit)])
+def me(user: SupabaseUser = Depends(require_user)) -> Dict[str, Any]:
+    """
+    Return the JWT-verified caller's identity. Useful for the frontend
+    to confirm auth without fetching the workspaces list.
+    """
+    return {"id": user.id, "email": user.email}
+
+
+@app.get("/api/me/workspaces", dependencies=[Depends(auth_rate_limit)])
+def my_workspaces(
+    user: SupabaseUser = Depends(require_user),
+) -> List[Dict[str, Any]]:
+    """
+    Return the workspaces the caller is a member of, with their role.
+    The frontend uses this to populate the workspace switcher and to
+    decide which X-Workspace-Id to send on subsequent /api/query calls.
+    """
+    return list_user_workspaces(user_id=user.id)
+
+
+# ---------- Chat sessions (Phase 2) ---------- #
+# Sessions are personal-within-workspace: shared organization but
+# private threads. Messages live under sessions and are read-scoped by
+# the same rule. All routes require Supabase JWT + X-Workspace-Id —
+# enforced once by the require_workspace dependency.
+
+@app.get("/api/chat/sessions")
+def chat_sessions_list(
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> List[Dict[str, Any]]:
+    """Return the caller's chat sessions in this workspace, newest first."""
+    return list_chat_sessions(
+        workspace_id=workspace.workspace_id,
+        user_id=workspace.user.id,
+    )
+
+
+@app.post("/api/chat/sessions", status_code=status.HTTP_201_CREATED)
+def chat_sessions_create(
+    req: ChatSessionCreate,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """Create a new chat session in the caller's workspace."""
+    row = create_chat_session(
+        workspace_id=workspace.workspace_id,
+        user_id=workspace.user.id,
+        title=req.title or "New chat",
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not create chat session.",
+        )
+    return row
+
+
+@app.get("/api/chat/sessions/{session_id}/messages")
+def chat_session_messages_list(
+    session_id: str,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> List[Dict[str, Any]]:
+    """
+    Return the messages in a session, oldest first.
+
+    Scoped to the caller's own session inside the active workspace; an
+    unknown / forbidden session_id returns an empty list rather than a
+    404 so it can't be used for existence-probing.
+    """
+    return list_chat_messages(
+        session_id=session_id,
+        workspace_id=workspace.workspace_id,
+        user_id=workspace.user.id,
+    )
+
+
+@app.post(
+    "/api/chat/sessions/{session_id}/messages",
+    status_code=status.HTTP_201_CREATED,
+)
+def chat_session_messages_create(
+    session_id: str,
+    req: ChatMessageCreate,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """Append a user / assistant message to a session the caller owns."""
+    row = create_chat_message(
+        session_id=session_id,
+        workspace_id=workspace.workspace_id,
+        user_id=workspace.user.id,
+        role=req.role,
+        content=req.content,
+        sources=req.sources,
+    )
+    if row is None:
+        # Distinguish "session doesn't belong to caller" from real DB
+        # failure isn't worth a probe-able 404 — both map to the same
+        # client-visible refusal.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not append message to session.",
+        )
+    return row
+
+
+# ---------- Saved answers (Phase 2) ---------- #
+
+@app.get("/api/saved-answers")
+def saved_answers_list(
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> List[Dict[str, Any]]:
+    """Return the caller's saved answers in this workspace, newest first."""
+    return list_saved_answers(
+        workspace_id=workspace.workspace_id,
+        user_id=workspace.user.id,
+    )
+
+
+@app.post("/api/saved-answers", status_code=status.HTTP_201_CREATED)
+def saved_answers_create(
+    req: SavedAnswerCreate,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """Save an assistant answer to the caller's bookmarks."""
+    row = create_saved_answer(
+        workspace_id=workspace.workspace_id,
+        user_id=workspace.user.id,
+        question=req.question,
+        answer=req.answer,
+        sources=req.sources,
+        mode=req.mode,
+        filters=req.filters,
+        debug=req.debug,
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not save answer.",
+        )
+    return row
+
+
+@app.delete("/api/saved-answers/{saved_id}")
+def saved_answers_delete(
+    saved_id: str,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """Delete a saved answer the caller owns."""
+    removed = delete_saved_answer(
+        saved_id=saved_id,
+        workspace_id=workspace.workspace_id,
+        user_id=workspace.user.id,
+    )
+    if not removed:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Saved answer not found.",
+        )
+    return {"id": saved_id, "deleted": True}
+
+
+# ---------- Phase 13: share links + workspace status ---------- #
+# Three authenticated routes (create/list/revoke) and one PUBLIC route
+# (read by token). The public route is the only place in the API
+# surface that doesn't require auth -- its security comes entirely
+# from the share_token's entropy (256 bits via secrets.token_urlsafe(32)).
+#
+# Public-route projection rules:
+#   - NEVER include workspace_id, created_by, user_id, debug
+#   - NEVER include any cross-record data
+#   - Revoked or expired -> 404 (collapsed, never distinguishable)
+
+
+# Built once so the share-link URL builder doesn't re-read env each
+# call. It still respects FRONTEND_BASE_URL override via the helper.
+def _share_url_for(token: str) -> str:
+    """Build the user-visible share URL the frontend renders the
+    standalone read view at."""
+    base = _frontend_base_url()
+    return f"{base}/shared/{token}"
+
+
+@app.post(
+    "/api/saved-answers/{saved_id}/share",
+    status_code=status.HTTP_201_CREATED,
+)
+def saved_answers_share(
+    saved_id: str,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Mint a share link for a saved answer the caller owns. The token
+    is opaque (URL-safe base64 of 32 random bytes -> 43 chars) and
+    serves as the public read credential.
+
+    Ownership check: we require the saved answer to live in this
+    workspace. We do NOT require the caller to be the same user_id
+    that originally saved it -- workspace members can share each
+    other's bookmarks. (Revoke is still tied to created_by.)
+    """
+    saved = get_saved_answer(
+        saved_id=saved_id, workspace_id=workspace.workspace_id,
+    )
+    if not saved:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Saved answer not found.",
+        )
+    token = secrets.token_urlsafe(32)
+    row = create_share_link(
+        workspace_id=workspace.workspace_id,
+        saved_answer_id=saved_id,
+        created_by=workspace.user.id,
+        share_token=token,
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not create share link.",
+        )
+    return {
+        "id":              row.get("id"),
+        "share_token":     token,
+        "url":             _share_url_for(token),
+        "saved_answer_id": saved_id,
+        "created_at":      row.get("created_at"),
+    }
+
+
+@app.get("/api/saved-answers/{saved_id}/shares")
+def saved_answers_shares_list(
+    saved_id: str,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    List active (non-revoked) shares for one saved answer. The
+    frontend uses this to render a "this answer is shared" badge +
+    revoke button on saved answers.
+    """
+    rows = list_share_links_for_workspace(
+        workspace_id=workspace.workspace_id,
+        saved_answer_id=saved_id,
+    )
+    # Hide revoked shares from the listing -- once revoked, a share
+    # link is effectively gone from the user's perspective.
+    active = [
+        {
+            "id":          r.get("id"),
+            "share_token": r.get("share_token"),
+            "url":         _share_url_for(r.get("share_token") or ""),
+            "created_at":  r.get("created_at"),
+            "expires_at":  r.get("expires_at"),
+            "created_by":  r.get("created_by"),
+        }
+        for r in rows
+        if not r.get("revoked_at")
+    ]
+    return {"shares": active}
+
+
+@app.delete("/api/saved-answers/share/{share_token}")
+def saved_answers_share_revoke(
+    share_token: str,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Revoke a share link. Scoped to (workspace_id, created_by) so one
+    user can't revoke another user's share. Returns 404 if the token
+    doesn't exist in this workspace or wasn't created by the caller --
+    we don't distinguish those cases to avoid leaking existence.
+    """
+    ok = revoke_share_link(
+        share_token=share_token,
+        workspace_id=workspace.workspace_id,
+        user_id=workspace.user.id,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Share link not found.",
+        )
+    return {"revoked": True}
+
+
+@app.get(
+    "/api/shared/{share_token}",
+    dependencies=[Depends(public_share_rate_limit)],
+)
+def shared_answer_public(
+    share_token: str,
+) -> Dict[str, Any]:
+    """
+    PUBLIC read-only fetch. No auth -- the share_token IS the
+    credential. The response NEVER includes workspace_id, created_by,
+    debug payload, or any cross-record data.
+
+    Returns 404 for: missing / revoked / expired tokens. Collapsed
+    so an attacker probing tokens can't distinguish the three cases.
+    """
+    link = get_share_link_by_token(share_token=share_token)
+    if not link:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Shared link not found.",
+        )
+    saved = get_saved_answer(
+        saved_id=link.get("saved_answer_id") or "",
+        workspace_id=link.get("workspace_id") or "",
+    )
+    if not saved:
+        # The saved answer was deleted but the share link row outlived
+        # it (FK cascade should prevent this in practice; defensive).
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Shared link not found.",
+        )
+    # PUBLIC projection allowlist -- nothing here ties back to a
+    # workspace or user.
+    return {
+        "question":   saved.get("question") or "",
+        "answer":     saved.get("answer") or "",
+        "sources":    saved.get("sources") or [],
+        "mode":       saved.get("mode"),
+        "created_at": saved.get("created_at"),
+    }
+
+
+@app.get("/api/workspace/status")
+def workspace_status(
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Lightweight snapshot the frontend uses to render the
+    "connectors + sync health" hint bar. Workspace-scoped, no
+    secrets, no internal details.
+
+    Shape:
+      {
+        "slack": {
+            "connected":         bool,
+            "channels_selected": int,
+            "scheduler_enabled": bool,
+        },
+        "gmail": {
+            "connection_count": int,
+            "labels_selected":  int,
+            "last_synced_at":   ISO str | null,
+        },
+      }
+    """
+    # ---- Slack ----
+    slack_install = get_slack_installation(workspace_id=workspace.workspace_id)
+    slack_channels = list_selected_channel_ids(
+        workspace_id=workspace.workspace_id,
+    )
+    slack_status = {
+        "connected":         bool(slack_install),
+        "channels_selected": len(slack_channels),
+        "scheduler_enabled": auto_ingest_enabled(),
+    }
+
+    # ---- Gmail ----
+    # Aggregate per-connection summary into a single workspace-level
+    # snapshot: max last_synced_at, summed labels_selected. This is
+    # the smallest payload the hint bar can render without further
+    # round-trips.
+    gmail_conns = list_gmail_connections_public(
+        workspace_id=workspace.workspace_id,
+    )
+    last_synced: Optional[str] = None
+    labels_total = 0
+    for c in gmail_conns:
+        cid = c.get("id") or ""
+        if not cid:
+            continue
+        try:
+            summary = get_gmail_connection_sync_summary(
+                workspace_id=workspace.workspace_id,
+                gmail_connection_id=cid,
+            )
+        except Exception:  # noqa: BLE001
+            summary = {"last_synced_at": None, "labels_synced": 0}
+        ts = summary.get("last_synced_at")
+        if ts and (last_synced is None or str(ts) > str(last_synced)):
+            last_synced = ts
+        try:
+            label_ids = list_selected_gmail_label_ids(
+                workspace_id=workspace.workspace_id,
+                gmail_connection_id=cid,
+            )
+            labels_total += len(label_ids or [])
+        except Exception:  # noqa: BLE001
+            pass
+    gmail_status = {
+        "connection_count": len(gmail_conns),
+        "labels_selected":  labels_total,
+        "last_synced_at":   last_synced,
+    }
+
+    return {"slack": slack_status, "gmail": gmail_status}
+
+
+# ---------- Phase 15: analytics ---------- #
+# Four read-only endpoints under /api/analytics. Each one delegates
+# to the analytics_store / analytics_intelligence layer, which is
+# workspace-scoped and degrades gracefully on Supabase failure.
+# None of these endpoints write -- they're pure projections over
+# data already on disk (analytics_events + extracted_memories).
+
+
+def _clamp_days(value: Any, default: int = 7, max_days: int = 90) -> int:
+    """Defensive parse of the ?days= query param."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(n, max_days))
+
+
+@app.get("/api/analytics/overview")
+def analytics_overview(
+    days: int = 7,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Combined query + ingest + retrieval-failure stats over the
+    configured window. The UI renders this as the top of the
+    analytics panel.
+    """
+    from analytics_store import (   # local import keeps boot fast
+        aggregate_query_stats,
+        aggregate_ingest_stats,
+        aggregate_retrieval_failure_stats,
+    )
+    safe_days = _clamp_days(days)
+    return {
+        "window_days":         safe_days,
+        "query":               aggregate_query_stats(
+            workspace_id=workspace.workspace_id, days=safe_days,
+        ),
+        "ingest":              aggregate_ingest_stats(
+            workspace_id=workspace.workspace_id, days=safe_days,
+        ),
+        "retrieval_failures":  aggregate_retrieval_failure_stats(
+            workspace_id=workspace.workspace_id, days=safe_days,
+        ),
+    }
+
+
+@app.get("/api/analytics/topics")
+def analytics_topics(
+    days: int = 30,
+    top_n: int = 10,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Top entities + their co-occurring entities (memory graph) plus
+    a cluster count. Drives the "Top Topics" card.
+    """
+    from analytics_intelligence import topic_overview
+    safe_days = _clamp_days(days, default=30)
+    safe_top = max(1, min(int(top_n or 10), 50))
+    return topic_overview(
+        workspace_id=workspace.workspace_id,
+        days=safe_days,
+        top_n=safe_top,
+    )
+
+
+@app.get("/api/analytics/timeline")
+def analytics_timeline(
+    entity: Optional[str] = None,
+    kind: Optional[str] = None,
+    days: int = 90,
+    limit: int = 50,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Chronological memory rows for one entity / kind. Used by the
+    timeline view when the user clicks a topic from the topics card.
+
+    `kind` accepts the same memory kinds as the /api/memories filter:
+    "action_item" | "decision" | "summary" | "entity". Multiple kinds
+    can be passed comma-separated.
+    """
+    from analytics_intelligence import reconstruct_timeline
+    kinds = None
+    if kind:
+        kinds = [k.strip() for k in kind.split(",") if k.strip()]
+    safe_days = _clamp_days(days, default=90, max_days=365)
+    safe_limit = max(1, min(int(limit or 50), 200))
+    rows = reconstruct_timeline(
+        workspace_id=workspace.workspace_id,
+        entity=entity,
+        kinds=kinds,
+        days=safe_days,
+        limit=safe_limit,
+    )
+    return {"rows": rows}
+
+
+@app.get("/api/analytics/insights")
+def analytics_insights(
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Combined proactive-intelligence payload:
+      stale action items, dormant projects, surging entities,
+      plus the recurring-pattern list. The UI renders these as
+      separate cards in the analytics panel.
+    """
+    from analytics_intelligence import (
+        proactive_insights, recurring_patterns,
+    )
+    insights = proactive_insights(workspace_id=workspace.workspace_id)
+    recurring = recurring_patterns(
+        workspace_id=workspace.workspace_id, days=7, min_mentions=3,
+    )
+    return {**insights, "recurring": recurring}
+
+
+# ---------- Slack Connect (Phase 3) ---------- #
+# Per-workspace Slack OAuth. The bot token Slack returns is stored in
+# Supabase (slack_installations.bot_token) and never echoed back to
+# the frontend. The frontend only needs to know that Slack is connected
+# (team name + when), then can list channels and toggle which ones to
+# ingest.
+
+def _frontend_base_url() -> str:
+    """
+    Where the OAuth callback should redirect after success/failure.
+    Falls back to the first allowed CORS origin (which is where the
+    frontend dev server runs) so a missing FRONTEND_BASE_URL doesn't
+    bounce the user to localhost:8000.
+    """
+    explicit = (os.getenv("FRONTEND_BASE_URL") or "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    if ALLOWED_ORIGINS:
+        return ALLOWED_ORIGINS[0].rstrip("/")
+    return "http://localhost:5173"
+
+
+@app.get("/api/slack/connect-url")
+def slack_connect_url(
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, str]:
+    """
+    Return a one-shot Slack OAuth authorize URL the frontend should
+    redirect the user to. The URL embeds a signed state token binding
+    this attempt to the caller's workspace + user.
+
+    503 if Slack OAuth isn't configured in the env — the frontend uses
+    this status to render a "Slack integration is disabled" message
+    rather than a broken Connect button.
+    """
+    if not slack_oauth_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Slack OAuth is not configured on the server.",
+        )
+    try:
+        url = build_connect_url(
+            workspace_id=workspace.workspace_id,
+            user_id=workspace.user.id,
+        )
+    except RuntimeError as e:
+        # SLACK_OAUTH_STATE_SECRET missing — 503, not 500, so the
+        # client message is consistent with "OAuth disabled".
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(e),
+        )
+    return {"url": url}
+
+
+@app.get("/api/slack/oauth/callback")
+def slack_oauth_callback(
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+):
+    """
+    Slack redirects the user's browser here after they approve (or
+    deny) the install. We cannot require an Authorization header on
+    this route — Slack's redirect doesn't carry one. Instead we:
+
+      1. Verify the state token's HMAC signature + expiry. The token
+         was minted by /api/slack/connect-url, which DID require
+         workspace auth, so a valid state binds this callback to a
+         specific (workspace_id, user_id).
+      2. Exchange the code for a bot token via Slack's oauth.v2.access.
+      3. Upsert the installation into slack_installations.
+      4. Redirect the user back to the frontend with a short status
+         query string so the UI can show a toast.
+
+    All failure modes redirect with `?slack_connect=error&reason=...`
+    so the frontend can surface a clean message instead of a JSON
+    blob in the address bar.
+    """
+    frontend = _frontend_base_url()
+
+    if error:
+        # User canceled or Slack returned an error.
+        return _redirect_with_status(frontend, "error", error)
+    if not code or not state:
+        return _redirect_with_status(frontend, "error", "missing_params")
+
+    payload = verify_oauth_state(state)
+    if not payload:
+        return _redirect_with_status(frontend, "error", "bad_state")
+
+    data = exchange_code(code)
+    if not data:
+        return _redirect_with_status(frontend, "error", "exchange_failed")
+
+    row = installation_from_oauth_response(data)
+    if not row.get("slack_team_id") or not row.get("bot_token"):
+        return _redirect_with_status(frontend, "error", "incomplete_install")
+
+    saved = upsert_slack_installation(
+        workspace_id=payload["workspace_id"],
+        slack_team_id=row["slack_team_id"],
+        slack_team_name=row["slack_team_name"],
+        bot_user_id=row["bot_user_id"],
+        bot_token=row["bot_token"],
+        scopes=row["scopes"],
+        # Phase 6+ audit: the verified OAuth state binds the caller's
+        # Supabase user_id. Forwarding it populates installed_by in
+        # the production schema -- a nullable column, so callers that
+        # don't pass it (older tests) continue to work.
+        installed_by=payload.get("user_id") or None,
+    )
+    if not saved:
+        return _redirect_with_status(frontend, "error", "persist_failed")
+
+    return _redirect_with_status(frontend, "ok", row["slack_team_name"] or "")
+
+
+def _oauth_redirect(frontend: str, connector: str, result: str, reason: str):
+    """
+    Build the post-callback redirect URL the user's browser lands on.
+    `connector` is the query-param key (e.g. "slack_connect", "gmail_connect")
+    so the frontend can dispatch by connector type.
+    `reason` is never untrusted: on success it's a team name or email
+    (validated upstream); on failure it's a short fixed code we choose.
+    """
+    from fastapi.responses import RedirectResponse  # noqa: PLC0415
+    qs = urlencode_safely({connector: result, "reason": reason})
+    return RedirectResponse(url=f"{frontend}/?{qs}", status_code=302)
+
+
+def _redirect_with_status(frontend: str, result: str, reason: str):
+    return _oauth_redirect(frontend, "slack_connect", result, reason)
+
+
+def urlencode_safely(d: Dict[str, str]) -> str:
+    """
+    Tiny urlencode wrapper that drops empty/None values so the final
+    URL stays tidy. We don't want `&reason=` cluttering the query
+    string on a successful connect where reason happens to be blank.
+    """
+    from urllib.parse import urlencode  # noqa: PLC0415
+    cleaned = {k: v for k, v in d.items() if v not in (None, "")}
+    return urlencode(cleaned)
+
+
+@app.get("/api/slack/channels")
+def slack_channels_list(
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Return the current Slack-channel picker state for this workspace.
+
+    If Slack isn't connected yet, returns `connected: false` and an
+    empty channel list — the frontend uses that to show the Connect
+    button instead of a picker.
+
+    If Slack IS connected, we refresh the channel list from Slack's
+    API (upserting into slack_channels) BEFORE reading it back so the
+    user always sees the current state of their Slack workspace.
+    Selection state is preserved across the refresh — only `name` and
+    `is_archived` get updated.
+    """
+    install = get_slack_installation(workspace_id=workspace.workspace_id)
+    if not install:
+        return {
+            "connected": False,
+            "team_name": "",
+            "channels":  [],
+        }
+
+    bot_token = (install.get("bot_token") or "").strip()
+    if bot_token:
+        try:
+            fresh = list_slack_channels(bot_token)
+        except Exception:  # noqa: BLE001
+            fresh = []
+        if fresh:
+            # Production schema's slack_channels.installation_id FK
+            # is non-null. Forward the installation row's id so the
+            # upsert payload satisfies it. The kwarg is optional
+            # (older dev databases without the column still work).
+            upsert_slack_channels(
+                workspace_id=workspace.workspace_id,
+                channels=fresh,
+                installation_id=install.get("id"),
+            )
+
+    rows = list_workspace_channels(workspace_id=workspace.workspace_id)
+    return {
+        "connected": True,
+        "team_name": install.get("slack_team_name") or "",
+        "channels":  rows,
+    }
+
+
+@app.post("/api/slack/channels")
+def slack_channels_save(
+    req: SlackChannelSelection,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Replace the workspace's selected-channel set. Channels not present
+    in the request are flipped to is_selected=false; channels listed
+    are flipped to is_selected=true. We do NOT allow inserting brand
+    new channel rows here — the rows must already exist (created by
+    the previous GET, which refreshes from Slack).
+    """
+    ok = set_selected_channels(
+        workspace_id=workspace.workspace_id,
+        selected_ids=req.selected_channel_ids,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not update channel selection.",
+        )
+    return {"selected_count": len(req.selected_channel_ids)}
+
+
+@app.post(
+    "/api/slack/ingest",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(slack_ingest_rate_limit)],
+)
+def slack_ingest(
+    background_tasks: BackgroundTasks,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Kick off an ingestion run for this workspace's selected channels.
+    Returns immediately with 202; the actual work happens in a
+    BackgroundTask so the request doesn't block on Slack/HydraDB I/O.
+
+    The runner re-uses the existing ingestion primitives — same chunk
+    layout, same dedupe state file. Moving state into Supabase is
+    explicitly out of scope for Phase 3.
+    """
+    install = get_slack_installation(workspace_id=workspace.workspace_id)
+    if not install:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Slack is not connected for this workspace.",
+        )
+    bot_token = (install.get("bot_token") or "").strip()
+    if not bot_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Stored Slack installation is missing a bot token.",
+        )
+
+    channel_ids = list_selected_channel_ids(
+        workspace_id=workspace.workspace_id,
+    )
+    if not channel_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No channels selected for ingestion.",
+        )
+
+    # Phase 4: resolve (or lazy-create) the workspace's HydraDB
+    # sub-tenant before scheduling the background task. A blank value
+    # here means a DB error occurred — we refuse rather than fall back
+    # to the global sub-tenant, which would leak this workspace's
+    # Slack content into the shared bucket.
+    sub_tenant = ensure_workspace_sub_tenant(
+        workspace_id=workspace.workspace_id,
+    )
+    if not sub_tenant:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not resolve workspace HydraDB tenant.",
+        )
+
+    background_tasks.add_task(
+        run_workspace_ingest,
+        workspace_id=workspace.workspace_id,
+        bot_token=bot_token,
+        channel_ids=channel_ids,
+        hydradb_sub_tenant_id=sub_tenant,
+    )
+    return {
+        "status":           "started",
+        "channels_queued":  len(channel_ids),
+    }
+
+
+# =====================================================================
+# Phase 8: Gmail connector routes
+# =====================================================================
+# Mirrors the Slack route surface so the frontend can plug in with the
+# same mental model. Differences:
+#   - One workspace can host MULTIPLE Gmail connections (a personal +
+#     a shared mailbox, for instance). The Slack model is one
+#     installation per workspace.
+#   - Labels (Gmail's equivalent of channels) belong to a CONNECTION,
+#     not directly to the workspace. So the labels / ingest routes
+#     take a connection_id query/body param.
+#
+# All routes except the OAuth callback require auth + workspace.
+
+@app.get(
+    "/api/gmail/connect-url",
+    dependencies=[Depends(auth_rate_limit)],
+)
+def gmail_connect_url(
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, str]:
+    """
+    Build the Google OAuth URL the frontend should redirect the user
+    to. Returns 503 when Gmail OAuth env vars aren't configured -- the
+    connector is opt-in per deployment.
+    """
+    if not gmail_oauth_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Gmail OAuth is not configured on this server.",
+        )
+    url = gmail_build_connect_url(
+        workspace_id=workspace.workspace_id,
+        user_id=workspace.user.id,
+    )
+    return {"url": url}
+
+
+@app.get("/api/gmail/oauth/callback")
+def gmail_oauth_callback(
+    code:  Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+):
+    """
+    Google redirects the user's browser here after they approve or
+    deny consent. Cannot require an Authorization header -- Google's
+    redirect doesn't carry one. Instead we verify the HMAC-signed
+    state, which binds this callback to a specific (workspace_id,
+    user_id) minted by /api/gmail/connect-url.
+
+    All failures redirect with `?gmail_connect=error&reason=...` so
+    the frontend can surface a clean toast.
+    """
+    frontend = _frontend_base_url()
+
+    if error:
+        return _gmail_redirect_with_status(frontend, "error", error)
+    if not code or not state:
+        return _gmail_redirect_with_status(frontend, "error", "missing_params")
+
+    payload = verify_gmail_oauth_state(state)
+    if not payload:
+        return _gmail_redirect_with_status(frontend, "error", "bad_state")
+
+    token_resp = gmail_exchange_code(code)
+    if not token_resp:
+        return _gmail_redirect_with_status(frontend, "error", "exchange_failed")
+
+    user_info = gmail_fetch_user_info(token_resp.get("access_token") or "")
+    if not user_info:
+        return _gmail_redirect_with_status(frontend, "error", "userinfo_failed")
+
+    install = gmail_installation_from_token_response(token_resp, user_info)
+    if not install.get("google_user_id") or not install.get("email"):
+        return _gmail_redirect_with_status(frontend, "error", "incomplete_install")
+
+    saved = upsert_gmail_connection(
+        workspace_id=payload["workspace_id"],
+        google_user_id=install["google_user_id"],
+        email=install["email"],
+        access_token=install["access_token"],
+        refresh_token=install["refresh_token"],
+        token_expiry=install["token_expiry"],
+        scopes=install["scopes"],
+    )
+    if not saved:
+        return _gmail_redirect_with_status(frontend, "error", "persist_failed")
+
+    return _gmail_redirect_with_status(frontend, "ok", install["email"])
+
+
+def _gmail_redirect_with_status(frontend: str, result: str, reason: str):
+    return _oauth_redirect(frontend, "gmail_connect", result, reason)
+
+
+@app.get("/api/gmail/connections")
+def gmail_connections_list(
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    List every Gmail connection in this workspace. The PUBLIC
+    projection is used -- tokens are NEVER returned.
+
+    Phase 11: each connection is enriched with a `sync_summary`
+    sub-object carrying `{last_synced_at, labels_synced}`. The
+    timestamp is the most-recent `last_synced_at` across the
+    connection's per-label rows in gmail_ingestion_state; the
+    counter is how many labels have a recorded sync. The frontend
+    uses this to render "Last synced 5 min ago" without a second
+    round-trip. No tokens, no message ids, no PII.
+    """
+    connections = list_gmail_connections_public(
+        workspace_id=workspace.workspace_id,
+    )
+    enriched: List[Dict[str, Any]] = []
+    for conn in connections:
+        cid = conn.get("id") or ""
+        sync_summary: Dict[str, Any] = {
+            "last_synced_at": None, "labels_synced": 0,
+        }
+        if cid:
+            try:
+                sync_summary = get_gmail_connection_sync_summary(
+                    workspace_id=workspace.workspace_id,
+                    gmail_connection_id=cid,
+                )
+            except Exception:  # noqa: BLE001 -- never block listing
+                pass
+        enriched.append({**conn, "sync_summary": sync_summary})
+    return {"connections": enriched}
+
+
+@app.delete("/api/gmail/connections/{connection_id}")
+def gmail_connection_delete(
+    connection_id: str,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, bool]:
+    """Delete a Gmail connection (cascades to labels + ingestion state)."""
+    ok = delete_gmail_connection(
+        connection_id=connection_id,
+        workspace_id=workspace.workspace_id,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Gmail connection not found.",
+        )
+    return {"deleted": True}
+
+
+@app.get("/api/gmail/labels")
+def gmail_labels_list(
+    connection_id: Optional[str] = None,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Return the label picker state for one Gmail connection.
+
+    Mirrors /api/slack/channels: refresh from Gmail (so newly-created
+    labels show up), upsert into Supabase preserving is_selected, then
+    return the stored rows. The refresh is best-effort -- a Gmail API
+    blip falls through to the previously-stored set.
+    """
+    if not connection_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing connection_id query parameter.",
+        )
+
+    connection = get_gmail_connection(
+        connection_id=connection_id, workspace_id=workspace.workspace_id,
+    )
+    if not connection:
+        # Defensive: return an empty set rather than 404 so a deleted
+        # connection on the picker side renders as "no labels".
+        return {"connected": False, "labels": []}
+
+    try:
+        live_labels = list_gmail_labels_from_api(connection)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "gmail_labels_refresh_failed",
+            extra={
+                "workspace_id":  workspace.workspace_id,
+                "connection_id": connection_id,
+                "error":         type(e).__name__,
+            },
+        )
+        live_labels = []
+
+    if live_labels:
+        upsert_gmail_labels(
+            workspace_id=workspace.workspace_id,
+            gmail_connection_id=connection_id,
+            labels=live_labels,
+        )
+
+    stored = list_gmail_labels(
+        workspace_id=workspace.workspace_id,
+        gmail_connection_id=connection_id,
+    )
+    return {"connected": True, "labels": stored}
+
+
+@app.post("/api/gmail/labels")
+def gmail_labels_save(
+    req: GmailLabelSelection,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """Replace the selected-label set for a Gmail connection."""
+    # Phase 8 multi-tenant safety: verify the connection actually
+    # belongs to THIS workspace before writing. set_selected_gmail_labels
+    # already filters by workspace_id, so a foreign connection_id would
+    # silently no-op -- but that's confusing UX AND it lets one
+    # workspace probe for the existence of another's connection IDs.
+    # 404 closes both leaks.
+    existing = get_gmail_connection_public(
+        connection_id=req.connection_id,
+        workspace_id=workspace.workspace_id,
+    )
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Gmail connection not found.",
+        )
+
+    ok = set_selected_gmail_labels(
+        workspace_id=workspace.workspace_id,
+        gmail_connection_id=req.connection_id,
+        selected_label_ids=req.selected_label_ids,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not persist Gmail label selection.",
+        )
+    return {"selected_count": len(req.selected_label_ids)}
+
+
+@app.post(
+    "/api/gmail/ingest",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(slack_ingest_rate_limit)],   # reuse "ingest" bucket
+)
+def gmail_ingest(
+    req: GmailIngestRequest,
+    background_tasks: BackgroundTasks,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Kick off a Gmail ingestion run for one connection's selected labels.
+    Returns immediately with 202; the actual work happens in a
+    BackgroundTask so the request doesn't block on Gmail / HydraDB I/O.
+    """
+    connection = get_gmail_connection(
+        connection_id=req.connection_id,
+        workspace_id=workspace.workspace_id,
+    )
+    if not connection:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Gmail connection not found.",
+        )
+
+    label_ids = list_selected_gmail_label_ids(
+        workspace_id=workspace.workspace_id,
+        gmail_connection_id=req.connection_id,
+    )
+    if not label_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No labels selected for ingestion.",
+        )
+
+    # Phase 4-style: resolve (or lazy-create) the workspace's HydraDB
+    # sub-tenant before kicking off. A blank value means a DB error
+    # occurred -- we refuse rather than fall back to the global tenant,
+    # which would leak emails into the shared HydraDB bucket.
+    sub_tenant = ensure_workspace_sub_tenant(
+        workspace_id=workspace.workspace_id,
+    )
+    if not sub_tenant:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not resolve workspace HydraDB tenant.",
+        )
+
+    background_tasks.add_task(
+        run_workspace_gmail_ingest,
+        workspace_id=workspace.workspace_id,
+        connection=connection,
+        label_ids=label_ids,
+        hydradb_sub_tenant_id=sub_tenant,
+    )
+    return {
+        "status":        "started",
+        "labels_queued": len(label_ids),
+    }

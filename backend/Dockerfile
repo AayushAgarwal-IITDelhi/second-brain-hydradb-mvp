@@ -9,11 +9,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # Install deps in a separate layer so source changes don't bust the cache.
-COPY backend/requirements.txt /app/requirements.txt
+COPY requirements.txt /app/requirements.txt
 RUN pip install -r /app/requirements.txt
 
 # Copy the rest of the backend.
-COPY backend /app
+COPY . /app
 
 # Run as non-root for safety. The data directory needs to be writable by
 # this user so the ingestion state file can be persisted.

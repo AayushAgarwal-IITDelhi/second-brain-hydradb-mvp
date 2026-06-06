@@ -1,53 +1,40 @@
 """
-Generic retry-with-exponential-backoff framework for the Second Brain MVP.
+Retry utilities for the Second Brain backend.
 
-Usage (decorator form):
+This module provides two complementary retry APIs:
 
-    from retry import retry
+1. `retry` (decorator factory) — our side's addition.
+   Works transparently on both sync and async functions.
+   Structured log lines are emitted for every retry event.
+   Default retryable conditions: TimeoutError, ConnectionError, OSError
+   and HTTP status codes 429, 500, 502, 503, 504.
 
-    @retry(service="hydradb", max_attempts=3)
-    def upload():
-        ...
+2. `retry_with_backoff` (function call) — upstream's addition (Phase 7).
+   Used by slack_oauth.run_workspace_ingest, realtime_ingest, and scheduler.
+   No third-party dependency. Caller passes a list of EXPECTED exception
+   classes; everything else propagates immediately.
 
-    @retry(service="llm", max_attempts=3)
-    async def generate():
-        ...
-
-Streaming note:
-    Only wrap the *initialisation* call (before first token is emitted).
-    Never apply this decorator to a generator that has already started
-    yielding — restarting mid-stream produces garbled output.
-
-Structured log lines are emitted to stdout for every retry event:
-    {"event": "retry_attempt",   "service": "...", "attempt": N, "delay_seconds": X}
-    {"event": "retry_success",   "service": "...", "attempt": N}
-    {"event": "retry_exhausted", "service": "...", "attempt": N, "error": "..."}
-
-Default retryable conditions:
-    Exceptions: TimeoutError, ConnectionError, OSError
-    HTTP status codes: 429, 500, 502, 503, 504
-
-Never retried:
-    HTTP status codes: 400, 401, 403, 404, 422
-    Exception types: ValueError, TypeError, NonRetryableError
+Both share the same jittered exponential backoff design.
 """
+
+from __future__ import annotations
 
 import asyncio
 import functools
 import inspect
 import random
 import time
-from typing import Any, Callable, FrozenSet, Optional, Tuple, Type
+from typing import Any, Callable, FrozenSet, Optional, Tuple, Type, TypeVar
+
+from logging_config import get_logger as _get_logger
+
+_logger = _get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Status code classification
 # ---------------------------------------------------------------------------
 RETRYABLE_STATUS_CODES: FrozenSet[int] = frozenset({429, 500, 502, 503, 504})
 NON_RETRYABLE_STATUS_CODES: FrozenSet[int] = frozenset({400, 401, 403, 404, 422})
-
-from logging_config import get_logger as _get_logger  # noqa: E402 (after constants)
-
-_logger = _get_logger(__name__)
 
 _DEFAULT_RETRYABLE_EXCEPTIONS: Tuple[Type[Exception], ...] = (
     TimeoutError,
@@ -68,7 +55,7 @@ class NonRetryableError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# Internal helpers (shared by both APIs)
 # ---------------------------------------------------------------------------
 def _log(
     event: str,
@@ -149,7 +136,7 @@ def _should_retry(
 
 
 # ---------------------------------------------------------------------------
-# Public decorator
+# API 1: decorator factory (our side)
 # ---------------------------------------------------------------------------
 def retry(
     max_attempts: int = 3,
@@ -243,3 +230,107 @@ def retry(
             return _sync
 
     return decorator
+
+
+# ---------------------------------------------------------------------------
+# API 2: retry_with_backoff (upstream Phase 7)
+# ---------------------------------------------------------------------------
+T = TypeVar("T")
+
+logger = _get_logger(__name__)
+
+
+def retry_with_backoff(
+    fn: Callable[..., T],
+    *args: Any,
+    attempts: int = 3,
+    initial_delay: float = 0.5,
+    max_delay: float = 8.0,
+    backoff_factor: float = 2.0,
+    jitter: float = 0.25,
+    retry_on: Tuple[Type[BaseException], ...] = (Exception,),
+    on_attempt_failure: Optional[Callable[[int, BaseException], None]] = None,
+    on_giveup: Optional[Callable[[BaseException], None]] = None,
+    op_name: str = "operation",
+    **kwargs: Any,
+) -> T:
+    """
+    Call `fn(*args, **kwargs)`. If it raises one of `retry_on`, sleep
+    with exponential backoff and try again, up to `attempts` total tries.
+
+    Args:
+      attempts:       total number of attempts including the first (>= 1).
+      initial_delay:  seconds to sleep before the SECOND attempt.
+      max_delay:      ceiling for the sleep between attempts.
+      backoff_factor: multiplier applied each retry (delay *= factor).
+      jitter:         +/- fraction of the delay to randomize over,
+                      so retries from many workers don't synchronize.
+      retry_on:       exception classes that trigger a retry; everything
+                      else propagates on the first attempt.
+      on_attempt_failure(attempt, err): called per failed attempt that
+                      isn't the final one. attempt is 1-indexed.
+      on_giveup(err): called once if we exhaust attempts. The same
+                      exception is then re-raised to the caller.
+
+    Returns the function's return value on success. Re-raises the LAST
+    captured exception on giveup.
+    """
+    if attempts < 1:
+        raise ValueError("attempts must be >= 1")
+
+    last_err: Optional[BaseException] = None
+    delay = initial_delay
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn(*args, **kwargs)
+        except retry_on as e:
+            last_err = e
+            if attempt >= attempts:
+                logger.warning(
+                    "retry_giveup",
+                    extra={
+                        "op_name":  op_name,
+                        "attempts": attempts,
+                        "error":    type(e).__name__,
+                    },
+                )
+                if on_giveup is not None:
+                    try:
+                        on_giveup(e)
+                    except Exception as cb_err:  # noqa: BLE001
+                        logger.warning(
+                            "retry_on_giveup_callback_failed",
+                            extra={"error": type(cb_err).__name__},
+                        )
+                raise
+
+            # Mid-stream failure: log, optionally notify, sleep, retry.
+            logger.info(
+                "retry_attempt_failed",
+                extra={
+                    "op_name": op_name,
+                    "attempt": attempt,
+                    "of":      attempts,
+                    "error":   type(e).__name__,
+                    "next_delay_s": round(delay, 3),
+                },
+            )
+            if on_attempt_failure is not None:
+                try:
+                    on_attempt_failure(attempt, e)
+                except Exception as cb_err:  # noqa: BLE001
+                    logger.warning(
+                        "retry_on_attempt_failure_callback_failed",
+                        extra={"error": type(cb_err).__name__},
+                    )
+
+            # Jittered exponential backoff.
+            jitter_offset = random.uniform(-jitter, jitter) * delay
+            time.sleep(max(0.0, delay + jitter_offset))
+            delay = min(max_delay, delay * backoff_factor)
+
+    # Unreachable in practice (the loop either returns or raises) but
+    # makes type checkers happy.
+    assert last_err is not None
+    raise last_err
