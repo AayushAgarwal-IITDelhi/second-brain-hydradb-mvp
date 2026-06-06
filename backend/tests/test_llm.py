@@ -32,17 +32,20 @@ def _fake_stream_events(parts):
 class TestGenerateGroundedAnswer:
     def _call(self, question="What's the plan?", context="[1] The plan is X.", mode="default", history=None):
         from llm import generate_grounded_answer
+
         return generate_grounded_answer(question, context, mode=mode, conversation_history=history)
 
     def test_empty_context_returns_fallback(self):
-        from prompts import INSUFFICIENT_CONTEXT_ANSWER
         from llm import generate_grounded_answer
+        from prompts import INSUFFICIENT_CONTEXT_ANSWER
+
         result = generate_grounded_answer("q?", "", mode="default")
         assert result == INSUFFICIENT_CONTEXT_ANSWER
 
     def test_whitespace_context_returns_fallback(self):
-        from prompts import INSUFFICIENT_CONTEXT_ANSWER
         from llm import generate_grounded_answer
+        from prompts import INSUFFICIENT_CONTEXT_ANSWER
+
         result = generate_grounded_answer("q?", "   ", mode="default")
         assert result == INSUFFICIENT_CONTEXT_ANSWER
 
@@ -57,6 +60,7 @@ class TestGenerateGroundedAnswer:
 
     def test_empty_choices_returns_fallback(self):
         from prompts import INSUFFICIENT_CONTEXT_ANSWER
+
         fake_resp = MagicMock()
         fake_resp.choices = []
         mock_client = MagicMock()
@@ -68,6 +72,7 @@ class TestGenerateGroundedAnswer:
 
     def test_none_content_returns_fallback(self):
         from prompts import INSUFFICIENT_CONTEXT_ANSWER
+
         choice = MagicMock()
         choice.message.content = None
         fake_resp = MagicMock()
@@ -80,18 +85,19 @@ class TestGenerateGroundedAnswer:
         assert result == INSUFFICIENT_CONTEXT_ANSWER
 
     def test_timeout_raises_upstream_timeout(self):
-        from errors import UpstreamTimeoutError
         from openai import APITimeoutError
+
+        from errors import UpstreamTimeoutError
+
         mock_client = MagicMock()
-        mock_client.chat.completions.create.side_effect = APITimeoutError(
-            request=MagicMock()
-        )
+        mock_client.chat.completions.create.side_effect = APITimeoutError(request=MagicMock())
         with patch("llm._build_client", return_value=mock_client):
             with pytest.raises(UpstreamTimeoutError):
                 self._call()
 
     def test_generic_exception_raises_llm_error(self):
         from errors import LLMError
+
         mock_client = MagicMock()
         mock_client.chat.completions.create.side_effect = RuntimeError("connection refused")
         with patch("llm._build_client", return_value=mock_client):
@@ -124,11 +130,13 @@ class TestGenerateGroundedAnswer:
 class TestStreamGroundedAnswer:
     def _stream(self, question="What's the plan?", context="[1] content", mode="default"):
         from llm import stream_grounded_answer
+
         return list(stream_grounded_answer(question, context, mode=mode))
 
     def test_empty_context_yields_fallback(self):
-        from prompts import INSUFFICIENT_CONTEXT_ANSWER
         from llm import stream_grounded_answer
+        from prompts import INSUFFICIENT_CONTEXT_ANSWER
+
         parts = list(stream_grounded_answer("q?", ""))
         assert parts == [INSUFFICIENT_CONTEXT_ANSWER]
 
@@ -151,13 +159,14 @@ class TestStreamGroundedAnswer:
         assert None not in parts
 
     def test_timeout_during_stream_raises(self):
-        from errors import UpstreamTimeoutError
         from openai import APITimeoutError
+
+        from errors import UpstreamTimeoutError
+
         mock_client = MagicMock()
-        mock_client.chat.completions.create.side_effect = APITimeoutError(
-            request=MagicMock()
-        )
+        mock_client.chat.completions.create.side_effect = APITimeoutError(request=MagicMock())
         from llm import stream_grounded_answer
+
         with patch("llm._build_client", return_value=mock_client):
             with pytest.raises(UpstreamTimeoutError):
                 list(stream_grounded_answer("q?", "[1] context"))
@@ -172,6 +181,7 @@ class TestStreamGroundedAnswer:
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = _bad_iter()
         from llm import stream_grounded_answer
+
         with patch("llm._build_client", return_value=mock_client):
             with pytest.raises(LLMError):
                 list(stream_grounded_answer("q?", "[1] context"))
@@ -179,6 +189,7 @@ class TestStreamGroundedAnswer:
     def test_missing_api_key_raises_llm_error(self):
         from errors import LLMError
         from llm import stream_grounded_answer
+
         with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
             with pytest.raises(LLMError):
                 list(stream_grounded_answer("q?", "[1] context"))
@@ -188,6 +199,7 @@ class TestStreamGroundedAnswer:
 class TestBuildUserMessage:
     def _build(self, question, context, history=None):
         from llm import _build_user_message
+
         return _build_user_message(question, context, history)
 
     def test_contains_question(self):

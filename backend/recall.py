@@ -22,10 +22,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hydradb_client import HydraDBClient
+from ingestion.ingestion_state import IngestionState
 from llm import generate_grounded_answer
 from logging_config import get_logger
 from prompts import INSUFFICIENT_CONTEXT_ANSWER
-from ingestion.ingestion_state import IngestionState
 
 logger = get_logger(__name__)
 
@@ -42,9 +42,7 @@ def _debug_recall_enabled() -> bool:
     avoid leaking Slack content through stdout. Flip DEBUG_RECALL=true in
     the environment to see the raw HydraDB response and first-chunk preview.
     """
-    return os.getenv("DEBUG_RECALL", "").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
+    return os.getenv("DEBUG_RECALL", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 # Where to look for the list of chunks at the top level of the recall response.
@@ -102,10 +100,30 @@ SCORE_KEYS = ("score", "similarity", "distance", "relevance")
 # Field names that look like metadata, not body text. We avoid these when
 # falling back to a recursive search.
 NON_TEXT_FIELD_NAMES = {
-    "id", "doc_id", "document_id", "source_id", "filename", "source",
-    "channel", "channel_id", "thread_ts", "ts", "user_id", "user", "url",
-    "permalink", "score", "similarity", "distance", "relevance", "type",
-    "doc_type", "name", "tenant_id", "sub_tenant_id", "mime_type",
+    "id",
+    "doc_id",
+    "document_id",
+    "source_id",
+    "filename",
+    "source",
+    "channel",
+    "channel_id",
+    "thread_ts",
+    "ts",
+    "user_id",
+    "user",
+    "url",
+    "permalink",
+    "score",
+    "similarity",
+    "distance",
+    "relevance",
+    "type",
+    "doc_type",
+    "name",
+    "tenant_id",
+    "sub_tenant_id",
+    "mime_type",
 }
 
 MIN_REAL_TEXT_LEN = 20  # below this, a string probably isn't body content
@@ -346,15 +364,9 @@ def _build_source_card(
     """
     minimal_source = _chunk_source(chunk, index)
 
-    candidate_source_id = (
-        _candidate_string(chunk, SOURCE_ID_KEYS) if isinstance(chunk, dict) else None
-    )
-    candidate_stable_key = (
-        _candidate_string(chunk, STABLE_KEY_KEYS) if isinstance(chunk, dict) else None
-    )
-    candidate_filename = (
-        _candidate_string(chunk, FILENAME_KEYS) if isinstance(chunk, dict) else None
-    )
+    candidate_source_id = _candidate_string(chunk, SOURCE_ID_KEYS) if isinstance(chunk, dict) else None
+    candidate_stable_key = _candidate_string(chunk, STABLE_KEY_KEYS) if isinstance(chunk, dict) else None
+    candidate_filename = _candidate_string(chunk, FILENAME_KEYS) if isinstance(chunk, dict) else None
 
     entry: Optional[Dict[str, Any]] = None
     if state is not None:
@@ -367,10 +379,7 @@ def _build_source_card(
         # `minimal_source` might itself be the source_id (current behavior)
         # or the filename. Try it as a last resort before giving up.
         if entry is None and minimal_source:
-            entry = (
-                state.find_by_source_id(minimal_source)
-                or state.find_by_filename(minimal_source)
-            )
+            entry = state.find_by_source_id(minimal_source) or state.find_by_filename(minimal_source)
 
     if entry is None:
         # Graceful fallback: keep the old minimal shape so callers can still
@@ -442,17 +451,17 @@ def _build_source_card(
 
     # Rich source card backed by ingestion state.
     return {
-        "index":         index,
-        "source":        entry.get("channel_name") or minimal_source,
-        "channel":       entry.get("channel_name"),
-        "channel_id":    entry.get("channel_id"),
-        "user":          entry.get("user_name"),
-        "timestamp":     entry.get("timestamp"),
-        "snippet":       entry.get("snippet"),
-        "permalink":     entry.get("permalink"),
-        "stable_key":    entry.get("stable_key"),
+        "index": index,
+        "source": entry.get("channel_name") or minimal_source,
+        "channel": entry.get("channel_name"),
+        "channel_id": entry.get("channel_id"),
+        "user": entry.get("user_name"),
+        "timestamp": entry.get("timestamp"),
+        "snippet": entry.get("snippet"),
+        "permalink": entry.get("permalink"),
+        "stable_key": entry.get("stable_key"),
         "document_type": entry.get("document_type"),
-        "score":         score,
+        "score": score,
     }
 
 
@@ -703,11 +712,7 @@ def _clean_sources_for_ui(
 #                  optional '†<anything but the closing bracket>',
 #                  '】'
 # Two alternates, two capture groups; whichever matched holds the integer.
-_CITATION_PATTERN = re.compile(
-    r"\[\s*(\d+)\s*\]"
-    r"|"
-    r"【\s*(\d+)\s*(?:†[^】]*)?】"
-)
+_CITATION_PATTERN = re.compile(r"\[\s*(\d+)\s*\]" r"|" r"【\s*(\d+)\s*(?:†[^】]*)?】")
 
 
 def _strip_invalid_citations(answer: str, allowed_indexes: Set[int]) -> str:
@@ -1119,14 +1124,20 @@ def prepare_recall_context(
     debug_on = _debug_recall_enabled()
 
     if debug_on:
-        logger.debug('recall_raw_response', extra={
-            'chunks_count': len(chunks),
-            'raw_response_preview': _safe_json(raw_response, limit=500),
-        })
+        logger.debug(
+            'recall_raw_response',
+            extra={
+                'chunks_count': len(chunks),
+                'raw_response_preview': _safe_json(raw_response, limit=500),
+            },
+        )
         if chunks:
-            logger.debug('recall_first_chunk_preview', extra={
-                'first_chunk_keys': list(chunks[0].keys()) if isinstance(chunks[0], dict) else None,
-            })
+            logger.debug(
+                'recall_first_chunk_preview',
+                extra={
+                    'first_chunk_keys': list(chunks[0].keys()) if isinstance(chunks[0], dict) else None,
+                },
+            )
 
     state = _load_state_safely()
     start_unix = _coerce_to_unix_seconds(start_timestamp)
@@ -1157,12 +1168,14 @@ def prepare_recall_context(
             filtered_out += 1
             continue
 
-        chunks_with_meta.append({
-            "text": text,
-            "source_card": source_card,
-            "original_index": original_index,
-            "timestamp_float": _coerce_to_unix_seconds(source_card.get("timestamp")),
-        })
+        chunks_with_meta.append(
+            {
+                "text": text,
+                "source_card": source_card,
+                "original_index": original_index,
+                "timestamp_float": _coerce_to_unix_seconds(source_card.get("timestamp")),
+            }
+        )
 
     # ---- Step 1.5: fold structured memory candidates into the pool ----
     # Phase 12: extracted memories (action items, decisions, summaries,
@@ -1329,22 +1342,17 @@ def prepare_recall_context(
 
     if not ranked:
         first_chunk = chunks[0] if chunks else None
-        first_chunk_keys = (
-            list(first_chunk.keys()) if isinstance(first_chunk, dict) else None
-        )
+        first_chunk_keys = list(first_chunk.keys()) if isinstance(first_chunk, dict) else None
         debug_payload: Dict[str, Any] = {
             "reason": "no usable text found in HydraDB chunks",
-            "raw_response_keys": (
-                list(raw_response.keys())
-                if isinstance(raw_response, dict) else None
-            ),
-            "chunks_returned":     len(chunks),
+            "raw_response_keys": (list(raw_response.keys()) if isinstance(raw_response, dict) else None),
+            "chunks_returned": len(chunks),
             "chunks_filtered_out": filtered_out,
-            "first_chunk_keys":    first_chunk_keys,
-            "retrieval_mode":      mode,
+            "first_chunk_keys": first_chunk_keys,
+            "retrieval_mode": mode,
             "exact_matches_found": 0,
-            "query_terms":         query_terms,
-            "top_k":               top_k,
+            "query_terms": query_terms,
+            "top_k": top_k,
         }
         if debug_on and first_chunk is not None:
             debug_payload["first_chunk_preview"] = _first_chunk_preview(first_chunk)
@@ -1391,16 +1399,13 @@ def finalize_answer(
     processing is identical regardless of how the answer text arrived.
     """
     cleaned_sources = _clean_sources_for_ui(sources, top_k=top_k)
-    allowed_indexes: Set[int] = {
-        s["index"] for s in cleaned_sources
-        if isinstance(s.get("index"), int)
-    }
+    allowed_indexes: Set[int] = {s["index"] for s in cleaned_sources if isinstance(s.get("index"), int)}
     final_answer = _strip_invalid_citations(raw_answer, allowed_indexes)
     return {
-        "answer":          final_answer,
+        "answer": final_answer,
         "cleaned_sources": cleaned_sources,
-        "sources_before":  len(sources),
-        "sources_after":   len(cleaned_sources),
+        "sources_before": len(sources),
+        "sources_after": len(cleaned_sources),
     }
 
 
@@ -1528,18 +1533,18 @@ def answer_question(
         "answer": finalized["answer"],
         "sources": finalized["cleaned_sources"],
         "debug": {
-            "chunks_returned":      prepared["chunks_count"],
-            "chunks_used":          len(prepared["sources"]),
-            "chunks_filtered_out":  prepared["filtered_out"],
+            "chunks_returned": prepared["chunks_count"],
+            "chunks_used": len(prepared["sources"]),
+            "chunks_filtered_out": prepared["filtered_out"],
             "sources_before_clean": finalized["sources_before"],
-            "sources_after_clean":  finalized["sources_after"],
-            "mode":                 mode,
-            "retrieval_mode":       prepared.get("retrieval_mode", mode),
-            "exact_matches_found":  prepared.get("exact_matches", 0),
-            "query_terms":          prepared.get("query_terms", []),
-            "top_k":                top_k,
-            "history_used":         history_used,
-            "history_turns":        len(conversation_history) if history_used else 0,
+            "sources_after_clean": finalized["sources_after"],
+            "mode": mode,
+            "retrieval_mode": prepared.get("retrieval_mode", mode),
+            "exact_matches_found": prepared.get("exact_matches", 0),
+            "query_terms": prepared.get("query_terms", []),
+            "top_k": top_k,
+            "history_used": history_used,
+            "history_turns": len(conversation_history) if history_used else 0,
         },
     }
 

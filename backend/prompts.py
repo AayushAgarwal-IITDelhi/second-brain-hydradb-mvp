@@ -16,8 +16,13 @@ INSUFFICIENT_CONTEXT_ANSWER = "I do not have enough Slack context to answer that
 
 
 SUPPORTED_MODES = (
-    "default", "summary", "decisions", "action_items", "who_said",
-    "exact", "hybrid",
+    "default",
+    "summary",
+    "decisions",
+    "action_items",
+    "who_said",
+    "exact",
+    "hybrid",
 )
 
 
@@ -42,9 +47,7 @@ _BASE_PROMPT = (
 
 # Per-mode "goal" paragraph. Hard rules are appended to all of them.
 _MODE_BODIES = {
-    "default": (
-        "Be concise. Prefer short, direct answers over restating the context."
-    ),
+    "default": ("Be concise. Prefer short, direct answers over restating the context."),
     "summary": (
         "Summarize the relevant Slack context into a short briefing.\n"
         "- 3 to 6 bullet points.\n"
@@ -146,7 +149,7 @@ def format_conversation_history(history) -> str:
 
         # Truncate per-turn so very long assistant replies don't dominate.
         if len(content) > _HISTORY_TURN_CHAR_CAP:
-            content = content[: _HISTORY_TURN_CHAR_CAP].rstrip() + " […]"
+            content = content[:_HISTORY_TURN_CHAR_CAP].rstrip() + " […]"
 
         label = "User" if role == "user" else "Assistant"
         lines.append(f"{label}: {content}")
@@ -160,7 +163,5 @@ def format_conversation_history(history) -> str:
     return (
         "Recent conversation context (use ONLY to resolve references "
         "like 'he', 'that', 'the earlier discussion' — do NOT cite from "
-        "this section or treat it as new evidence):\n"
-        + "\n".join(lines)
-        + "\n\n"
+        "this section or treat it as new evidence):\n" + "\n".join(lines) + "\n\n"
     )

@@ -90,9 +90,13 @@ class IngestionState:
             with self.path.open("r", encoding="utf-8") as f:
                 raw = json.load(f)
         except (OSError, json.JSONDecodeError) as e:
-            logger.warning('ingestion_state_load_failed', extra={
-                'path': str(self.path), 'error': type(e).__name__,
-            })
+            logger.warning(
+                'ingestion_state_load_failed',
+                extra={
+                    'path': str(self.path),
+                    'error': type(e).__name__,
+                },
+            )
             return
 
         if not isinstance(raw, dict):
@@ -143,20 +147,20 @@ class IngestionState:
     ) -> None:
         """Record a successful upload. Caller still needs to call save()."""
         self.entries[stable_key] = {
-            "stable_key":     stable_key,
-            "filename":       filename,
-            "source_id":      source_id,
-            "channel_id":     channel_id,
-            "channel_name":   channel_name,
-            "ts":             ts,
-            "thread_ts":      thread_ts,
-            "uploaded_at":    datetime.now(timezone.utc).isoformat(),
+            "stable_key": stable_key,
+            "filename": filename,
+            "source_id": source_id,
+            "channel_id": channel_id,
+            "channel_name": channel_name,
+            "ts": ts,
+            "thread_ts": thread_ts,
+            "uploaded_at": datetime.now(timezone.utc).isoformat(),
             # Newly added for UI-friendly source cards.
-            "user_name":      user_name,
-            "timestamp":      timestamp,
-            "snippet":        snippet,
-            "permalink":      permalink,
-            "document_type":  document_type,
+            "user_name": user_name,
+            "timestamp": timestamp,
+            "snippet": snippet,
+            "permalink": permalink,
+            "document_type": document_type,
         }
 
     # ----- lookups for recall ----------------------------------------- #
@@ -217,9 +221,11 @@ class IngestionState:
         # We stash a top-level "_meta" dict via mark_uploaded.uploaded_at on
         # the newest entry, but explicit storage is cleaner for the admin
         # endpoint to read without scanning every entry.
-        value = self.channels.get("_meta", {}).get("last_ingested_at") if isinstance(
-            self.channels.get("_meta"), dict
-        ) else None
+        value = (
+            self.channels.get("_meta", {}).get("last_ingested_at")
+            if isinstance(self.channels.get("_meta"), dict)
+            else None
+        )
         return value if isinstance(value, str) else None
 
     def touch_last_ingested(self) -> None:
@@ -315,7 +321,7 @@ class IngestionState:
                 fcntl.flock(lf, fcntl.LOCK_EX)
 
             try:
-                state = cls(path)   # fresh load while we hold the lock
+                state = cls(path)  # fresh load while we hold the lock
                 yield state
                 state.save()
             finally:

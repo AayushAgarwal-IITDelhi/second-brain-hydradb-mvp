@@ -21,9 +21,8 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 
-from logging_config import _request_id, _correlation_id
+from logging_config import _correlation_id, _request_id
 from request_context import RequestContextMiddleware
-
 
 # ---------------------------------------------------------------------- #
 # Minimal test app
@@ -45,6 +44,7 @@ def stream_endpoint():
     def _gen():
         for i in range(3):
             yield f"chunk{i}"
+
     return StreamingResponse(_gen(), media_type="text/plain")
 
 

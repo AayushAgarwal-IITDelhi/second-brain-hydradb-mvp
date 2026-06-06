@@ -49,6 +49,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from gmail_oauth import run_workspace_gmail_ingest
 from logging_config import get_logger
+from retry import RetryExhausted, retry
 from slack_oauth import run_workspace_ingest
 from supabase_client import (
     list_active_workspaces_with_gmail,
@@ -63,15 +64,11 @@ JOB_ID = "second-brain-ingestion"
 
 
 def auto_ingest_enabled() -> bool:
-    return os.getenv("AUTO_INGEST", "").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
+    return os.getenv("AUTO_INGEST", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def run_on_startup_enabled() -> bool:
-    return os.getenv("AUTO_INGEST_RUN_ON_STARTUP", "").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
+    return os.getenv("AUTO_INGEST_RUN_ON_STARTUP", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def interval_minutes() -> int:
@@ -292,6 +289,8 @@ def _job_wrapper() -> None:
     try:
         run_all_workspaces_once()
         logger.info("scheduler_job_finished")
+    except RetryExhausted as e:
+        logger.error('scheduler_job_retry_exhausted', extra={'error': str(e)})
     except Exception as e:  # noqa: BLE001
         logger.error(
             "scheduler_job_failed",

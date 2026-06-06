@@ -22,6 +22,7 @@ def _hydra_chunk(text, source_id, stable_key, channel="general", ts=None, score=
 class TestPrepareRecallContext:
     def _call(self, question="what happened?", top_k=5, mode="default", **kwargs):
         from recall import prepare_recall_context
+
         return prepare_recall_context(question, top_k, mode=mode, **kwargs)
 
     def test_returns_ready_true_when_chunks_found(self):
@@ -93,8 +94,8 @@ class TestPrepareRecallContext:
 
     def test_hydradb_error_propagates(self):
         from errors import HydraDBError
-        with patch("hydradb_client.HydraDBClient.full_recall",
-                   side_effect=HydraDBError("down")):
+
+        with patch("hydradb_client.HydraDBClient.full_recall", side_effect=HydraDBError("down")):
             with pytest.raises(HydraDBError):
                 self._call()
 

@@ -19,8 +19,8 @@ Returning `matched: False` is NOT an error — the caller treats it as "no
 filter applied" and surfaces the note in the debug payload.
 """
 
-import re
 import calendar
+import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, Tuple
 
@@ -80,7 +80,8 @@ _PAST_N_DAYS_RE = re.compile(r"^\s*past\s+(\d+)\s+days?\s*$", re.IGNORECASE)
 _AFTER_RE = re.compile(r"^\s*(?:after|since|from)\s+(.+?)\s*$", re.IGNORECASE)
 _BEFORE_RE = re.compile(r"^\s*(?:before|until|up\s+to)\s+(.+?)\s*$", re.IGNORECASE)
 _FROM_TO_RE = re.compile(
-    r"^\s*from\s+(.+?)\s+(?:to|through|until|-)\s+(.+?)\s*$", re.IGNORECASE,
+    r"^\s*from\s+(.+?)\s+(?:to|through|until|-)\s+(.+?)\s*$",
+    re.IGNORECASE,
 )
 
 
@@ -207,10 +208,10 @@ def parse_date_query(phrase: Optional[str]) -> Dict[str, Any]:
     raw = (phrase or "").strip()
     result = {
         "start_timestamp": None,
-        "end_timestamp":   None,
-        "matched":         False,
-        "note":            "no date_query provided" if not raw else "",
-        "phrase":          raw,
+        "end_timestamp": None,
+        "matched": False,
+        "note": "no date_query provided" if not raw else "",
+        "phrase": raw,
     }
     if not raw:
         return result
@@ -221,12 +222,14 @@ def parse_date_query(phrase: Optional[str]) -> Dict[str, Any]:
     canned = _try_canned(raw, now)
     if canned is not None:
         start, end, note = canned
-        result.update({
-            "start_timestamp": start,
-            "end_timestamp":   end,
-            "matched":         True,
-            "note":            f"matched canned phrase: {note}",
-        })
+        result.update(
+            {
+                "start_timestamp": start,
+                "end_timestamp": end,
+                "matched": True,
+                "note": f"matched canned phrase: {note}",
+            }
+        )
         return result
 
     # 2. "from X to Y" -> needs dateparser to handle X and Y individually.
@@ -238,12 +241,14 @@ def parse_date_query(phrase: Optional[str]) -> Dict[str, Any]:
         if left_dt and right_dt:
             if left_dt > right_dt:
                 left_dt, right_dt = right_dt, left_dt
-            result.update({
-                "start_timestamp": _to_unix(_start_of_day(left_dt)),
-                "end_timestamp":   _to_unix(_end_of_day(right_dt)),
-                "matched":         True,
-                "note":            f"parsed 'from {left} to {right}'",
-            })
+            result.update(
+                {
+                    "start_timestamp": _to_unix(_start_of_day(left_dt)),
+                    "end_timestamp": _to_unix(_end_of_day(right_dt)),
+                    "matched": True,
+                    "note": f"parsed 'from {left} to {right}'",
+                }
+            )
             return result
 
     # 3. "after X" / "before X" — open-ended ranges.
@@ -251,24 +256,28 @@ def parse_date_query(phrase: Optional[str]) -> Dict[str, Any]:
     if m:
         dt = _parse_with_dateparser(m.group(1), now)
         if dt:
-            result.update({
-                "start_timestamp": _to_unix(_start_of_day(dt)),
-                "end_timestamp":   None,
-                "matched":         True,
-                "note":            f"parsed 'after {m.group(1)}'",
-            })
+            result.update(
+                {
+                    "start_timestamp": _to_unix(_start_of_day(dt)),
+                    "end_timestamp": None,
+                    "matched": True,
+                    "note": f"parsed 'after {m.group(1)}'",
+                }
+            )
             return result
 
     m = _BEFORE_RE.match(raw)
     if m:
         dt = _parse_with_dateparser(m.group(1), now)
         if dt:
-            result.update({
-                "start_timestamp": None,
-                "end_timestamp":   _to_unix(_end_of_day(dt)),
-                "matched":         True,
-                "note":            f"parsed 'before {m.group(1)}'",
-            })
+            result.update(
+                {
+                    "start_timestamp": None,
+                    "end_timestamp": _to_unix(_end_of_day(dt)),
+                    "matched": True,
+                    "note": f"parsed 'before {m.group(1)}'",
+                }
+            )
             return result
 
     # 4. Generic dateparser fallback — treat as a single day. Use the
@@ -278,12 +287,14 @@ def parse_date_query(phrase: Optional[str]) -> Dict[str, Any]:
     # January means last year — past-pref handles both).
     dt = _parse_with_dateparser(raw, now, prefer_past=True)
     if dt:
-        result.update({
-            "start_timestamp": _to_unix(_start_of_day(dt)),
-            "end_timestamp":   _to_unix(_end_of_day(dt)),
-            "matched":         True,
-            "note":            f"parsed as single day: {dt.date().isoformat()}",
-        })
+        result.update(
+            {
+                "start_timestamp": _to_unix(_start_of_day(dt)),
+                "end_timestamp": _to_unix(_end_of_day(dt)),
+                "matched": True,
+                "note": f"parsed as single day: {dt.date().isoformat()}",
+            }
+        )
         return result
 
     result["note"] = (

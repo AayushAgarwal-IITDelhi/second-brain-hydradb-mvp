@@ -15,9 +15,9 @@ import pytest
 
 import logging_config
 from logging_config import (
+    _correlation_id,
     _JsonFormatter,
     _request_id,
-    _correlation_id,
     bind_request_context,
     bind_user_context,
     configure_logging,
@@ -50,8 +50,16 @@ def _capture_record(message: str, level=logging.INFO, **extra) -> dict:
 # JSON shape
 # ---------------------------------------------------------------------- #
 REQUIRED_KEYS = {
-    'timestamp', 'level', 'service', 'module', 'event', 'message',
-    'request_id', 'correlation_id', 'user_id', 'workspace_id',
+    'timestamp',
+    'level',
+    'service',
+    'module',
+    'event',
+    'message',
+    'request_id',
+    'correlation_id',
+    'user_id',
+    'workspace_id',
 }
 
 
@@ -140,6 +148,7 @@ def test_context_isolation_across_threads():
     def worker(thread_name: str, req_id: str) -> None:
         bind_request_context(req_id)
         import time
+
         time.sleep(0.05)
         out = _capture_record('isolation')
         results[thread_name] = out['request_id']
@@ -164,8 +173,13 @@ def test_exception_field_present():
         raise ValueError("boom")
     except ValueError:
         record = logging.LogRecord(
-            name='test', level=logging.ERROR, pathname='', lineno=0,
-            msg='err', args=(), exc_info=sys.exc_info(),
+            name='test',
+            level=logging.ERROR,
+            pathname='',
+            lineno=0,
+            msg='err',
+            args=(),
+            exc_info=sys.exc_info(),
         )
     line = formatter.format(record)
     out = json.loads(line)
@@ -198,9 +212,9 @@ def test_configure_logging_idempotent():
     configure_logging()
 
     json_handlers = [
-        h for h in root.handlers
-        if isinstance(h, logging.StreamHandler)
-        and isinstance(getattr(h, 'formatter', None), _JsonFormatter)
+        h
+        for h in root.handlers
+        if isinstance(h, logging.StreamHandler) and isinstance(getattr(h, 'formatter', None), _JsonFormatter)
     ]
     assert len(json_handlers) == 1
 

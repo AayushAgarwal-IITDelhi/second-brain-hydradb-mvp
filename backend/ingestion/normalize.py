@@ -11,7 +11,6 @@ Each returned document has the shape:
 
 from typing import Any, Dict, List
 
-
 # Slack `subtype` values that are operational noise we don't want to index.
 # Regular user messages have no `subtype` (or it's missing entirely).
 NOISE_SUBTYPES = {

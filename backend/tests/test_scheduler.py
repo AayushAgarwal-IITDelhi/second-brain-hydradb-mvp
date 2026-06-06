@@ -17,12 +17,14 @@ class TestAutoIngestEnabled:
     @pytest.mark.parametrize("val", ["true", "1", "yes", "on", "True", "YES"])
     def test_truthy_values(self, val):
         from scheduler import auto_ingest_enabled
+
         with patch.dict(os.environ, {"AUTO_INGEST": val}):
             assert auto_ingest_enabled() is True
 
     @pytest.mark.parametrize("val", ["false", "0", "no", "off", "", "False"])
     def test_falsy_values(self, val):
         from scheduler import auto_ingest_enabled
+
         with patch.dict(os.environ, {"AUTO_INGEST": val}):
             assert auto_ingest_enabled() is False
 
@@ -30,11 +32,13 @@ class TestAutoIngestEnabled:
 class TestRunOnStartupEnabled:
     def test_true(self):
         from scheduler import run_on_startup_enabled
+
         with patch.dict(os.environ, {"AUTO_INGEST_RUN_ON_STARTUP": "true"}):
             assert run_on_startup_enabled() is True
 
     def test_false(self):
         from scheduler import run_on_startup_enabled
+
         with patch.dict(os.environ, {"AUTO_INGEST_RUN_ON_STARTUP": "false"}):
             assert run_on_startup_enabled() is False
 
@@ -42,21 +46,25 @@ class TestRunOnStartupEnabled:
 class TestIntervalMinutes:
     def test_default_is_15(self):
         from scheduler import interval_minutes
+
         with patch.dict(os.environ, {"AUTO_INGEST_INTERVAL_MINUTES": "15"}):
             assert interval_minutes() == 15
 
     def test_bad_value_returns_15(self):
         from scheduler import interval_minutes
+
         with patch.dict(os.environ, {"AUTO_INGEST_INTERVAL_MINUTES": "bad"}):
             assert interval_minutes() == 15
 
     def test_floor_at_1(self):
         from scheduler import interval_minutes
+
         with patch.dict(os.environ, {"AUTO_INGEST_INTERVAL_MINUTES": "0"}):
             assert interval_minutes() == 1
 
     def test_negative_floors_to_1(self):
         from scheduler import interval_minutes
+
         with patch.dict(os.environ, {"AUTO_INGEST_INTERVAL_MINUTES": "-5"}):
             assert interval_minutes() == 1
 
@@ -75,6 +83,7 @@ class TestStartStopScheduler:
 
     def test_start_scheduler_when_enabled_creates_scheduler(self):
         import scheduler as sched_module
+
         original = sched_module._scheduler
         sched_module._scheduler = None
         try:
@@ -98,6 +107,7 @@ class TestStartStopScheduler:
 
     def test_stop_scheduler_when_none_is_noop(self):
         import scheduler as sched_module
+
         original = sched_module._scheduler
         sched_module._scheduler = None
         try:
@@ -107,6 +117,7 @@ class TestStartStopScheduler:
 
     def test_stop_scheduler_shuts_down(self):
         import scheduler as sched_module
+
         original = sched_module._scheduler
         mock_sched = MagicMock()
         sched_module._scheduler = mock_sched
@@ -119,6 +130,7 @@ class TestStartStopScheduler:
 
     def test_start_scheduler_not_started_twice(self):
         import scheduler as sched_module
+
         original = sched_module._scheduler
         mock_existing = MagicMock()
         sched_module._scheduler = mock_existing

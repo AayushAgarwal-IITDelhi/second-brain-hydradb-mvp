@@ -8,6 +8,7 @@ import pytest
 # ── Helpers ────────────────────────────────────────────────────────────────
 def _parse(phrase):
     from date_utils import parse_date_query
+
     return parse_date_query(phrase)
 
 
@@ -36,10 +37,12 @@ class TestNullAndEmpty:
 class TestCannedPhrases:
     def setup_method(self):
         import date_utils
+
         date_utils._now = _now_fixed
 
     def teardown_method(self):
         import date_utils
+
         date_utils._now = lambda: datetime.now()
 
     def test_today(self):
@@ -111,19 +114,33 @@ class TestCannedPhrases:
         r = _parse("last 3 months")
         assert r["matched"] is True
 
-    @pytest.mark.parametrize("phrase", [
-        "today", "yesterday", "this week", "last week",
-        "this month", "last month",
-    ])
+    @pytest.mark.parametrize(
+        "phrase",
+        [
+            "today",
+            "yesterday",
+            "this week",
+            "last week",
+            "this month",
+            "last month",
+        ],
+    )
     def test_canned_phrases_return_note(self, phrase):
         r = _parse(phrase)
         assert r["matched"] is True
         assert r["note"] != ""
 
-    @pytest.mark.parametrize("phrase", [
-        "today", "yesterday", "this week", "last week",
-        "this month", "last month",
-    ])
+    @pytest.mark.parametrize(
+        "phrase",
+        [
+            "today",
+            "yesterday",
+            "this week",
+            "last week",
+            "this month",
+            "last month",
+        ],
+    )
     def test_canned_phrases_echo_phrase(self, phrase):
         r = _parse(phrase)
         assert r["phrase"] == phrase
@@ -133,10 +150,12 @@ class TestCannedPhrases:
 class TestRangePhrases:
     def setup_method(self):
         import date_utils
+
         date_utils._now = _now_fixed
 
     def teardown_method(self):
         import date_utils
+
         date_utils._now = lambda: datetime.now()
 
     def test_after_date(self):

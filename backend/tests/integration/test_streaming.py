@@ -34,15 +34,17 @@ def _parse_sse(text: str):
 
 
 def _sources():
-    return [{
-        "index": 1,
-        "source": "general",
-        "channel": "general",
-        "user": "Alice",
-        "snippet": "snippet",
-        "stable_key": "slack:C1:1.0",
-        "permalink": "https://slack.com/1",
-    }]
+    return [
+        {
+            "index": 1,
+            "source": "general",
+            "channel": "general",
+            "user": "Alice",
+            "snippet": "snippet",
+            "stable_key": "slack:C1:1.0",
+            "permalink": "https://slack.com/1",
+        }
+    ]
 
 
 class TestStreamingSSEFormat:
@@ -100,9 +102,9 @@ class TestStreamingSSEFormat:
             yield "Hello"
             yield " world"
 
-        with patch("main.prepare_recall_context") as mock_ctx, \
-             patch("main.stream_grounded_answer", side_effect=_fake_stream), \
-             patch("main.finalize_answer") as mock_fin:
+        with patch("main.prepare_recall_context") as mock_ctx, patch(
+            "main.stream_grounded_answer", side_effect=_fake_stream
+        ), patch("main.finalize_answer") as mock_fin:
             mock_ctx.return_value = {
                 "ready": True,
                 "context_text": "[1] content",
@@ -140,9 +142,9 @@ class TestStreamingSSEFormat:
         def _fake_stream(*a, **kw):
             yield from tokens
 
-        with patch("main.prepare_recall_context") as mock_ctx, \
-             patch("main.stream_grounded_answer", side_effect=_fake_stream), \
-             patch("main.finalize_answer") as mock_fin:
+        with patch("main.prepare_recall_context") as mock_ctx, patch(
+            "main.stream_grounded_answer", side_effect=_fake_stream
+        ), patch("main.finalize_answer") as mock_fin:
             mock_ctx.return_value = {
                 "ready": True,
                 "context_text": "[1] context",
@@ -179,8 +181,9 @@ class TestStreamingSSEFormat:
             raise LLMError("LLM is down")
             yield  # make it a generator
 
-        with patch("main.prepare_recall_context") as mock_ctx, \
-             patch("main.stream_grounded_answer", side_effect=_bad_stream):
+        with patch("main.prepare_recall_context") as mock_ctx, patch(
+            "main.stream_grounded_answer", side_effect=_bad_stream
+        ):
             mock_ctx.return_value = {
                 "ready": True,
                 "context_text": "[1] content",
@@ -205,8 +208,8 @@ class TestStreamingSSEFormat:
 
     def test_hydradb_error_emits_error_event(self, client):
         from errors import HydraDBError
-        with patch("recall.prepare_recall_context",
-                   side_effect=HydraDBError("HydraDB down")):
+
+        with patch("recall.prepare_recall_context", side_effect=HydraDBError("HydraDB down")):
             r = client.post(
                 "/api/query/stream",
                 json={"question": "what happened?"},
@@ -221,9 +224,9 @@ class TestStreamingSSEFormat:
         def _fake_stream(*a, **kw):
             yield "answer"
 
-        with patch("main.prepare_recall_context") as mock_ctx, \
-             patch("main.stream_grounded_answer", side_effect=_fake_stream), \
-             patch("main.finalize_answer") as mock_fin:
+        with patch("main.prepare_recall_context") as mock_ctx, patch(
+            "main.stream_grounded_answer", side_effect=_fake_stream
+        ), patch("main.finalize_answer") as mock_fin:
             mock_ctx.return_value = {
                 "ready": True,
                 "context_text": "[1] ctx",

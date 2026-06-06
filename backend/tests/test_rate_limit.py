@@ -9,7 +9,7 @@ isolation, error shape).
 
 import os
 import time
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -40,6 +40,7 @@ def _isolate_rate_limit_state():
 class TestRateLimitHelpers:
     def test_bucket_limit_default(self):
         from rate_limit import _bucket_limit
+
         with patch.dict(os.environ, {"RATE_LIMIT_PER_5_MIN": "30"}):
             assert _bucket_limit("query") == 30
 
@@ -51,6 +52,7 @@ class TestRateLimitHelpers:
 
     def test_bucket_limit_minimum_1(self):
         from rate_limit import _bucket_limit
+
         with patch.dict(os.environ, {"RATE_LIMIT_PER_5_MIN": "0"}):
             assert _bucket_limit("query") == 1
 
@@ -73,6 +75,7 @@ class TestRateLimitHelpers:
 
     def test_client_id_from_key_header(self):
         from rate_limit import _client_id_from
+
         req = MagicMock()
         req.headers = {"x-api-key": "mykey"}
         req.client = MagicMock(host="1.2.3.4")
@@ -80,6 +83,7 @@ class TestRateLimitHelpers:
 
     def test_client_id_falls_back_to_ip(self):
         from rate_limit import _client_id_from
+
         req = MagicMock()
         req.headers = {}
         req.client = MagicMock(host="10.0.0.1")
@@ -87,6 +91,7 @@ class TestRateLimitHelpers:
 
     def test_client_id_handles_missing_client(self):
         from rate_limit import _client_id_from
+
         req = MagicMock()
         req.headers = {}
         req.client = None
@@ -120,6 +125,7 @@ class TestBucketedLimiter:
 
     def test_at_limit_raises(self):
         from errors import RateLimitedError
+
         limiter = self._fresh_limiter()
         for _ in range(3):
             limiter.hit("query", "client-a", limit=3)
@@ -143,6 +149,7 @@ class TestBucketedLimiter:
 
     def test_rate_limit_error_has_correct_status(self):
         from errors import RateLimitedError
+
         limiter = self._fresh_limiter()
         for _ in range(2):
             limiter.hit("query", "cl", limit=2)
