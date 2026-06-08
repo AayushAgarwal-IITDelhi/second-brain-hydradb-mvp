@@ -1425,7 +1425,11 @@ def workspace_status(
                 workspace_id=workspace.workspace_id,
                 gmail_connection_id=cid,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as _e:  # noqa: BLE001
+            logger.warning(
+                "workspace_status_gmail_summary_failed",
+                extra={"connection_id": cid, "error": type(_e).__name__},
+            )
             summary = {"last_synced_at": None, "labels_synced": 0}
         ts = summary.get("last_synced_at")
         if ts and (last_synced is None or str(ts) > str(last_synced)):
@@ -1436,8 +1440,11 @@ def workspace_status(
                 gmail_connection_id=cid,
             )
             labels_total += len(label_ids or [])
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as _e:  # noqa: BLE001
+            logger.warning(
+                "workspace_status_gmail_labels_failed",
+                extra={"connection_id": cid, "error": type(_e).__name__},
+            )
     gmail_status = {
         "connection_count": len(gmail_conns),
         "labels_selected":  labels_total,

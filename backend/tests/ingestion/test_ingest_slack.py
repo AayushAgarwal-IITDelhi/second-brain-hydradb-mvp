@@ -300,7 +300,7 @@ class TestProcessChannel:
 
         state = IngestionState(tmp_state_path)
         state.mark_uploaded("slack:C123:100.0", "f.md", "C123", "general")
-        state.save()
+        state._save()
 
         slack = _mock_slack()
         slack.fetch_channel_messages.return_value = [_msg("100.0", "hello")]
@@ -314,7 +314,7 @@ class TestProcessChannel:
 
         state = IngestionState(tmp_state_path)
         state.mark_uploaded("slack:C123:100.0", "f.md", "C123", "general")
-        state.save()
+        state._save()
 
         slack = _mock_slack()
         slack.fetch_channel_messages.return_value = [_msg("100.0", "hello")]

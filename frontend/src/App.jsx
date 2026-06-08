@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import {
+  BarChart2, BookMarked, ChevronDown, ChevronUp,
+  Clock, LogOut, Mail, MessageSquare, Moon, Send,
+  Square, Sun,
+} from "lucide-react";
 
 import {
   ApiError,
@@ -11,15 +16,20 @@ import {
   fetchPublicShare,
   getAdminStatus,
   getWorkspaceStatus,
+  listGmailConnections,
   listSavedAnswers,
   listSharesForAnswer,
   revokeShareLink,
+  runGmailIngest,
+  runSlackIngest,
   shareSavedAnswer,
   streamQuery,
 } from "./api.js";
 import SlackSettings from "./slack/SlackSettings.jsx";
 import GmailSettings from "./gmail/GmailSettings.jsx";
 import AnalyticsPanel from "./AnalyticsPanel.jsx";
+import { useAuth } from "./auth/AuthContext.jsx";
+import { useWorkspace } from "./auth/WorkspaceContext.jsx";
 
 const MODES = [
   { value: "default",      label: "Default — concise answer" },
@@ -615,7 +625,6 @@ export default function App() {
   // to localStorage. Initial value comes from disk via a lazy initializer
   // so we don't read storage on every re-render.
   const [history, setHistory] = useState(() => loadHistory());
-  const [historyOpen, setHistoryOpen] = useState(false);
 
   // Persist history whenever it changes. Cheap because we cap at 30.
   useEffect(() => {
@@ -628,9 +637,18 @@ export default function App() {
   // Phase 2: backend is the source of truth. localStorage stays as a
   // fallback for offline / backend-down so the panel still works.
   const [savedAnswers, setSavedAnswers] = useState(() => loadSavedAnswers());
-  const [savedPanelOpen, setSavedPanelOpen] = useState(false);
   // When non-null, the saved-view overlay renders this item full-screen.
   const [viewingSaved, setViewingSaved] = useState(null);
+
+  // Active sidebar panel: 'history' | 'saved' | 'slack' | 'gmail' | 'analytics' | null
+  const [activePanel, setActivePanel] = useState(null);
+  // Control console collapsed state — persisted.
+  const [consoleCollapsed, setConsoleCollapsed] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("secondBrain.consoleCollapsed") || "false"); }
+    catch { return false; }
+  });
+  // Status pill dropdown open
+  const [statusDropdownOpen, setStatusDropdownOpen] = useState(false);
 
   useEffect(() => {
     // Always mirror to localStorage so the next session has something
@@ -979,17 +997,17 @@ export default function App() {
   function handleLoadHistory(item) {
     if (submitting) return;
     loadHistoryItemIntoComposer(item);
-    setHistoryOpen(false); // collapse so the composer is visible
+    setActivePanel(null);
   }
 
   function handleRunAgain(item) {
     if (submitting) return;
     loadHistoryItemIntoComposer(item);
-    setHistoryOpen(false);
+    setActivePanel(null);
     // Submit on the next tick so the state updates above have flushed
     // — handleSubmit reads `question` / filters from state.
     setTimeout(() => {
-      const form = document.querySelector(".composer");
+      const form = document.querySelector(".control-console");
       if (form) form.requestSubmit();
     }, 0);
   }
@@ -1111,130 +1129,72 @@ export default function App() {
 
   function handleOpenSavedItem(item) {
     setViewingSaved(item);
-    setSavedPanelOpen(false);
+    setActivePanel(null);
   }
 
-  // Phase 3: Slack settings panel. Toggle is in the header alongside
-  // History / Saved so the rest of the layout doesn't have to move.
-  const [slackPanelOpen, setSlackPanelOpen] = useState(false);
-  // Phase 8: Gmail settings panel. Same toggle pattern as Slack.
-  const [gmailPanelOpen, setGmailPanelOpen] = useState(false);
-  // Phase 15: analytics panel.
-  const [analyticsPanelOpen, setAnalyticsPanelOpen] = useState(false);
+  function handlePanelToggle(panel) {
+    setActivePanel((current) => (current === panel ? null : panel));
+  }
 
   return (
     <div className="app">
-      <header className="app__header">
-        <h1>Second Brain</h1>
-        <div className="app__header-actions">
-          <button
-            type="button"
-            className="btn btn--ghost btn--theme"
-            onClick={toggleTheme}
-            title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
-            aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
-          >
-            {theme === "dark" ? "☀ Light" : "☾ Dark"}
-          </button>
-          <button
-            type="button"
-            className={`btn btn--ghost ${historyOpen ? "btn--active" : ""}`}
-            onClick={() => setHistoryOpen((open) => !open)}
-            aria-expanded={historyOpen}
-            aria-controls="query-history-panel"
-            disabled={submitting}
-            title={history.length > 0
-              ? `${history.length} saved quer${history.length === 1 ? "y" : "ies"}`
-              : "No saved queries yet"}
-          >
-            History {history.length > 0 && (
-              <span className="btn__count">{history.length}</span>
-            )}
-          </button>
-          <button
-            type="button"
-            className={`btn btn--ghost ${savedPanelOpen ? "btn--active" : ""}`}
-            onClick={() => setSavedPanelOpen((open) => !open)}
-            aria-expanded={savedPanelOpen}
-            aria-controls="saved-answers-panel"
-            disabled={submitting}
-            title={savedAnswers.length > 0
-              ? `${savedAnswers.length} saved answer${savedAnswers.length === 1 ? "" : "s"}`
-              : "No saved answers yet"}
-          >
-            Saved {savedAnswers.length > 0 && (
-              <span className="btn__count">{savedAnswers.length}</span>
-            )}
-          </button>
-          <button
-            type="button"
-            className={`btn btn--ghost ${slackPanelOpen ? "btn--active" : ""}`}
-            onClick={() => setSlackPanelOpen((open) => !open)}
-            aria-expanded={slackPanelOpen}
-            aria-controls="slack-settings-panel"
-            disabled={submitting}
-            title="Connect Slack and pick channels to ingest"
-          >
-            Slack
-          </button>
-          <button
-            type="button"
-            className={`btn btn--ghost ${gmailPanelOpen ? "btn--active" : ""}`}
-            onClick={() => setGmailPanelOpen((open) => !open)}
-            aria-expanded={gmailPanelOpen}
-            aria-controls="gmail-settings-panel"
-            disabled={submitting}
-            title="Connect Gmail and pick labels to ingest"
-          >
-            Gmail
-          </button>
-          <button
-            type="button"
-            className={`btn btn--ghost ${analyticsPanelOpen ? "btn--active" : ""}`}
-            onClick={() => setAnalyticsPanelOpen((open) => !open)}
-            aria-expanded={analyticsPanelOpen}
-            aria-controls="analytics-panel"
-            disabled={submitting}
-            title="Workspace analytics: query stats, topics, insights"
-          >
-            Analytics
-          </button>
-          <ArmedButton
-            onConfirm={handleClearChat}
-            label="Clear chat"
-            confirmLabel="Confirm clear?"
-            title="Clear the visible chat (history and saved answers are kept)"
-            disabled={entries.length === 0 && !submitting}
-          />
-        </div>
-      </header>
+      <Sidebar
+        theme={theme}
+        toggleTheme={toggleTheme}
+        activePanel={activePanel}
+        onPanelToggle={handlePanelToggle}
+        onClearChat={handleClearChat}
+        hasEntries={entries.length > 0 || submitting}
+        historyCount={history.length}
+        savedCount={savedAnswers.length}
+        submitting={submitting}
+      />
 
-      {historyOpen && (
-        <QueryHistoryPanel
-          history={history}
-          onLoad={handleLoadHistory}
-          onRunAgain={handleRunAgain}
-          onDelete={handleDeleteHistoryItem}
-          onClearAll={handleClearHistory}
-          submitting={submitting}
-        />
-      )}
-
-      {savedPanelOpen && (
-        <SavedAnswersPanel
-          items={savedAnswers}
-          onOpen={handleOpenSavedItem}
-          onDelete={handleDeleteSavedItem}
-          onClearAll={handleClearSavedAnswers}
-        />
-      )}
-
-      {slackPanelOpen && <SlackSettings />}
-
-      {gmailPanelOpen && <GmailSettings />}
-
-      {analyticsPanelOpen && (
-        <AnalyticsPanel onClose={() => setAnalyticsPanelOpen(false)} />
+      {/* Slide-in drawer for all panels */}
+      {activePanel && (
+        <>
+          <div className="panel-backdrop" onClick={() => setActivePanel(null)} />
+          <div className="panel-drawer panel-drawer--open">
+            <div className="panel-drawer__header">
+              <span className="panel-drawer__title">
+                {{ history: "Query History", saved: "Saved Answers", slack: "Slack", gmail: "Gmail", analytics: "Analytics" }[activePanel]}
+              </span>
+              <button
+                type="button"
+                className="panel-drawer__close"
+                onClick={() => setActivePanel(null)}
+                aria-label="Close panel"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="panel-drawer__body">
+              {activePanel === "history" && (
+                <QueryHistoryPanel
+                  history={history}
+                  onLoad={handleLoadHistory}
+                  onRunAgain={handleRunAgain}
+                  onDelete={handleDeleteHistoryItem}
+                  onClearAll={handleClearHistory}
+                  submitting={submitting}
+                />
+              )}
+              {activePanel === "saved" && (
+                <SavedAnswersPanel
+                  items={savedAnswers}
+                  onOpen={handleOpenSavedItem}
+                  onDelete={handleDeleteSavedItem}
+                  onClearAll={handleClearSavedAnswers}
+                />
+              )}
+              {activePanel === "slack" && <SlackSettings />}
+              {activePanel === "gmail" && <GmailSettings />}
+              {activePanel === "analytics" && (
+                <AnalyticsPanel onClose={() => setActivePanel(null)} />
+              )}
+            </div>
+          </div>
+        </>
       )}
 
       {viewingSaved && (
@@ -1253,177 +1213,227 @@ export default function App() {
         />
       )}
 
-      <AdminStatus status={adminStatus} />
-      <WorkspaceStatusBar status={workspaceStatus} />
-
-      <main className="chat">
-        {entries.length === 0 && <EmptyState workspaceStatus={workspaceStatus} />}
-        {entries.map((entry, idx) => {
-          if (entry.role === "user") {
-            return <UserBubble key={entry.id} entry={entry} />;
-          }
-          // The assistant bubble needs the question text for its export
-          // buttons. The immediately preceding entry is always the user
-          // turn that triggered this assistant turn.
-          const prior = entries[idx - 1];
-          const question = (prior && prior.role === "user")
-            ? (prior.question || "")
-            : "";
-          return (
-            <AssistantBubble
-              key={entry.id}
-              entry={entry}
-              question={question}
-              onSave={() => handleSaveAnswer(idx)}
-              onUnsave={() => handleUnsaveAnswer(idx)}
+      <div className="main-area">
+        <header className="main-header">
+          <div className="main-header__brand">
+            <Logo compact />
+            <span className="main-header__wordmark">HYDRA<strong>DB</strong></span>
+          </div>
+          <div className="main-header__right">
+            <AdminStatus status={adminStatus} />
+            <StatusPill
+              status={workspaceStatus}
+              open={statusDropdownOpen}
+              onToggle={() => setStatusDropdownOpen((o) => !o)}
             />
-          );
-        })}
-        <div ref={bottomRef} />
-      </main>
+          </div>
+        </header>
 
-      <form className="composer" onSubmit={handleSubmit}>
-        <div className="composer__controls">
-          <label className="field">
-            <span className="field__label">Mode</span>
-            <select
-              value={mode}
-              onChange={(e) => setMode(e.target.value)}
-              disabled={submitting}
-            >
+        <main className="chat">
+          {entries.length === 0 && <EmptyState workspaceStatus={workspaceStatus} />}
+          {entries.map((entry, idx) => {
+            if (entry.role === "user") {
+              return <UserBubble key={entry.id} entry={entry} />;
+            }
+            const prior = entries[idx - 1];
+            const questionText = (prior && prior.role === "user")
+              ? (prior.question || "")
+              : "";
+            return (
+              <AssistantBubble
+                key={entry.id}
+                entry={entry}
+                question={questionText}
+                onSave={() => handleSaveAnswer(idx)}
+                onUnsave={() => handleUnsaveAnswer(idx)}
+              />
+            );
+          })}
+          <div ref={bottomRef} />
+        </main>
+
+        <form className="control-console" onSubmit={handleSubmit}>
+          <div className={`console-clusters${consoleCollapsed ? " console-clusters--hidden" : ""}`}>
+            <div className="instrument-group">
+              <span className="instrument-group__label">Mode</span>
               {MODES.map((m) => (
-                <option key={m.value} value={m.value}>{m.label}</option>
+                <button
+                  key={m.value}
+                  type="button"
+                  className={`console-pill${mode === m.value ? " console-pill--active" : ""}`}
+                  onClick={() => setMode(m.value)}
+                  disabled={submitting}
+                  title={m.label}
+                >
+                  {m.label.split(" — ")[0].split(" ")[0]}
+                </button>
               ))}
-            </select>
-          </label>
+            </div>
 
-          <label className="field field--narrow">
-            <span className="field__label">top_k</span>
-            <select
-              value={topK}
-              onChange={(e) => setTopK(parseInt(e.target.value, 10))}
-              disabled={submitting}
-            >
-              {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
-                <option key={n} value={n}>{n}</option>
-              ))}
-            </select>
-          </label>
-
-          <label className="field">
-            <span className="field__label">Channel (optional)</span>
-            <input
-              type="text"
-              value={channel}
-              onChange={(e) => setChannel(e.target.value)}
-              placeholder="e.g. product"
-              disabled={submitting}
-            />
-          </label>
-
-          <label className="field">
-            <span className="field__label">User (optional)</span>
-            <input
-              type="text"
-              value={user}
-              onChange={(e) => setUser(e.target.value)}
-              placeholder="e.g. Rahul"
-              disabled={submitting}
-            />
-          </label>
-
-          <label className="field field--narrow">
-            <span className="field__label">Type</span>
-            <select
-              value={documentType}
-              onChange={(e) => setDocumentType(e.target.value)}
-              disabled={submitting}
-            >
-              {DOC_TYPES.map((d) => (
-                <option key={d.value} value={d.value}>{d.label}</option>
-              ))}
-            </select>
-          </label>
-
-          <label className="field field--narrow">
-            <span className="field__label">Sources</span>
-            <select
-              value={sources}
-              onChange={(e) => setSources(e.target.value)}
-              disabled={submitting}
-              title="Restrict the answer to a specific connector (Slack / Gmail)"
-            >
+            <div className="instrument-group">
+              <span className="instrument-group__label">Source</span>
               {SOURCE_OPTIONS.map((s) => (
-                <option key={s.value} value={s.value}>{s.label}</option>
+                <button
+                  key={s.value}
+                  type="button"
+                  className={`console-pill${sources === s.value ? " console-pill--active" : ""}`}
+                  onClick={() => setSources(s.value)}
+                  disabled={submitting}
+                  title={s.label}
+                >
+                  {s.label.replace(" sources", "").replace(" only", "")}
+                </button>
               ))}
-            </select>
-          </label>
+            </div>
 
-          <label className="field field--wide">
-            <span className="field__label">Date phrase (optional)</span>
-            <input
-              type="text"
-              value={dateQuery}
-              onChange={(e) => setDateQuery(e.target.value)}
-              placeholder="last week, yesterday, after May 10..."
-              disabled={submitting}
-            />
-          </label>
+            <div className="instrument-group">
+              <span className="instrument-group__label">Type</span>
+              {DOC_TYPES.map((d) => (
+                <button
+                  key={d.value}
+                  type="button"
+                  className={`console-pill${documentType === d.value ? " console-pill--active" : ""}`}
+                  onClick={() => setDocumentType(d.value)}
+                  disabled={submitting}
+                >
+                  {d.label || "Any"}
+                </button>
+              ))}
+            </div>
 
-          <label className="field field--narrow">
-            <span className="field__label">From</span>
-            <input
-              type="date"
-              value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
-              disabled={submitting}
-            />
-          </label>
+            <div className="instrument-group">
+              <span className="instrument-group__label">Top-K</span>
+              <div className="console-stepper">
+                <button
+                  type="button"
+                  className="console-stepper__btn"
+                  onClick={() => setTopK((k) => Math.max(1, k - 1))}
+                  disabled={submitting || topK <= 1}
+                  aria-label="Decrease top-k"
+                >−</button>
+                <span className="console-value">{topK}</span>
+                <button
+                  type="button"
+                  className="console-stepper__btn"
+                  onClick={() => setTopK((k) => Math.min(10, k + 1))}
+                  disabled={submitting || topK >= 10}
+                  aria-label="Increase top-k"
+                >+</button>
+              </div>
+            </div>
 
-          <label className="field field--narrow">
-            <span className="field__label">To</span>
-            <input
-              type="date"
-              value={endDate}
-              onChange={(e) => setEndDate(e.target.value)}
-              disabled={submitting}
-            />
-          </label>
-        </div>
+            <div className="instrument-group">
+              <span className="instrument-group__label">Channel</span>
+              <input
+                type="text"
+                className="console-input"
+                value={channel}
+                onChange={(e) => setChannel(e.target.value)}
+                placeholder="e.g. product"
+                disabled={submitting}
+              />
+            </div>
 
-        <div className="composer__input-row">
-          <textarea
-            value={question}
-            onChange={(e) => setQuestion(e.target.value)}
-            placeholder="Ask your second brain anything from Slack..."
-            rows={2}
-            disabled={submitting}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleSubmit(e);
-              }
-            }}
-          />
-          {submitting ? (
+            <div className="instrument-group">
+              <span className="instrument-group__label">User</span>
+              <input
+                type="text"
+                className="console-input"
+                value={user}
+                onChange={(e) => setUser(e.target.value)}
+                placeholder="e.g. Rahul"
+                disabled={submitting}
+              />
+            </div>
+
+            <div className="instrument-group">
+              <span className="instrument-group__label">Date</span>
+              <input
+                type="text"
+                className="console-input"
+                style={{ width: "148px" }}
+                value={dateQuery}
+                onChange={(e) => setDateQuery(e.target.value)}
+                placeholder="last week, yesterday…"
+                disabled={submitting}
+              />
+            </div>
+
+            <div className="instrument-group">
+              <span className="instrument-group__label">From</span>
+              <input
+                type="date"
+                className="console-input"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+                disabled={submitting}
+              />
+            </div>
+
+            <div className="instrument-group">
+              <span className="instrument-group__label">To</span>
+              <input
+                type="date"
+                className="console-input"
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+                disabled={submitting}
+              />
+            </div>
+          </div>
+
+          <div className="console-row">
             <button
               type="button"
-              className="btn btn--ghost"
-              onClick={handleStop}
+              className="console-toggle"
+              onClick={() => {
+                const next = !consoleCollapsed;
+                setConsoleCollapsed(next);
+                try { localStorage.setItem("secondBrain.consoleCollapsed", JSON.stringify(next)); } catch {}
+              }}
+              aria-label={consoleCollapsed ? "Expand filters" : "Collapse filters"}
+              title={consoleCollapsed ? "Expand filters" : "Collapse filters"}
             >
-              Stop
+              {consoleCollapsed ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
             </button>
-          ) : (
-            <button
-              type="submit"
-              className="btn btn--primary"
-              disabled={!question.trim()}
-            >
-              Ask
-            </button>
-          )}
-        </div>
-      </form>
+            <textarea
+              className="console-textarea"
+              value={question}
+              onChange={(e) => setQuestion(e.target.value)}
+              placeholder="Ask your second brain…"
+              rows={1}
+              disabled={submitting}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSubmit(e);
+                }
+              }}
+            />
+            {submitting ? (
+              <button
+                type="button"
+                className="console-stop"
+                onClick={handleStop}
+                aria-label="Stop"
+                title="Stop streaming"
+              >
+                <Square size={13} />
+              </button>
+            ) : (
+              <button
+                type="submit"
+                className="console-send"
+                disabled={!question.trim()}
+                aria-label="Send"
+                title="Send (Enter)"
+              >
+                <Send size={13} />
+              </button>
+            )}
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
@@ -2491,68 +2501,120 @@ function FilterBox({
 // Phase 13: workspace status bar + share modal + public share view
 // ====================================================================== //
 
-/**
- * Lightweight connector + sync hint bar. Renders along the top of
- * the chat surface. No fancy charts -- just connector state and a
- * "Last Gmail sync X ago" hint. Self-fetches on mount; the caller
- * can pass an `intervalMs` prop to enable periodic refresh.
- */
-function WorkspaceStatusBar({ status }) {
+function StatusPill({ status, open, onToggle }) {
+  const ref = useRef(null);
+  const [reingestingSlack, setReingestingSlack] = useState(false);
+  const [reingestingGmail, setReingestingGmail] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    function onOutside(e) {
+      if (ref.current && !ref.current.contains(e.target)) onToggle();
+    }
+    document.addEventListener("mousedown", onOutside);
+    return () => document.removeEventListener("mousedown", onOutside);
+  }, [open, onToggle]);
+
   if (!status) return null;
   const { slack, gmail } = status;
-  const pills = [];
-  if (slack) {
-    pills.push({
-      key:   "slack",
-      tone:  slack.connected ? "ok" : "off",
-      label: slack.connected
-        ? `Slack · ${slack.channels_selected} channel${
-            slack.channels_selected === 1 ? "" : "s"
-          }`
-        : "Slack disconnected",
-      title: slack.connected
-        ? (slack.scheduler_enabled
-            ? "Slack connected, scheduler running"
-            : "Slack connected, scheduler off")
-        : "Connect Slack to ingest channel history",
-    });
+  const slackOk = slack?.connected;
+  const gmailOk = (gmail?.connection_count || 0) > 0;
+
+  async function handleSlackIngest() {
+    setReingestingSlack(true);
+    try { await runSlackIngest(); } catch {}
+    setReingestingSlack(false);
   }
-  if (gmail) {
-    if (gmail.connection_count > 0) {
-      const lastSynced = gmail.last_synced_at
-        ? `synced ${formatIsoRelative(gmail.last_synced_at)}`
-        : "no sync yet";
-      pills.push({
-        key:   "gmail",
-        tone:  gmail.last_synced_at ? "ok" : "warn",
-        label: `Gmail · ${gmail.labels_selected} label${
-          gmail.labels_selected === 1 ? "" : "s"
-        } · ${lastSynced}`,
-        title: gmail.last_synced_at
-          ? `Last Gmail sync: ${gmail.last_synced_at}`
-          : "Gmail connected; first sync hasn't completed yet",
-      });
-    } else {
-      pills.push({
-        key:   "gmail",
-        tone:  "off",
-        label: "Gmail disconnected",
-        title: "Connect Gmail to ingest selected labels",
-      });
-    }
+
+  async function handleGmailIngest() {
+    setReingestingGmail(true);
+    try {
+      const data = await listGmailConnections();
+      const connections = (data && data.connections) || [];
+      await Promise.all(
+        connections.map((c) => runGmailIngest(c.id).catch(() => {}))
+      );
+    } catch {}
+    setReingestingGmail(false);
   }
+
   return (
-    <section className="ws-status" aria-live="polite">
-      {pills.map((p) => (
+    <div className="status-pill" ref={ref}>
+      <button
+        type="button"
+        className="status-pill__trigger"
+        onClick={onToggle}
+        aria-label="Sync status"
+      >
         <span
-          key={p.key}
-          className={`ws-status__pill ws-status__pill--${p.tone}`}
-          title={p.title}
-        >
-          {p.label}
-        </span>
-      ))}
-    </section>
+          className={`status-dot status-dot--${slackOk ? "green" : "muted"}`}
+          title={slackOk ? "Slack connected" : "Slack disconnected"}
+        />
+        <span
+          className={`status-dot status-dot--${gmailOk ? "cyan" : "muted"}`}
+          title={gmailOk ? "Gmail connected" : "Gmail disconnected"}
+        />
+        <span className="status-pill__label">SYNC</span>
+        {open ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+      </button>
+
+      {open && (
+        <div className="status-dropdown">
+          {slack && (
+            <div className="status-row">
+              <div className="status-row__info">
+                <span className={`status-dot status-dot--${slackOk ? "green" : "muted"}`} />
+                <span className="status-row__source">Slack</span>
+                <span className="status-row__detail">
+                  {slackOk
+                    ? `${slack.channels_selected} channel${slack.channels_selected === 1 ? "" : "s"}`
+                    : "disconnected"}
+                </span>
+              </div>
+              {slackOk && (
+                <button
+                  type="button"
+                  className="status-row__reingest"
+                  onClick={handleSlackIngest}
+                  disabled={reingestingSlack}
+                >
+                  {reingestingSlack ? "…" : "↺ Ingest"}
+                </button>
+              )}
+            </div>
+          )}
+          {gmail && gmailOk && (
+            <div className="status-row">
+              <div className="status-row__info">
+                <span className="status-dot status-dot--cyan" />
+                <span className="status-row__source">Gmail</span>
+                <span className="status-row__detail">
+                  {gmail.labels_selected} label{gmail.labels_selected === 1 ? "" : "s"}
+                  {gmail.last_synced_at && ` · ${formatIsoRelative(gmail.last_synced_at)}`}
+                </span>
+              </div>
+              <button
+                type="button"
+                className="status-row__reingest"
+                onClick={handleGmailIngest}
+                disabled={reingestingGmail}
+              >
+                {reingestingGmail ? "…" : "↺ Ingest"}
+              </button>
+            </div>
+          )}
+          {gmail && !gmailOk && (
+            <div className="status-row">
+              <div className="status-row__info">
+                <span className="status-dot status-dot--muted" />
+                <span className="status-row__source">Gmail</span>
+                <span className="status-row__detail">disconnected</span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -2793,5 +2855,157 @@ function PublicShareView({ token }) {
         </article>
       )}
     </div>
+  );
+}
+
+// ======================================================================
+// Logo — hex-node SVG wordmark
+// ======================================================================
+function Logo({ compact = false }) {
+  const size = compact ? 24 : 34;
+  return (
+    <svg
+      viewBox="0 0 40 40"
+      width={size}
+      height={size}
+      fill="none"
+      aria-label="HydraDB logo"
+    >
+      <polygon
+        points="20,2 36,11 36,29 20,38 4,29 4,11"
+        stroke="var(--primary)"
+        strokeWidth="1.8"
+        fill="none"
+        strokeLinejoin="round"
+      />
+      <circle cx="20" cy="20" r="2.5" fill="var(--primary)" />
+      <line x1="20" y1="17.5" x2="20" y2="2"    stroke="var(--primary)" strokeWidth="1.2" opacity="0.5" />
+      <line x1="22.2" y1="21.3" x2="36" y2="29" stroke="var(--primary)" strokeWidth="1.2" opacity="0.5" />
+      <line x1="17.8" y1="21.3" x2="4"  y2="29" stroke="var(--primary)" strokeWidth="1.2" opacity="0.5" />
+      <circle cx="20" cy="2"  r="1.8" fill="var(--primary)" opacity="0.72" />
+      <circle cx="36" cy="29" r="1.8" fill="var(--primary)" opacity="0.72" />
+      <circle cx="4"  cy="29" r="1.8" fill="var(--primary)" opacity="0.72" />
+    </svg>
+  );
+}
+
+// ======================================================================
+// SidebarBtn — icon button with optional badge and active indicator
+// ======================================================================
+function SidebarBtn({ icon, label, active, onClick, disabled, badge, title }) {
+  return (
+    <button
+      type="button"
+      className={`sidebar-btn${active ? " sidebar-btn--active" : ""}`}
+      onClick={onClick}
+      disabled={disabled}
+      title={title || label}
+      aria-label={label}
+      aria-pressed={active || undefined}
+    >
+      <span className="sidebar-btn__icon">{icon}</span>
+      {badge > 0 && (
+        <span className="sidebar-btn__badge">{badge > 99 ? "99+" : badge}</span>
+      )}
+    </button>
+  );
+}
+
+// ======================================================================
+// Sidebar — 64-px icon navigation column
+// ======================================================================
+function Sidebar({
+  theme,
+  toggleTheme,
+  activePanel,
+  onPanelToggle,
+  onClearChat,
+  hasEntries,
+  historyCount,
+  savedCount,
+  submitting,
+}) {
+  const { signOut, user } = useAuth();
+
+  return (
+    <nav className="sidebar" aria-label="Main navigation">
+      <div className="sidebar__logo">
+        <Logo />
+      </div>
+
+      <div className="sidebar__nav">
+        <SidebarBtn
+          icon={<MessageSquare size={17} />}
+          label="New chat"
+          onClick={onClearChat}
+          disabled={!hasEntries}
+          title="Clear chat"
+        />
+        <SidebarBtn
+          icon={<Clock size={17} />}
+          label="Query history"
+          active={activePanel === "history"}
+          onClick={() => onPanelToggle("history")}
+          badge={historyCount}
+          title="Query history"
+        />
+        <SidebarBtn
+          icon={<BookMarked size={17} />}
+          label="Saved answers"
+          active={activePanel === "saved"}
+          onClick={() => onPanelToggle("saved")}
+          badge={savedCount}
+          title="Saved answers"
+        />
+        <SidebarBtn
+          icon={<BarChart2 size={17} />}
+          label="Analytics"
+          active={activePanel === "analytics"}
+          onClick={() => onPanelToggle("analytics")}
+          title="Analytics"
+        />
+      </div>
+
+      <div className="sidebar__divider" />
+
+      <div className="sidebar__connections">
+        {/* Slack icon — inline SVG for the brand shape */}
+        <SidebarBtn
+          icon={
+            <svg viewBox="0 0 24 24" width={17} height={17} fill="currentColor" aria-hidden="true">
+              <path d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zm1.271 0a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zm0 1.271a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zm10.122 2.521a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zm-1.268 0a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zm-2.523 10.122a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zm0-1.268a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z" />
+            </svg>
+          }
+          label="Slack settings"
+          active={activePanel === "slack"}
+          onClick={() => onPanelToggle("slack")}
+          title="Slack settings"
+        />
+        <SidebarBtn
+          icon={<Mail size={17} />}
+          label="Gmail settings"
+          active={activePanel === "gmail"}
+          onClick={() => onPanelToggle("gmail")}
+          title="Gmail settings"
+        />
+      </div>
+
+      <div className="sidebar__bottom">
+        <SidebarBtn
+          icon={theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
+          label={theme === "dark" ? "Light mode" : "Dark mode"}
+          onClick={toggleTheme}
+          title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+        />
+        {user && (
+          <SidebarBtn
+            icon={<LogOut size={17} />}
+            label="Sign out"
+            onClick={() => signOut()}
+            title={user.email ? `Sign out (${user.email})` : "Sign out"}
+          />
+        )}
+      </div>
+    </nav>
   );
 }

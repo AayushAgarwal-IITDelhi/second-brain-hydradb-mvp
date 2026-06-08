@@ -147,9 +147,11 @@ class TestProcessSlackEventRouting:
         import realtime_ingest as r
         r._seen_event_ids.clear()
         r._bot_user_id_by_token.clear()
+        r._in_flight.clear()
         yield
         r._seen_event_ids.clear()
         r._bot_user_id_by_token.clear()
+        r._in_flight.clear()
 
     def _build_payload(
         self, *, team_id="T_TEAM", channel="C1",
@@ -301,6 +303,7 @@ class TestEventFiltering:
         import realtime_ingest as r
         r._seen_event_ids.clear()
         r._bot_user_id_by_token.clear()
+        r._in_flight.clear()
         yield
 
     @pytest.mark.parametrize("subtype", [

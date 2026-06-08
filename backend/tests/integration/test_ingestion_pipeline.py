@@ -87,7 +87,7 @@ class TestIngestionPipeline:
         state = IngestionState(tmp_state_path)
         key = stable_key_for_message("C123", "100.0")
         state.mark_uploaded(key, "f.md", "C123", "general")
-        state.save()
+        state._save()
 
         state2 = IngestionState(tmp_state_path)
         slack = _mock_slack_wrapper()
@@ -103,7 +103,7 @@ class TestIngestionPipeline:
 
         state = IngestionState(tmp_state_path)
         state.set_last_synced_ts("C123", "100.0")
-        state.save()
+        state._save()
 
         state2 = IngestionState(tmp_state_path)
         slack = _mock_slack_wrapper()
@@ -189,7 +189,7 @@ class TestRealtimeIngestionStandalone:
 
         state = IngestionState(tmp_state_path)
         state.mark_uploaded("slack:C123:100.0", "f.md", "C123", "general")
-        state.save()
+        state._save()
 
         slack = _mock_slack_wrapper()
         hydra = MagicMock()

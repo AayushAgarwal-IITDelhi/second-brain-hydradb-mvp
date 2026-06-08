@@ -54,7 +54,7 @@ class TestIngestionStateIO:
             channel_name="general",
             ts="100.0",
         )
-        state.save()
+        state._save()
 
         reloaded = IngestionState(tmp_state_path)
         assert reloaded.has("slack:C123:100.0")
@@ -64,7 +64,7 @@ class TestIngestionStateIO:
         from ingestion.ingestion_state import IngestionState
 
         state = IngestionState(tmp_state_path)
-        state.save()
+        state._save()
         tmp = tmp_state_path.with_suffix(".json.tmp")
         assert not tmp.exists()
 
@@ -80,7 +80,7 @@ class TestIngestionStateIO:
         from ingestion.ingestion_state import STATE_VERSION, IngestionState
 
         state = IngestionState(tmp_state_path)
-        state.save()
+        state._save()
         raw = json.loads(tmp_state_path.read_text())
         assert raw["version"] == STATE_VERSION
 
@@ -250,7 +250,7 @@ class TestSaveLocked:
         # Process B: meanwhile writes its own entry and saves directly
         state_b = IngestionState(path)
         state_b.mark_uploaded("slack:C1:2.0", "b.md", "C1", "general")
-        state_b.save()  # B commits first
+        state_b._save()  # B commits first
 
         # Process A saves with merge — B's entry must survive
         state_a.save_locked()
@@ -268,7 +268,7 @@ class TestSaveLocked:
         # Concurrent write advances the watermark to a newer ts
         state_b = IngestionState(path)
         state_b.set_last_synced_ts("C1", "1000000500.000000")
-        state_b.save()
+        state_b._save()
 
         # Our in-memory copy has an older watermark
         state_a = IngestionState(path)
@@ -288,7 +288,7 @@ class TestSaveLocked:
 
         state_b = IngestionState(path)
         state_b.set_last_synced_ts("C1", "1000000100.000000")
-        state_b.save()
+        state_b._save()
 
         state_a = IngestionState(path)
         state_a.set_last_synced_ts("C1", "1000000500.000000")  # newer

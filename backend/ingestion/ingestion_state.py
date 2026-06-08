@@ -114,6 +114,10 @@ class IngestionState:
 
     def save(self) -> None:
         """Atomically write the state file (write to .tmp, then rename)."""
+        self._save()
+
+    def _save(self) -> None:
+        """Atomically write the state file (write to .tmp, then rename)."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
         payload = {
@@ -288,7 +292,7 @@ class IngestionState:
                     else:
                         fresh.channels[ch_id] = ch_data
 
-                fresh.save()  # atomic write-temp-rename
+                fresh._save()  # atomic write-temp-rename
             finally:
                 if fcntl:
                     fcntl.flock(lf, fcntl.LOCK_UN)
@@ -323,7 +327,7 @@ class IngestionState:
             try:
                 state = cls(path)  # fresh load while we hold the lock
                 yield state
-                state.save()
+                state._save()
             finally:
                 if fcntl:
                     fcntl.flock(lf, fcntl.LOCK_UN)
