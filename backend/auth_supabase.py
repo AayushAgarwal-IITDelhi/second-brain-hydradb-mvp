@@ -72,6 +72,7 @@ _ACCEPTED_ALGORITHMS = ("HS256",) + _ASYMMETRIC_ALGORITHMS
 @dataclass(frozen=True)
 class SupabaseUser:
     """The verified caller. Built from the JWT's claims — no DB hit."""
+
     id: str
     email: Optional[str]
 
@@ -79,12 +80,14 @@ class SupabaseUser:
 @dataclass(frozen=True)
 class WorkspaceContext:
     """A verified user + the workspace they have access to."""
+
     user: SupabaseUser
     workspace_id: str
     role: str  # 'owner' | 'admin' | 'member'
 
 
 # ---------- internal helpers ---------- #
+
 
 def _jwt_secret() -> str:
     """
@@ -195,14 +198,12 @@ def _verify_jwt(token: str) -> dict:
     if alg not in _ACCEPTED_ALGORITHMS:
         # Catch "none", HS384, HS512, weird typos. Treat as a generic
         # invalid token so we don't leak which check rejected it.
-        raise jwt.InvalidTokenError(
-            f"Unsupported JWT algorithm: {alg or 'missing'}"
-        )
+        raise jwt.InvalidTokenError(f"Unsupported JWT algorithm: {alg or 'missing'}")
 
     common_kwargs = {
-        "algorithms":  [alg],
-        "audience":    SUPABASE_JWT_AUDIENCE,
-        "options":     {"require": ["sub", "exp"]},
+        "algorithms": [alg],
+        "audience": SUPABASE_JWT_AUDIENCE,
+        "options": {"require": ["sub", "exp"]},
     }
 
     if alg == "HS256":
@@ -284,6 +285,7 @@ def _decode_bearer(authorization: Optional[str]) -> SupabaseUser:
 
 # ---------- FastAPI dependencies ---------- #
 
+
 def require_user(
     authorization: Optional[str] = Header(default=None, alias="Authorization"),
 ) -> SupabaseUser:
@@ -297,6 +299,7 @@ def require_user(
     # context so every downstream log line carries user_id automatically.
     # workspace_id stays None on user-only routes (/api/me*).
     from logging_config import bind_user_context  # noqa: PLC0415
+
     bind_user_context(user.id, None)
     return user
 
@@ -321,6 +324,7 @@ def require_workspace(
         # Bind the user even though the workspace header is missing,
         # so the resulting 400 log line still carries user_id.
         from logging_config import bind_user_context  # noqa: PLC0415
+
         bind_user_context(user.id, None)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -331,6 +335,7 @@ def require_workspace(
     if role is None:
         # 403 not 404, so workspace-id enumeration can't probe existence.
         from logging_config import bind_user_context  # noqa: PLC0415
+
         bind_user_context(user.id, workspace_id)
         logger.info(
             'workspace_access_denied',
@@ -345,8 +350,11 @@ def require_workspace(
     # log line on this request. This is what gives the workspace-aware
     # observability surface its punch.
     from logging_config import bind_user_context  # noqa: PLC0415
+
     bind_user_context(user.id, workspace_id)
 
     return WorkspaceContext(
-        user=user, workspace_id=workspace_id, role=role,
+        user=user,
+        workspace_id=workspace_id,
+        role=role,
     )

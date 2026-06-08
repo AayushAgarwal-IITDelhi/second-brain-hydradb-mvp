@@ -32,32 +32,45 @@ import pytest
 # Fixture helpers
 # ---------------------------------------------------------------------- #
 def _slack_chunk(
-    *, text, source_id, channel="general", user=None, ts=None,
-    score=0.9, doc_type="message",
+    *,
+    text,
+    source_id,
+    channel="general",
+    user=None,
+    ts=None,
+    score=0.9,
+    doc_type="message",
 ):
     """A Slack-message HydraDB chunk."""
     if ts is None:
         ts = f"1700{abs(hash(source_id)) % 1_000_000:06d}.0"
     md = {
-        "channel":       channel,
-        "stable_key":    f"slack:msg:C1:{ts}:{source_id}",
-        "timestamp":     ts,
+        "channel": channel,
+        "stable_key": f"slack:msg:C1:{ts}:{source_id}",
+        "timestamp": ts,
         "document_type": doc_type,
     }
     if user is not None:
         md["user_name"] = user
     return {
-        "text":      text,
-        "score":     score,
+        "text": text,
+        "score": score,
         "source_id": source_id,
-        "filename":  f"{source_id}.md",
-        "metadata":  md,
+        "filename": f"{source_id}.md",
+        "metadata": md,
     }
 
 
 def _gmail_chunk(
-    *, text, source_id, subject=None, from_name=None, from_email=None,
-    ts=None, labels=None, score=0.9,
+    *,
+    text,
+    source_id,
+    subject=None,
+    from_name=None,
+    from_email=None,
+    ts=None,
+    labels=None,
+    score=0.9,
 ):
     """A Gmail-email chunk. If `ts` is given, we synthesize the
     markdown body with an RFC-2822 Date header so the harvester can
@@ -67,9 +80,12 @@ def _gmail_chunk(
     # harvester populates the source card with subject / from / date /
     # labels. The actual chunk text below the header is what the LLM
     # would see.
-    header_lines = ["# Email", f"Source Key: gmail:msg:{source_id}",
-                    f"Message-Id: {source_id}",
-                    "Mailbox: ops@acme.example"]
+    header_lines = [
+        "# Email",
+        f"Source Key: gmail:msg:{source_id}",
+        f"Message-Id: {source_id}",
+        "Mailbox: ops@acme.example",
+    ]
     if subject is not None:
         header_lines.append(f"Subject: {subject}")
     if from_name and from_email:
@@ -81,17 +97,18 @@ def _gmail_chunk(
     if ts is not None:
         # RFC-2822 Date. Use a deterministic offset per source_id.
         from email.utils import formatdate
+
         header_lines.append(f"Date: {formatdate(ts, localtime=False)}")
     if labels:
         header_lines.append(f"Labels: {', '.join(labels)}")
     body = "\n".join(header_lines + ["", text])
     return {
-        "text":      body,
-        "score":     score,
+        "text": body,
+        "score": score,
         "source_id": source_id,
-        "filename":  f"{source_id}.md",
-        "metadata":  {
-            "stable_key":    f"gmail:msg:{source_id}",
+        "filename": f"{source_id}.md",
+        "metadata": {
+            "stable_key": f"gmail:msg:{source_id}",
             "document_type": "email",
         },
     }
@@ -99,6 +116,7 @@ def _gmail_chunk(
 
 def _call(question, top_k=5, **kwargs):
     from recall import prepare_recall_context
+
     return prepare_recall_context(question, top_k, **kwargs)
 
 
@@ -115,19 +133,22 @@ class TestGmailHeaderHarvest:
 
     def test_harvests_subject_from_date_labels_permalink(self):
         from recall import _harvest_gmail_header_fields
-        body = "\n".join([
-            "# Email",
-            "Source Key: gmail:msg:abc",
-            "Mailbox: me@acme.example",
-            'Subject: Deployment timeline for Friday',
-            'From: "Rahul Verma" <rahul@acme.example>',
-            "To: ops@acme.example",
-            "Date: Mon, 02 Sep 2024 13:45:00 +0000",
-            "Labels: INBOX, deployment",
-            "Permalink: https://mail.google.com/mail/u/0/#inbox/abc",
-            "",
-            "Body of the email goes here.",
-        ])
+
+        body = "\n".join(
+            [
+                "# Email",
+                "Source Key: gmail:msg:abc",
+                "Mailbox: me@acme.example",
+                'Subject: Deployment timeline for Friday',
+                'From: "Rahul Verma" <rahul@acme.example>',
+                "To: ops@acme.example",
+                "Date: Mon, 02 Sep 2024 13:45:00 +0000",
+                "Labels: INBOX, deployment",
+                "Permalink: https://mail.google.com/mail/u/0/#inbox/abc",
+                "",
+                "Body of the email goes here.",
+            ]
+        )
         out = _harvest_gmail_header_fields(body)
         assert out["document_type"] == "email"
         assert out["subject"] == "Deployment timeline for Friday"
@@ -135,12 +156,13 @@ class TestGmailHeaderHarvest:
         assert out["from_email"] == "rahul@acme.example"
         # Date is parsed into a unix timestamp.
         assert isinstance(out["timestamp"], float)
-        assert out["timestamp"] > 1_700_000_000   # September 2024 > 2023
+        assert out["timestamp"] > 1_700_000_000  # September 2024 > 2023
         assert out["labels"] == ["INBOX", "deployment"]
         assert out["permalink"].startswith("https://mail.google.com")
 
     def test_handles_address_only_from_line(self):
         from recall import _harvest_gmail_header_fields
+
         body = "# Email\nFrom: bob@example.com\nSubject: hi\n"
         out = _harvest_gmail_header_fields(body)
         assert out.get("from_email") == "bob@example.com"
@@ -149,6 +171,7 @@ class TestGmailHeaderHarvest:
 
     def test_returns_empty_for_non_gmail_doc(self):
         from recall import _harvest_gmail_header_fields
+
         # Without the "# Email" heading the harvester is a no-op so
         # it's safe to call unconditionally on any chunk body.
         assert _harvest_gmail_header_fields("# Slack Message\nfoo") == {}
@@ -156,6 +179,7 @@ class TestGmailHeaderHarvest:
 
     def test_bad_date_returns_no_timestamp(self):
         from recall import _harvest_gmail_header_fields
+
         body = "# Email\nSubject: x\nDate: this is not a date\n"
         out = _harvest_gmail_header_fields(body)
         assert "timestamp" not in out
@@ -169,23 +193,26 @@ class TestGmailRecency:
         # Two Gmail emails, ten days apart. Recency intent fires; the
         # newer email must win regardless of semantic score.
         import time
+
         now = time.time()
         chunks = [
             _gmail_chunk(
                 text="Q3 OKR review notes",
                 source_id="older",
                 subject="Q3 OKRs",
-                from_name="Alice", from_email="alice@acme.example",
+                from_name="Alice",
+                from_email="alice@acme.example",
                 ts=now - 10 * 86400,
-                score=0.99,                  # high semantic
+                score=0.99,  # high semantic
             ),
             _gmail_chunk(
                 text="Latest deployment update",
                 source_id="newer",
                 subject="Deployment v42",
-                from_name="Rahul", from_email="rahul@acme.example",
+                from_name="Rahul",
+                from_email="rahul@acme.example",
                 ts=now - 1 * 86400,
-                score=0.20,                  # low semantic
+                score=0.20,  # low semantic
             ),
         ]
         with patch(
@@ -197,21 +224,26 @@ class TestGmailRecency:
         ids = _surviving_source_ids(result)
         assert ids[0] == "newer"
 
-    @pytest.mark.parametrize("question", [
-        "latest email from Rahul",
-        "most recent inbox email",
-        "latest Gmail message",
-        "newest email about deployment",
-        "what's the newest email",
-    ])
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "latest email from Rahul",
+            "most recent inbox email",
+            "latest Gmail message",
+            "newest email about deployment",
+            "what's the newest email",
+        ],
+    )
     def test_recency_detector_recognizes_gmail_phrasings(self, question):
         from recall import _detect_recency_intent
+
         assert _detect_recency_intent(question) is True
 
     def test_latest_message_alone_still_works(self):
         # The connector-agnostic expansion must not break the original
         # "latest message" Slack phrasing.
         from recall import _detect_recency_intent
+
         assert _detect_recency_intent("what is the latest message") is True
 
 
@@ -224,23 +256,24 @@ class TestSenderAwareRanking:
 
     def test_metadata_bias_boosts_gmail_sender(self):
         from search_utils import _metadata_bias_score
+
         # Slack-shaped card with matching user_name (legacy).
         slack_card = {"user": "Rahul Verma", "channel": "engineering"}
         # Gmail-shaped card with matching from_name.
         gmail_card_name = {
             "from_name": "Rahul Verma",
-            "subject":   "Update on Kafka",
+            "subject": "Update on Kafka",
         }
         # Gmail-shaped card with matching from_email.
         gmail_card_addr = {
             "from_email": "rahul@example.com",
-            "subject":    "Update on Kafka",
+            "subject": "Update on Kafka",
         }
         bias = {"user": "Rahul Verma"}
         bias_addr = {"user": "rahul@example.com"}
-        assert _metadata_bias_score(slack_card,        bias) == 1
-        assert _metadata_bias_score(gmail_card_name,   bias) == 1
-        assert _metadata_bias_score(gmail_card_addr,   bias_addr) == 1
+        assert _metadata_bias_score(slack_card, bias) == 1
+        assert _metadata_bias_score(gmail_card_name, bias) == 1
+        assert _metadata_bias_score(gmail_card_addr, bias_addr) == 1
         # No match: zero boost.
         assert _metadata_bias_score(gmail_card_name, {"user": "Alice"}) == 0
 
@@ -252,13 +285,15 @@ class TestSenderAwareRanking:
         chunks = [
             _gmail_chunk(
                 text="random off-topic email",
-                source_id="alice", from_name="Alice",
+                source_id="alice",
+                from_name="Alice",
                 from_email="alice@acme.example",
                 subject="meeting moved",
             ),
             _gmail_chunk(
                 text="kafka migration notes from rahul",
-                source_id="rahul", from_name="Rahul",
+                source_id="rahul",
+                from_name="Rahul",
                 from_email="rahul@acme.example",
                 subject="Kafka migration",
             ),
@@ -328,6 +363,7 @@ class TestCrossSourceRanking:
         # intent fires; the Gmail (newer) wins because it has the
         # higher timestamp -- regardless of source.
         import time
+
         now = time.time()
         chunks = [
             _slack_chunk(
@@ -356,6 +392,7 @@ class TestCrossSourceRanking:
     def test_recency_picks_slack_when_slack_is_newer(self):
         # Symmetric: Slack should win when Slack is newer.
         import time
+
         now = time.time()
         chunks = [
             _gmail_chunk(
@@ -390,12 +427,13 @@ class TestSourceFilterStillIsolates:
         # the Gmail email wins even if a newer Slack would otherwise
         # be eligible.
         import time
+
         now = time.time()
         chunks = [
             _slack_chunk(
                 text="brand new slack message",
                 source_id="slack-newest",
-                ts=str(now - 60),                # newest overall
+                ts=str(now - 60),  # newest overall
             ),
             _gmail_chunk(
                 text="slightly older gmail",
@@ -410,7 +448,8 @@ class TestSourceFilterStillIsolates:
             return_value={"chunks": chunks},
         ):
             result = _call(
-                "latest email", top_k=1,
+                "latest email",
+                top_k=1,
                 allowed_sources=["gmail"],
             )
         ids = _surviving_source_ids(result)
@@ -419,6 +458,7 @@ class TestSourceFilterStillIsolates:
 
     def test_slack_only_filter_excludes_gmail_under_recency(self):
         import time
+
         now = time.time()
         chunks = [
             _gmail_chunk(
@@ -426,7 +466,7 @@ class TestSourceFilterStillIsolates:
                 source_id="gmail-newest",
                 subject="project x",
                 from_name="Rahul",
-                ts=now - 60,                     # newest overall
+                ts=now - 60,  # newest overall
             ),
             _slack_chunk(
                 text="slightly older slack",
@@ -439,7 +479,8 @@ class TestSourceFilterStillIsolates:
             return_value={"chunks": chunks},
         ):
             result = _call(
-                "latest message", top_k=1,
+                "latest message",
+                top_k=1,
                 allowed_sources=["slack"],
             )
         ids = _surviving_source_ids(result)
@@ -462,6 +503,7 @@ class TestRecencyPlusSender:
         # filter via metadata_bias's effect under default mode by
         # explicitly NOT triggering recency intent.
         import time
+
         now = time.time()
         chunks = [
             _gmail_chunk(
@@ -503,10 +545,8 @@ class TestRecencyPlusSender:
             )
         ids = _surviving_source_ids(result)
         # Both Rahul emails rank ABOVE the Alice one.
-        rahul_positions = [i for i, sid in enumerate(ids)
-                           if sid.startswith("rahul")]
-        alice_positions = [i for i, sid in enumerate(ids)
-                           if sid.startswith("alice")]
+        rahul_positions = [i for i, sid in enumerate(ids) if sid.startswith("rahul")]
+        alice_positions = [i for i, sid in enumerate(ids) if sid.startswith("alice")]
         assert rahul_positions and alice_positions
         assert max(rahul_positions) < min(alice_positions)
 
@@ -517,20 +557,25 @@ class TestRecencyPlusSender:
 class TestNamedWeights:
     def test_weight_constants_are_exported(self):
         from search_utils import (
-            W_KEYWORD_HIT, W_SUBJECT_HIT, W_CHANNEL_MATCH,
-            W_SENDER_MATCH, W_LABEL_MATCH, W_RECENCY,
+            W_KEYWORD_HIT,
+            W_SUBJECT_HIT,
+            W_CHANNEL_MATCH,
+            W_SENDER_MATCH,
+            W_LABEL_MATCH,
+            W_RECENCY,
         )
+
         # Sanity: weights are positive numbers and keyword > subject
         # > channel/sender > label > recency. This ordering is the
         # ranking contract -- if anyone tunes them, the existing
         # tests pin the relative behavior, but the order itself
         # documents intent.
-        assert W_KEYWORD_HIT     > 0
-        assert W_SUBJECT_HIT     > 0
-        assert W_CHANNEL_MATCH   > 0
-        assert W_SENDER_MATCH    > 0
-        assert W_LABEL_MATCH     > 0
-        assert W_RECENCY         > 0
+        assert W_KEYWORD_HIT > 0
+        assert W_SUBJECT_HIT > 0
+        assert W_CHANNEL_MATCH > 0
+        assert W_SENDER_MATCH > 0
+        assert W_LABEL_MATCH > 0
+        assert W_RECENCY > 0
         assert W_KEYWORD_HIT > W_SUBJECT_HIT
         assert W_SUBJECT_HIT > W_CHANNEL_MATCH
         assert W_CHANNEL_MATCH > W_LABEL_MATCH
@@ -545,7 +590,8 @@ class TestRankBreakdownPayload:
         chunks = [
             _slack_chunk(
                 text="something about kafka",
-                source_id="s1", channel="engineering",
+                source_id="s1",
+                channel="engineering",
                 ts="1740000000.0",
             ),
         ]
@@ -567,8 +613,7 @@ class TestRankBreakdownPayload:
         # The breakdown must surface the per-signal scores so an
         # operator can see "why ranked highly".
         bd = entry["score_breakdown"]
-        for k in ("keyword_hits", "subject_hits",
-                  "metadata_bias", "normalized_recency"):
+        for k in ("keyword_hits", "subject_hits", "metadata_bias", "normalized_recency"):
             assert k in bd
         # Sensitive raw-text fields are NOT exposed in the
         # breakdown (the requirement says lightweight only -- no
@@ -600,12 +645,9 @@ class TestRankingStability:
         # tiebreaker, so a fixed input must produce a fixed order
         # across calls.
         chunks = [
-            _slack_chunk(text="one",   source_id="a", channel="g",
-                         ts="1700000001.0"),
-            _slack_chunk(text="two",   source_id="b", channel="g",
-                         ts="1700000002.0"),
-            _slack_chunk(text="three", source_id="c", channel="g",
-                         ts="1700000003.0"),
+            _slack_chunk(text="one", source_id="a", channel="g", ts="1700000001.0"),
+            _slack_chunk(text="two", source_id="b", channel="g", ts="1700000002.0"),
+            _slack_chunk(text="three", source_id="c", channel="g", ts="1700000003.0"),
         ]
         with patch(
             "hydradb_client.HydraDBClient.full_recall",
@@ -619,10 +661,8 @@ class TestRankingStability:
         # Two chunks with identical timestamps + zero keyword hits +
         # zero bias must order by original_index (stable).
         chunks = [
-            _slack_chunk(text="x", source_id="first",  channel="g",
-                         ts="1700000000.0"),
-            _slack_chunk(text="y", source_id="second", channel="g",
-                         ts="1700000000.0"),
+            _slack_chunk(text="x", source_id="first", channel="g", ts="1700000000.0"),
+            _slack_chunk(text="y", source_id="second", channel="g", ts="1700000000.0"),
         ]
         with patch(
             "hydradb_client.HydraDBClient.full_recall",

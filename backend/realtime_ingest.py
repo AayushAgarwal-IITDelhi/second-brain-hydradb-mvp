@@ -251,11 +251,9 @@ def process_slack_event(payload: Dict[str, Any]) -> None:
     # the common cases. A permanent failure emits a dead_letter event
     # AND, if Sentry is configured, an exception capture.
     from observability import emit_dead_letter  # noqa: PLC0415
-    from retry import retry_with_backoff       # noqa: PLC0415
+    from retry import retry_with_backoff  # noqa: PLC0415
 
-    workspace_for_logs = (
-        payload.get("team_id") or _resolve_team_id(payload) or "unknown"
-    )
+    workspace_for_logs = payload.get("team_id") or _resolve_team_id(payload) or "unknown"
 
     def _on_giveup(err: BaseException) -> None:
         emit_dead_letter(
@@ -341,8 +339,7 @@ def _process_slack_payload_inner(payload: Dict[str, Any]) -> None:
     # anything ingestion.normalize flags as noise. This matches what
     # the polling path does in process_channel.
     subtype = event.get("subtype")
-    if subtype in ("message_changed", "message_deleted", "bot_message",
-                   "channel_join", "channel_leave"):
+    if subtype in ("message_changed", "message_deleted", "bot_message", "channel_join", "channel_leave"):
         logger.debug(
             'realtime_event_ignored',
             extra={'subtype': subtype},
@@ -383,9 +380,7 @@ def _process_slack_payload_inner(payload: Dict[str, Any]) -> None:
     if not workspace_id or not bot_token:
         logger.warning(
             'realtime_installation_incomplete',
-            extra={'team_id': team_id,
-                   'has_workspace_id': bool(workspace_id),
-                   'has_bot_token':    bool(bot_token)},
+            extra={'team_id': team_id, 'has_workspace_id': bool(workspace_id), 'has_bot_token': bool(bot_token)},
         )
         return
 
@@ -399,8 +394,7 @@ def _process_slack_payload_inner(payload: Dict[str, Any]) -> None:
     ):
         logger.debug(
             'realtime_channel_not_selected',
-            extra={'workspace_id': workspace_id,
-                   'channel_id':   channel_id},
+            extra={'workspace_id': workspace_id, 'channel_id': channel_id},
         )
         return
 
@@ -457,12 +451,21 @@ def _process_slack_payload_inner(payload: Dict[str, Any]) -> None:
 
     if is_reply:
         _ingest_thread(
-            slack, hydra, channel_id, channel_name, thread_ts, event,
+            slack,
+            hydra,
+            channel_id,
+            channel_name,
+            thread_ts,
+            event,
             workspace_id=workspace_id,
         )
     else:
         _ingest_standalone(
-            slack, hydra, channel_id, channel_name, event,
+            slack,
+            hydra,
+            channel_id,
+            channel_name,
+            event,
             workspace_id=workspace_id,
         )
 
@@ -533,8 +536,8 @@ def _ingest_standalone(
                     "realtime_memory_extract_failed",
                     extra={
                         "workspace_id": workspace_id,
-                        "stable_key":   stable_key,
-                        "error":        type(e).__name__,
+                        "stable_key": stable_key,
+                        "error": type(e).__name__,
                     },
                 )
     finally:
@@ -623,14 +626,15 @@ def _ingest_thread(
                 "realtime_memory_extract_failed",
                 extra={
                     "workspace_id": workspace_id,
-                    "stable_key":   stable_key,
-                    "error":        type(e).__name__,
+                    "stable_key": stable_key,
+                    "error": type(e).__name__,
                 },
             )
 
 
 def _extract_memory_from_prepared(
-    workspace_id: str, prepared: Dict[str, Any],
+    workspace_id: str,
+    prepared: Dict[str, Any],
 ) -> None:
     """
     Shared helper for the realtime path: pull out structured memory
@@ -639,17 +643,14 @@ def _extract_memory_from_prepared(
     accepts it.
     """
     from datetime import datetime as _dt, timezone as _tz  # noqa: PLC0415
-    from memory_store import extract_and_persist            # noqa: PLC0415
+    from memory_store import extract_and_persist  # noqa: PLC0415
 
     stable_key = prepared.get("stable_key") or ""
     if not stable_key:
         return
     ts = prepared.get("ts") or prepared.get("timestamp")
     try:
-        source_iso = (
-            _dt.fromtimestamp(float(ts), tz=_tz.utc).isoformat()
-            if ts else None
-        )
+        source_iso = _dt.fromtimestamp(float(ts), tz=_tz.utc).isoformat() if ts else None
     except (TypeError, ValueError):
         source_iso = None
     extract_and_persist(

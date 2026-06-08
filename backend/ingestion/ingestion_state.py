@@ -283,9 +283,7 @@ class IngestionState:
                     if ch_id == "_meta":
                         fresh.channels["_meta"] = ch_data
                     elif isinstance(ch_data, dict) and "last_synced_ts" in ch_data:
-                        existing_ts = (fresh.channels.get(ch_id) or {}).get(
-                            "last_synced_ts"
-                        )
+                        existing_ts = (fresh.channels.get(ch_id) or {}).get("last_synced_ts")
                         new_ts = ch_data["last_synced_ts"]
                         if not existing_ts or new_ts > existing_ts:
                             fresh.channels[ch_id] = {"last_synced_ts": new_ts}

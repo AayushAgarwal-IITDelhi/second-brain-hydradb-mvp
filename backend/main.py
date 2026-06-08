@@ -55,8 +55,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import (  # noqa: E402
-    BackgroundTasks, Depends, FastAPI, Header, HTTPException,
-    Request, Response, status,
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    status,
 )
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse  # noqa: E402
@@ -137,6 +143,7 @@ from slack_oauth import (  # noqa: E402
     slack_oauth_configured,
     verify_oauth_state,
 )
+
 # Phase 8: Gmail connector. Aliased on import so the symbol names don't
 # clash with the Slack helpers above (both modules expose
 # build_connect_url, exchange_code, verify_oauth_state, etc.).
@@ -190,6 +197,7 @@ async def lifespan(app: FastAPI):
     # Initialized AFTER env validation so a startup config error
     # surfaces in stdout logs, not Sentry.
     from observability import init_sentry  # noqa: PLC0415
+
     init_sentry()
     start_scheduler()
     try:
@@ -312,9 +320,9 @@ class QueryRequest(BaseModel):
     allowed_sources: Optional[List[SourceKind]] = Field(
         None,
         description="Optional restriction on connector source(s). "
-                    "Omit or pass null for all sources; pass ['slack'] "
-                    "or ['gmail'] to filter to one connector; pass "
-                    "['slack','gmail'] to allow both explicitly.",
+        "Omit or pass null for all sources; pass ['slack'] "
+        "or ['gmail'] to filter to one connector; pass "
+        "['slack','gmail'] to allow both explicitly.",
     )
     # Date range — accept either a Slack ts string ("1778775842.876209")
     # or a unix-timestamp number. recall.py normalizes both. Explicit
@@ -563,8 +571,8 @@ def health() -> Dict[str, str]:
     ingestion telemetry.
     """
     return {
-        "status":      "ok",
-        "service":     "second-brain-api",
+        "status": "ok",
+        "service": "second-brain-api",
         # ENVIRONMENT lets dashboards distinguish prod vs preview vs
         # local. Blank when unset rather than guessing.
         "environment": (os.getenv("ENVIRONMENT") or "").strip(),
@@ -572,10 +580,7 @@ def health() -> Dict[str, str]:
         # RENDER_GIT_COMMIT, Railway's RAILWAY_GIT_COMMIT_SHA). Falling
         # back to "dev" makes local responses obvious in logs.
         "version": (
-            os.getenv("APP_VERSION")
-            or os.getenv("RENDER_GIT_COMMIT")
-            or os.getenv("RAILWAY_GIT_COMMIT_SHA")
-            or "dev"
+            os.getenv("APP_VERSION") or os.getenv("RENDER_GIT_COMMIT") or os.getenv("RAILWAY_GIT_COMMIT_SHA") or "dev"
         ).strip(),
     }
 
@@ -595,6 +600,7 @@ def ready(response: Response) -> Dict[str, Any]:
     per-check breakdown so a probe failure is debuggable from logs.
     """
     from observability import check_dependencies  # noqa: PLC0415
+
     result = check_dependencies()
     if not result.get("ok"):
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
@@ -987,32 +993,36 @@ async def slack_events(
 # ---------- Phase 2 request models (chat history + saved answers) ---------- #
 class ChatSessionCreate(BaseModel):
     """Body for POST /api/chat/sessions."""
+
     model_config = ConfigDict(extra="forbid")
     title: Optional[str] = Field(default=None, max_length=200)
 
 
 class ChatMessageCreate(BaseModel):
     """Body for POST /api/chat/sessions/{session_id}/messages."""
+
     model_config = ConfigDict(extra="forbid")
-    role:    Literal["user", "assistant"]
+    role: Literal["user", "assistant"]
     content: str = Field(default="", max_length=200_000)
     sources: Optional[List[Dict[str, Any]]] = None
 
 
 class SavedAnswerCreate(BaseModel):
     """Body for POST /api/saved-answers."""
+
     model_config = ConfigDict(extra="forbid")
     question: str = Field(default="", max_length=5000)
-    answer:   str = Field(default="", max_length=200_000)
-    sources:  Optional[List[Dict[str, Any]]] = None
-    mode:     Optional[str] = Field(default=None, max_length=64)
-    filters:  Optional[Dict[str, Any]] = None
-    debug:    Optional[Dict[str, Any]] = None
+    answer: str = Field(default="", max_length=200_000)
+    sources: Optional[List[Dict[str, Any]]] = None
+    mode: Optional[str] = Field(default=None, max_length=64)
+    filters: Optional[Dict[str, Any]] = None
+    debug: Optional[Dict[str, Any]] = None
 
 
 # ---------- Phase 3 request models (Slack Connect) ---------- #
 class SlackChannelSelection(BaseModel):
     """Body for POST /api/slack/channels."""
+
     model_config = ConfigDict(extra="forbid")
     selected_channel_ids: List[str] = Field(default_factory=list)
 
@@ -1020,13 +1030,15 @@ class SlackChannelSelection(BaseModel):
 # ---------- Phase 8: Gmail request models ---------- #
 class GmailLabelSelection(BaseModel):
     """Body for POST /api/gmail/labels."""
+
     model_config = ConfigDict(extra="forbid")
-    connection_id:      str
+    connection_id: str
     selected_label_ids: List[str] = Field(default_factory=list)
 
 
 class GmailIngestRequest(BaseModel):
     """Body for POST /api/gmail/ingest."""
+
     model_config = ConfigDict(extra="forbid")
     connection_id: str
 
@@ -1071,6 +1083,7 @@ def my_workspaces(
 # private threads. Messages live under sessions and are read-scoped by
 # the same rule. All routes require Supabase JWT + X-Workspace-Id —
 # enforced once by the require_workspace dependency.
+
 
 @app.get("/api/chat/sessions")
 def chat_sessions_list(
@@ -1151,6 +1164,7 @@ def chat_session_messages_create(
 
 
 # ---------- Saved answers (Phase 2) ---------- #
+
 
 @app.get("/api/saved-answers")
 def saved_answers_list(
@@ -1246,7 +1260,8 @@ def saved_answers_share(
     other's bookmarks. (Revoke is still tied to created_by.)
     """
     saved = get_saved_answer(
-        saved_id=saved_id, workspace_id=workspace.workspace_id,
+        saved_id=saved_id,
+        workspace_id=workspace.workspace_id,
     )
     if not saved:
         raise HTTPException(
@@ -1266,11 +1281,11 @@ def saved_answers_share(
             detail="Could not create share link.",
         )
     return {
-        "id":              row.get("id"),
-        "share_token":     token,
-        "url":             _share_url_for(token),
+        "id": row.get("id"),
+        "share_token": token,
+        "url": _share_url_for(token),
         "saved_answer_id": saved_id,
-        "created_at":      row.get("created_at"),
+        "created_at": row.get("created_at"),
     }
 
 
@@ -1292,12 +1307,12 @@ def saved_answers_shares_list(
     # link is effectively gone from the user's perspective.
     active = [
         {
-            "id":          r.get("id"),
+            "id": r.get("id"),
             "share_token": r.get("share_token"),
-            "url":         _share_url_for(r.get("share_token") or ""),
-            "created_at":  r.get("created_at"),
-            "expires_at":  r.get("expires_at"),
-            "created_by":  r.get("created_by"),
+            "url": _share_url_for(r.get("share_token") or ""),
+            "created_at": r.get("created_at"),
+            "expires_at": r.get("expires_at"),
+            "created_by": r.get("created_by"),
         }
         for r in rows
         if not r.get("revoked_at")
@@ -1364,10 +1379,10 @@ def shared_answer_public(
     # PUBLIC projection allowlist -- nothing here ties back to a
     # workspace or user.
     return {
-        "question":   saved.get("question") or "",
-        "answer":     saved.get("answer") or "",
-        "sources":    saved.get("sources") or [],
-        "mode":       saved.get("mode"),
+        "question": saved.get("question") or "",
+        "answer": saved.get("answer") or "",
+        "sources": saved.get("sources") or [],
+        "mode": saved.get("mode"),
         "created_at": saved.get("created_at"),
     }
 
@@ -1401,7 +1416,7 @@ def workspace_status(
         workspace_id=workspace.workspace_id,
     )
     slack_status = {
-        "connected":         bool(slack_install),
+        "connected": bool(slack_install),
         "channels_selected": len(slack_channels),
         "scheduler_enabled": auto_ingest_enabled(),
     }
@@ -1447,8 +1462,8 @@ def workspace_status(
             )
     gmail_status = {
         "connection_count": len(gmail_conns),
-        "labels_selected":  labels_total,
-        "last_synced_at":   last_synced,
+        "labels_selected": labels_total,
+        "last_synced_at": last_synced,
     }
 
     return {"slack": slack_status, "gmail": gmail_status}
@@ -1481,22 +1496,26 @@ def analytics_overview(
     configured window. The UI renders this as the top of the
     analytics panel.
     """
-    from analytics_store import (   # local import keeps boot fast
+    from analytics_store import (  # local import keeps boot fast
         aggregate_query_stats,
         aggregate_ingest_stats,
         aggregate_retrieval_failure_stats,
     )
+
     safe_days = _clamp_days(days)
     return {
-        "window_days":         safe_days,
-        "query":               aggregate_query_stats(
-            workspace_id=workspace.workspace_id, days=safe_days,
+        "window_days": safe_days,
+        "query": aggregate_query_stats(
+            workspace_id=workspace.workspace_id,
+            days=safe_days,
         ),
-        "ingest":              aggregate_ingest_stats(
-            workspace_id=workspace.workspace_id, days=safe_days,
+        "ingest": aggregate_ingest_stats(
+            workspace_id=workspace.workspace_id,
+            days=safe_days,
         ),
-        "retrieval_failures":  aggregate_retrieval_failure_stats(
-            workspace_id=workspace.workspace_id, days=safe_days,
+        "retrieval_failures": aggregate_retrieval_failure_stats(
+            workspace_id=workspace.workspace_id,
+            days=safe_days,
         ),
     }
 
@@ -1512,6 +1531,7 @@ def analytics_topics(
     a cluster count. Drives the "Top Topics" card.
     """
     from analytics_intelligence import topic_overview
+
     safe_days = _clamp_days(days, default=30)
     safe_top = max(1, min(int(top_n or 10), 50))
     return topic_overview(
@@ -1538,6 +1558,7 @@ def analytics_timeline(
     can be passed comma-separated.
     """
     from analytics_intelligence import reconstruct_timeline
+
     kinds = None
     if kind:
         kinds = [k.strip() for k in kind.split(",") if k.strip()]
@@ -1564,11 +1585,15 @@ def analytics_insights(
       separate cards in the analytics panel.
     """
     from analytics_intelligence import (
-        proactive_insights, recurring_patterns,
+        proactive_insights,
+        recurring_patterns,
     )
+
     insights = proactive_insights(workspace_id=workspace.workspace_id)
     recurring = recurring_patterns(
-        workspace_id=workspace.workspace_id, days=7, min_mentions=3,
+        workspace_id=workspace.workspace_id,
+        days=7,
+        min_mentions=3,
     )
     return {**insights, "recurring": recurring}
 
@@ -1579,6 +1604,7 @@ def analytics_insights(
 # the frontend. The frontend only needs to know that Slack is connected
 # (team name + when), then can list channels and toggle which ones to
 # ingest.
+
 
 def _frontend_base_url() -> str:
     """
@@ -1700,6 +1726,7 @@ def _oauth_redirect(frontend: str, connector: str, result: str, reason: str):
     (validated upstream); on failure it's a short fixed code we choose.
     """
     from fastapi.responses import RedirectResponse  # noqa: PLC0415
+
     qs = urlencode_safely({connector: result, "reason": reason})
     return RedirectResponse(url=f"{frontend}/?{qs}", status_code=302)
 
@@ -1715,6 +1742,7 @@ def urlencode_safely(d: Dict[str, str]) -> str:
     string on a successful connect where reason happens to be blank.
     """
     from urllib.parse import urlencode  # noqa: PLC0415
+
     cleaned = {k: v for k, v in d.items() if v not in (None, "")}
     return urlencode(cleaned)
 
@@ -1741,7 +1769,7 @@ def slack_channels_list(
         return {
             "connected": False,
             "team_name": "",
-            "channels":  [],
+            "channels": [],
         }
 
     bot_token = (install.get("bot_token") or "").strip()
@@ -1765,7 +1793,7 @@ def slack_channels_list(
     return {
         "connected": True,
         "team_name": install.get("slack_team_name") or "",
-        "channels":  rows,
+        "channels": rows,
     }
 
 
@@ -1855,8 +1883,8 @@ def slack_ingest(
         hydradb_sub_tenant_id=sub_tenant,
     )
     return {
-        "status":           "started",
-        "channels_queued":  len(channel_ids),
+        "status": "started",
+        "channels_queued": len(channel_ids),
     }
 
 
@@ -1873,6 +1901,7 @@ def slack_ingest(
 #     take a connection_id query/body param.
 #
 # All routes except the OAuth callback require auth + workspace.
+
 
 @app.get(
     "/api/gmail/connect-url",
@@ -1900,7 +1929,7 @@ def gmail_connect_url(
 
 @app.get("/api/gmail/oauth/callback")
 def gmail_oauth_callback(
-    code:  Optional[str] = None,
+    code: Optional[str] = None,
     state: Optional[str] = None,
     error: Optional[str] = None,
 ):
@@ -1979,7 +2008,8 @@ def gmail_connections_list(
     for conn in connections:
         cid = conn.get("id") or ""
         sync_summary: Dict[str, Any] = {
-            "last_synced_at": None, "labels_synced": 0,
+            "last_synced_at": None,
+            "labels_synced": 0,
         }
         if cid:
             try:
@@ -2031,7 +2061,8 @@ def gmail_labels_list(
         )
 
     connection = get_gmail_connection(
-        connection_id=connection_id, workspace_id=workspace.workspace_id,
+        connection_id=connection_id,
+        workspace_id=workspace.workspace_id,
     )
     if not connection:
         # Defensive: return an empty set rather than 404 so a deleted
@@ -2044,9 +2075,9 @@ def gmail_labels_list(
         logger.warning(
             "gmail_labels_refresh_failed",
             extra={
-                "workspace_id":  workspace.workspace_id,
+                "workspace_id": workspace.workspace_id,
                 "connection_id": connection_id,
-                "error":         type(e).__name__,
+                "error": type(e).__name__,
             },
         )
         live_labels = []
@@ -2103,7 +2134,7 @@ def gmail_labels_save(
 @app.post(
     "/api/gmail/ingest",
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(slack_ingest_rate_limit)],   # reuse "ingest" bucket
+    dependencies=[Depends(slack_ingest_rate_limit)],  # reuse "ingest" bucket
 )
 def gmail_ingest(
     req: GmailIngestRequest,
@@ -2156,6 +2187,6 @@ def gmail_ingest(
         hydradb_sub_tenant_id=sub_tenant,
     )
     return {
-        "status":        "started",
+        "status": "started",
         "labels_queued": len(label_ids),
     }

@@ -29,7 +29,6 @@ import SlackSettings from "./slack/SlackSettings.jsx";
 import GmailSettings from "./gmail/GmailSettings.jsx";
 import AnalyticsPanel from "./AnalyticsPanel.jsx";
 import { useAuth } from "./auth/AuthContext.jsx";
-import { useWorkspace } from "./auth/WorkspaceContext.jsx";
 
 const MODES = [
   { value: "default",      label: "Default — concise answer" },
@@ -48,38 +47,14 @@ const DOC_TYPES = [
 ];
 
 // Source filter (Phase 9). Each option carries the literal value the
-// `sources` state holds and the array shape the backend wants. We use
-// a sentinel UI value ("all") rather than the empty list so the
-// <select> rendering is straightforward; sourcesToList() does the
-// conversion at request-build time.
+// `sources` state holds. api.js converts it to the `allowed_sources`
+// array shape the backend expects via its own sourcesValueToArray().
 const SOURCE_OPTIONS = [
   { value: "all",   label: "All sources" },
   { value: "slack", label: "Slack only"  },
   { value: "gmail", label: "Gmail only"  },
   { value: "both",  label: "Slack + Gmail" },
 ];
-
-/**
- * Convert the UI's `sources` choice into the `allowed_sources` array
- * the backend expects (or `null` when the request should be sent
- * without the field, preserving the pre-Phase-9 default).
- *
- *   "all"   -> null          (omit the field; default = all sources)
- *   "slack" -> ["slack"]
- *   "gmail" -> ["gmail"]
- *   "both"  -> ["slack","gmail"]   (explicit "allow both" — same
- *                                   observable behavior as "all" but
- *                                   distinguishes user intent in logs.)
- */
-function sourcesToList(value) {
-  switch (value) {
-    case "slack": return ["slack"];
-    case "gmail": return ["gmail"];
-    case "both":  return ["slack", "gmail"];
-    case "all":
-    default:      return null;
-  }
-}
 
 // ----------------------------------------------------------------------
 // Query history (localStorage)
@@ -1147,7 +1122,6 @@ export default function App() {
         hasEntries={entries.length > 0 || submitting}
         historyCount={history.length}
         savedCount={savedAnswers.length}
-        submitting={submitting}
       />
 
       {/* Slide-in drawer for all panels */}
@@ -1389,7 +1363,7 @@ export default function App() {
               onClick={() => {
                 const next = !consoleCollapsed;
                 setConsoleCollapsed(next);
-                try { localStorage.setItem("secondBrain.consoleCollapsed", JSON.stringify(next)); } catch {}
+                try { localStorage.setItem("secondBrain.consoleCollapsed", JSON.stringify(next)); } catch { /* best-effort */ }
               }}
               aria-label={consoleCollapsed ? "Expand filters" : "Collapse filters"}
               title={consoleCollapsed ? "Expand filters" : "Collapse filters"}
@@ -2522,7 +2496,7 @@ function StatusPill({ status, open, onToggle }) {
 
   async function handleSlackIngest() {
     setReingestingSlack(true);
-    try { await runSlackIngest(); } catch {}
+    try { await runSlackIngest(); } catch { /* fire-and-forget */ }
     setReingestingSlack(false);
   }
 
@@ -2534,7 +2508,7 @@ function StatusPill({ status, open, onToggle }) {
       await Promise.all(
         connections.map((c) => runGmailIngest(c.id).catch(() => {}))
       );
-    } catch {}
+    } catch { /* fire-and-forget */ }
     setReingestingGmail(false);
   }
 
@@ -2923,7 +2897,6 @@ function Sidebar({
   hasEntries,
   historyCount,
   savedCount,
-  submitting,
 }) {
   const { signOut, user } = useAuth();
 

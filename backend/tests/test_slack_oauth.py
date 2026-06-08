@@ -18,7 +18,6 @@ from slack_oauth import (
     installation_from_oauth_response,
 )
 
-
 TEST_WS_ID = "00000000-0000-0000-0000-00000000aaaa"
 TEST_USER_ID = "00000000-0000-0000-0000-000000000001"
 
@@ -95,7 +94,8 @@ class TestOauthState:
 class TestBuildConnectUrl:
     def test_url_contains_required_query_params(self):
         url = build_connect_url(
-            workspace_id=TEST_WS_ID, user_id=TEST_USER_ID,
+            workspace_id=TEST_WS_ID,
+            user_id=TEST_USER_ID,
         )
         parsed = urlparse(url)
         assert parsed.scheme == "https"
@@ -110,7 +110,8 @@ class TestBuildConnectUrl:
 
     def test_state_in_url_is_verifiable(self):
         url = build_connect_url(
-            workspace_id=TEST_WS_ID, user_id=TEST_USER_ID,
+            workspace_id=TEST_WS_ID,
+            user_id=TEST_USER_ID,
         )
         state = parse_qs(urlparse(url).query)["state"][0]
         payload = verify_oauth_state(state)
@@ -122,19 +123,21 @@ class TestBuildConnectUrl:
 # ── installation_from_oauth_response ─────────────────────────────────────
 class TestProjectInstallation:
     def test_happy_path(self):
-        row = installation_from_oauth_response({
-            "ok": True,
-            "access_token": "xoxb-real-token",
-            "scope":        "channels:history,channels:read",
-            "bot_user_id":  "U_BOT_1",
-            "team":         {"id": "T_TEAM", "name": "Acme"},
-        })
+        row = installation_from_oauth_response(
+            {
+                "ok": True,
+                "access_token": "xoxb-real-token",
+                "scope": "channels:history,channels:read",
+                "bot_user_id": "U_BOT_1",
+                "team": {"id": "T_TEAM", "name": "Acme"},
+            }
+        )
         assert row == {
-            "slack_team_id":   "T_TEAM",
+            "slack_team_id": "T_TEAM",
             "slack_team_name": "Acme",
-            "bot_user_id":     "U_BOT_1",
-            "bot_token":       "xoxb-real-token",
-            "scopes":          "channels:history,channels:read",
+            "bot_user_id": "U_BOT_1",
+            "bot_token": "xoxb-real-token",
+            "scopes": "channels:history,channels:read",
         }
 
     def test_missing_fields_collapse_to_empty(self):
@@ -162,7 +165,10 @@ class TestConnectUrlEndpoint:
         assert r.status_code == 401
 
     def test_returns_503_when_oauth_disabled(
-        self, client, jwt_auth_headers, monkeypatch,
+        self,
+        client,
+        jwt_auth_headers,
+        monkeypatch,
     ):
         monkeypatch.setenv("SLACK_CLIENT_ID", "")
         r = client.get("/api/slack/connect-url", headers=jwt_auth_headers)
@@ -177,17 +183,16 @@ class TestOauthCallback:
     def test_happy_path_redirects_ok(self, client):
         state = make_oauth_state(TEST_WS_ID, TEST_USER_ID)
         fake_resp = {
-            "ok":           True,
+            "ok": True,
             "access_token": "xoxb-fresh",
-            "scope":        "channels:read",
-            "bot_user_id":  "U_BOT",
-            "team":         {"id": "T1", "name": "Acme"},
+            "scope": "channels:read",
+            "bot_user_id": "U_BOT",
+            "team": {"id": "T1", "name": "Acme"},
         }
-        with patch("main.exchange_code", return_value=fake_resp), \
-             patch(
-                "main.upsert_slack_installation",
-                return_value={"workspace_id": TEST_WS_ID, "slack_team_name": "Acme"},
-             ):
+        with patch("main.exchange_code", return_value=fake_resp), patch(
+            "main.upsert_slack_installation",
+            return_value={"workspace_id": TEST_WS_ID, "slack_team_name": "Acme"},
+        ):
             r = client.get(
                 "/api/slack/oauth/callback",
                 params={"code": "real-code", "state": state},
@@ -242,14 +247,15 @@ class TestOauthCallback:
     def test_persist_failure_redirects_error(self, client):
         state = make_oauth_state(TEST_WS_ID, TEST_USER_ID)
         fake_resp = {
-            "ok":           True,
+            "ok": True,
             "access_token": "xoxb-fresh",
-            "scope":        "channels:read",
-            "bot_user_id":  "U_BOT",
-            "team":         {"id": "T1", "name": "Acme"},
+            "scope": "channels:read",
+            "bot_user_id": "U_BOT",
+            "team": {"id": "T1", "name": "Acme"},
         }
-        with patch("main.exchange_code", return_value=fake_resp), \
-             patch("main.upsert_slack_installation", return_value=None):
+        with patch("main.exchange_code", return_value=fake_resp), patch(
+            "main.upsert_slack_installation", return_value=None
+        ):
             r = client.get(
                 "/api/slack/oauth/callback",
                 params={"code": "real-code", "state": state},
@@ -262,9 +268,9 @@ class TestOauthCallback:
         state = make_oauth_state(TEST_WS_ID, TEST_USER_ID)
         # Slack returned ok but no team id — we shouldn't proceed.
         fake_resp = {
-            "ok":           True,
+            "ok": True,
             "access_token": "",
-            "team":         {},
+            "team": {},
         }
         with patch("main.exchange_code", return_value=fake_resp):
             r = client.get(
@@ -289,6 +295,7 @@ class TestUpsertSlackInstallationPayload:
         """Build a MagicMock chain that mirrors the real supabase-py
         fluent API: get_supabase().table(...).upsert(...).execute()."""
         from unittest.mock import MagicMock
+
         execute = MagicMock()
         if exec_raises is not None:
             execute.side_effect = exec_raises
@@ -306,6 +313,7 @@ class TestUpsertSlackInstallationPayload:
         is what was triggering the production 400."""
         from unittest.mock import patch
         from supabase_client import upsert_slack_installation
+
         client, upsert = self._mock_supabase()
         with patch("supabase_client.get_supabase", return_value=client):
             upsert_slack_installation(
@@ -327,6 +335,7 @@ class TestUpsertSlackInstallationPayload:
     def test_upsert_includes_installed_by_when_provided(self):
         from unittest.mock import patch
         from supabase_client import upsert_slack_installation
+
         client, upsert = self._mock_supabase()
         with patch("supabase_client.get_supabase", return_value=client):
             upsert_slack_installation(
@@ -347,6 +356,7 @@ class TestUpsertSlackInstallationPayload:
         # nullable-default-omit path is safest.
         from unittest.mock import patch
         from supabase_client import upsert_slack_installation
+
         client, upsert = self._mock_supabase()
         with patch("supabase_client.get_supabase", return_value=client):
             upsert_slack_installation(
@@ -371,18 +381,22 @@ class TestUpsertSlackInstallationPayload:
         """
         import logging
         from unittest.mock import patch
+
         try:
             from postgrest.exceptions import APIError as PGAPIError
         except ImportError:  # pragma: no cover
             pytest.skip("postgrest not installed")
 
-        err = PGAPIError({
-            "code":    "PGRST204",
-            "message": "Could not find the 'scopes' column",
-            "hint":    "Use 'scope' instead",
-            "details": "missing column",
-        })
+        err = PGAPIError(
+            {
+                "code": "PGRST204",
+                "message": "Could not find the 'scopes' column",
+                "hint": "Use 'scope' instead",
+                "details": "missing column",
+            }
+        )
         from supabase_client import upsert_slack_installation
+
         client, _ = self._mock_supabase(exec_raises=err)
 
         with caplog.at_level(logging.WARNING, logger="supabase_client"):
@@ -397,10 +411,7 @@ class TestUpsertSlackInstallationPayload:
                 )
         assert result is None
 
-        records = [
-            r for r in caplog.records
-            if r.message == "supabase_upsert_installation_failed"
-        ]
+        records = [r for r in caplog.records if r.message == "supabase_upsert_installation_failed"]
         assert len(records) == 1
         rec = records[0]
         # Real PostgREST error fields should be present.
@@ -414,6 +425,7 @@ class TestUpsertSlackInstallationPayload:
     def test_upsert_returns_none_on_failure(self):
         from unittest.mock import patch
         from supabase_client import upsert_slack_installation
+
         client, _ = self._mock_supabase(
             exec_raises=RuntimeError("transport failure"),
         )

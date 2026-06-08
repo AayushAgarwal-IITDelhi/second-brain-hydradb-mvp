@@ -72,6 +72,7 @@ class TestIntervalMinutes:
 class TestStartStopScheduler:
     def test_start_scheduler_when_disabled_does_nothing(self):
         import scheduler as sched_module
+
         original = sched_module._scheduler
         sched_module._scheduler = None
         try:
@@ -88,11 +89,14 @@ class TestStartStopScheduler:
         sched_module._scheduler = None
         try:
             mock_scheduler = MagicMock()
-            with patch.dict(os.environ, {
-                "AUTO_INGEST": "true",
-                "AUTO_INGEST_RUN_ON_STARTUP": "false",
-                "AUTO_INGEST_INTERVAL_MINUTES": "15",
-            }):
+            with patch.dict(
+                os.environ,
+                {
+                    "AUTO_INGEST": "true",
+                    "AUTO_INGEST_RUN_ON_STARTUP": "false",
+                    "AUTO_INGEST_INTERVAL_MINUTES": "15",
+                },
+            ):
                 with patch(
                     "scheduler.BackgroundScheduler",
                     return_value=mock_scheduler,
@@ -147,6 +151,7 @@ class TestJobWrapper:
     def test_job_wrapper_swallows_exceptions(self):
         """A crash in the sweep must not propagate."""
         from scheduler import _job_wrapper
+
         with patch(
             "scheduler.run_all_workspaces_once",
             side_effect=RuntimeError("boom"),
@@ -155,11 +160,14 @@ class TestJobWrapper:
 
     def test_job_wrapper_calls_sweep(self):
         from scheduler import _job_wrapper
+
         with patch(
             "scheduler.run_all_workspaces_once",
             return_value={
-                "workspaces_total": 0, "workspaces_run": 0,
-                "workspaces_skipped": 0, "workspaces_failed": 0,
+                "workspaces_total": 0,
+                "workspaces_run": 0,
+                "workspaces_skipped": 0,
+                "workspaces_failed": 0,
             },
         ) as mock_sweep:
             _job_wrapper()
@@ -171,6 +179,7 @@ class TestRunAllWorkspacesOnce:
 
     def test_no_workspaces_returns_zero_counts(self):
         from scheduler import run_all_workspaces_once
+
         with patch(
             "scheduler.list_active_workspaces_with_slack",
             return_value=[],
@@ -180,15 +189,15 @@ class TestRunAllWorkspacesOnce:
         ):
             summary = run_all_workspaces_once()
         # Slack-shaped legacy keys unchanged from Phase 4.
-        assert summary["workspaces_total"]   == 0
-        assert summary["workspaces_run"]     == 0
+        assert summary["workspaces_total"] == 0
+        assert summary["workspaces_run"] == 0
         assert summary["workspaces_skipped"] == 0
-        assert summary["workspaces_failed"]  == 0
+        assert summary["workspaces_failed"] == 0
         # Phase 11: Gmail summary lives under its own key so Slack
         # consumers don't see new fields appearing in their loop.
         assert "gmail" in summary
-        assert summary["gmail"]["connections_total"]  == 0
-        assert summary["gmail"]["connections_run"]    == 0
+        assert summary["gmail"]["connections_total"] == 0
+        assert summary["gmail"]["connections_run"] == 0
         assert summary["gmail"]["connections_failed"] == 0
 
     def test_routes_each_workspace_to_its_own_sub_tenant(self):
@@ -198,27 +207,30 @@ class TestRunAllWorkspacesOnce:
         that's the entire point of Phase 4.
         """
         from scheduler import run_all_workspaces_once
+
         wss = [
             {
-                "workspace_id":          "ws-1",
+                "workspace_id": "ws-1",
                 "hydradb_sub_tenant_id": "ws_aaaaaaaaaaaa",
-                "bot_token":             "xoxb-1",
-                "channel_ids":           ["C1", "C2"],
+                "bot_token": "xoxb-1",
+                "channel_ids": ["C1", "C2"],
             },
             {
-                "workspace_id":          "ws-2",
+                "workspace_id": "ws-2",
                 "hydradb_sub_tenant_id": "ws_bbbbbbbbbbbb",
-                "bot_token":             "xoxb-2",
-                "channel_ids":           ["C3"],
+                "bot_token": "xoxb-2",
+                "channel_ids": ["C3"],
             },
         ]
         with patch(
-            "scheduler.list_active_workspaces_with_slack", return_value=wss,
+            "scheduler.list_active_workspaces_with_slack",
+            return_value=wss,
         ), patch(
             "scheduler.run_workspace_ingest",
             return_value={"failures": 0},
         ) as mock_run, patch(
-            "scheduler.mark_workspace_synced", return_value=True,
+            "scheduler.mark_workspace_synced",
+            return_value=True,
         ) as mock_mark:
             summary = run_all_workspaces_once()
 
@@ -241,14 +253,18 @@ class TestRunAllWorkspacesOnce:
 
     def test_skips_workspace_with_no_channels_selected(self):
         from scheduler import run_all_workspaces_once
-        wss = [{
-            "workspace_id":          "ws-1",
-            "hydradb_sub_tenant_id": "ws_aaaaaaaaaaaa",
-            "bot_token":             "xoxb-1",
-            "channel_ids":           [],   # empty
-        }]
+
+        wss = [
+            {
+                "workspace_id": "ws-1",
+                "hydradb_sub_tenant_id": "ws_aaaaaaaaaaaa",
+                "bot_token": "xoxb-1",
+                "channel_ids": [],  # empty
+            }
+        ]
         with patch(
-            "scheduler.list_active_workspaces_with_slack", return_value=wss,
+            "scheduler.list_active_workspaces_with_slack",
+            return_value=wss,
         ), patch(
             "scheduler.run_workspace_ingest",
         ) as mock_run:
@@ -262,14 +278,18 @@ class TestRunAllWorkspacesOnce:
         # fall back to the env default -- that would leak data into the
         # global bucket.
         from scheduler import run_all_workspaces_once
-        wss = [{
-            "workspace_id":          "ws-1",
-            "hydradb_sub_tenant_id": "",   # missing
-            "bot_token":             "xoxb-1",
-            "channel_ids":           ["C1"],
-        }]
+
+        wss = [
+            {
+                "workspace_id": "ws-1",
+                "hydradb_sub_tenant_id": "",  # missing
+                "bot_token": "xoxb-1",
+                "channel_ids": ["C1"],
+            }
+        ]
         with patch(
-            "scheduler.list_active_workspaces_with_slack", return_value=wss,
+            "scheduler.list_active_workspaces_with_slack",
+            return_value=wss,
         ), patch(
             "scheduler.run_workspace_ingest",
         ) as mock_run:
@@ -281,18 +301,19 @@ class TestRunAllWorkspacesOnce:
         """The whole point of per-workspace try/except: one bad workspace
         must not poison the rest."""
         from scheduler import run_all_workspaces_once
+
         wss = [
             {
-                "workspace_id":          "ws-bad",
+                "workspace_id": "ws-bad",
                 "hydradb_sub_tenant_id": "ws_aaaaaaaaaaaa",
-                "bot_token":             "xoxb-1",
-                "channel_ids":           ["C1"],
+                "bot_token": "xoxb-1",
+                "channel_ids": ["C1"],
             },
             {
-                "workspace_id":          "ws-good",
+                "workspace_id": "ws-good",
                 "hydradb_sub_tenant_id": "ws_bbbbbbbbbbbb",
-                "bot_token":             "xoxb-2",
-                "channel_ids":           ["C2"],
+                "bot_token": "xoxb-2",
+                "channel_ids": ["C2"],
             },
         ]
 
@@ -302,11 +323,14 @@ class TestRunAllWorkspacesOnce:
             return {"failures": 0}
 
         with patch(
-            "scheduler.list_active_workspaces_with_slack", return_value=wss,
+            "scheduler.list_active_workspaces_with_slack",
+            return_value=wss,
         ), patch(
-            "scheduler.run_workspace_ingest", side_effect=fake_run,
+            "scheduler.run_workspace_ingest",
+            side_effect=fake_run,
         ), patch(
-            "scheduler.mark_workspace_synced", return_value=True,
+            "scheduler.mark_workspace_synced",
+            return_value=True,
         ) as mock_mark:
             summary = run_all_workspaces_once()
         assert summary["workspaces_failed"] == 1
@@ -320,19 +344,24 @@ class TestRunAllWorkspacesOnce:
         # that way a chronically failing workspace shows a stale
         # last_sync_at and operators can see it.
         from scheduler import run_all_workspaces_once
-        wss = [{
-            "workspace_id":          "ws-1",
-            "hydradb_sub_tenant_id": "ws_aaaaaaaaaaaa",
-            "bot_token":             "xoxb-1",
-            "channel_ids":           ["C1"],
-        }]
+
+        wss = [
+            {
+                "workspace_id": "ws-1",
+                "hydradb_sub_tenant_id": "ws_aaaaaaaaaaaa",
+                "bot_token": "xoxb-1",
+                "channel_ids": ["C1"],
+            }
+        ]
         with patch(
-            "scheduler.list_active_workspaces_with_slack", return_value=wss,
+            "scheduler.list_active_workspaces_with_slack",
+            return_value=wss,
         ), patch(
             "scheduler.run_workspace_ingest",
             return_value={"failures": 3},
         ), patch(
-            "scheduler.mark_workspace_synced", return_value=True,
+            "scheduler.mark_workspace_synced",
+            return_value=True,
         ) as mock_mark:
             summary = run_all_workspaces_once()
         assert summary["workspaces_run"] == 1

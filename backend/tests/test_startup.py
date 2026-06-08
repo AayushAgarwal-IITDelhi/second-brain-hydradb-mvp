@@ -105,18 +105,18 @@ class TestGmailEnvGroupValidation:
     # Minimal env that makes the REQUIRED_ENV_VARS check pass. We start
     # from this in every test and then mutate the 4 Gmail vars.
     _BASE_ENV = {
-        "APP_API_KEY":               "k",
-        "HYDRADB_API_KEY":           "k",
-        "HYDRADB_TENANT_ID":         "t",
-        "OPENAI_API_KEY":            "k",
-        "SUPABASE_URL":              "https://x.supabase.co",
-        "SUPABASE_JWT_SECRET":       "s",
+        "APP_API_KEY": "k",
+        "HYDRADB_API_KEY": "k",
+        "HYDRADB_TENANT_ID": "t",
+        "OPENAI_API_KEY": "k",
+        "SUPABASE_URL": "https://x.supabase.co",
+        "SUPABASE_JWT_SECRET": "s",
         "SUPABASE_SERVICE_ROLE_KEY": "s",
-        "SLACK_CLIENT_ID":           "c",
-        "SLACK_CLIENT_SECRET":       "s",
-        "SLACK_REDIRECT_URI":        "http://localhost/x",
-        "SLACK_OAUTH_STATE_SECRET":  "x",
-        "SLACK_SIGNING_SECRET":      "x",
+        "SLACK_CLIENT_ID": "c",
+        "SLACK_CLIENT_SECRET": "s",
+        "SLACK_REDIRECT_URI": "http://localhost/x",
+        "SLACK_OAUTH_STATE_SECRET": "x",
+        "SLACK_SIGNING_SECRET": "x",
     }
     _GMAIL_GROUP = (
         "GMAIL_CLIENT_ID",
@@ -128,19 +128,23 @@ class TestGmailEnvGroupValidation:
     def test_none_set_boots_normally(self):
         """All 4 Gmail vars unset → Gmail is opted-out, no error."""
         from startup import validate_required_env
+
         with patch.dict(os.environ, self._BASE_ENV, clear=True):
             validate_required_env()  # should not raise
 
     def test_all_set_boots_normally(self):
         """All 4 Gmail vars set → Gmail is enabled, no error."""
         from startup import validate_required_env
+
         env = dict(self._BASE_ENV)
-        env.update({
-            "GMAIL_CLIENT_ID":          "gid",
-            "GMAIL_CLIENT_SECRET":      "gsec",
-            "GMAIL_REDIRECT_URI":       "https://api/x/gmail/oauth/callback",
-            "GMAIL_OAUTH_STATE_SECRET": "gstate",
-        })
+        env.update(
+            {
+                "GMAIL_CLIENT_ID": "gid",
+                "GMAIL_CLIENT_SECRET": "gsec",
+                "GMAIL_REDIRECT_URI": "https://api/x/gmail/oauth/callback",
+                "GMAIL_OAUTH_STATE_SECRET": "gstate",
+            }
+        )
         with patch.dict(os.environ, env, clear=True):
             validate_required_env()  # should not raise
 
@@ -149,13 +153,16 @@ class TestGmailEnvGroupValidation:
         """The dangerous case: any 3 set, one missing → partial config →
         StartupConfigError naming the missing one."""
         from startup import validate_required_env, StartupConfigError
+
         env = dict(self._BASE_ENV)
-        env.update({
-            "GMAIL_CLIENT_ID":          "gid",
-            "GMAIL_CLIENT_SECRET":      "gsec",
-            "GMAIL_REDIRECT_URI":       "https://api/x/gmail/oauth/callback",
-            "GMAIL_OAUTH_STATE_SECRET": "gstate",
-        })
+        env.update(
+            {
+                "GMAIL_CLIENT_ID": "gid",
+                "GMAIL_CLIENT_SECRET": "gsec",
+                "GMAIL_REDIRECT_URI": "https://api/x/gmail/oauth/callback",
+                "GMAIL_OAUTH_STATE_SECRET": "gstate",
+            }
+        )
         del env[missing_var]
         with patch.dict(os.environ, env, clear=True):
             with pytest.raises(StartupConfigError) as exc_info:
@@ -168,6 +175,7 @@ class TestGmailEnvGroupValidation:
     def test_one_set_three_missing_raises(self):
         """The other partial case — single Gmail var set, rest blank."""
         from startup import validate_required_env, StartupConfigError
+
         env = dict(self._BASE_ENV)
         env["GMAIL_CLIENT_ID"] = "gid"  # only one set
         with patch.dict(os.environ, env, clear=True):
@@ -185,38 +193,46 @@ class TestGmailEnvGroupValidation:
         defines the var but leaves it empty is treated as opted-out
         (not partially configured), when ALL four are blank."""
         from startup import validate_required_env
+
         env = dict(self._BASE_ENV)
-        env.update({
-            "GMAIL_CLIENT_ID":          "",
-            "GMAIL_CLIENT_SECRET":      "   ",
-            "GMAIL_REDIRECT_URI":       "",
-            "GMAIL_OAUTH_STATE_SECRET": "",
-        })
+        env.update(
+            {
+                "GMAIL_CLIENT_ID": "",
+                "GMAIL_CLIENT_SECRET": "   ",
+                "GMAIL_REDIRECT_URI": "",
+                "GMAIL_OAUTH_STATE_SECRET": "",
+            }
+        )
         with patch.dict(os.environ, env, clear=True):
             validate_required_env()  # should not raise
 
     def test_validator_helper_returns_correct_shape(self):
         """Unit-level: the helper distinguishes none / all / partial."""
         from startup import _validate_gmail_group
+
         # All unset
         with patch.dict(os.environ, self._BASE_ENV, clear=True):
             assert _validate_gmail_group() == []
         # All set
         env = dict(self._BASE_ENV)
-        env.update({
-            "GMAIL_CLIENT_ID":          "gid",
-            "GMAIL_CLIENT_SECRET":      "gsec",
-            "GMAIL_REDIRECT_URI":       "x",
-            "GMAIL_OAUTH_STATE_SECRET": "y",
-        })
+        env.update(
+            {
+                "GMAIL_CLIENT_ID": "gid",
+                "GMAIL_CLIENT_SECRET": "gsec",
+                "GMAIL_REDIRECT_URI": "x",
+                "GMAIL_OAUTH_STATE_SECRET": "y",
+            }
+        )
         with patch.dict(os.environ, env, clear=True):
             assert _validate_gmail_group() == []
         # Partial: 2 set, 2 missing
         env = dict(self._BASE_ENV)
-        env.update({
-            "GMAIL_CLIENT_ID":     "gid",
-            "GMAIL_CLIENT_SECRET": "gsec",
-        })
+        env.update(
+            {
+                "GMAIL_CLIENT_ID": "gid",
+                "GMAIL_CLIENT_SECRET": "gsec",
+            }
+        )
         with patch.dict(os.environ, env, clear=True):
             missing = _validate_gmail_group()
             assert set(missing) == {"GMAIL_REDIRECT_URI", "GMAIL_OAUTH_STATE_SECRET"}

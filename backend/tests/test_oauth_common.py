@@ -20,6 +20,7 @@ USER_ID = "00000000-0000-0000-0000-000000000002"
 
 # ── Round-trip / happy path ───────────────────────────────────────────────
 
+
 class TestMakeAndVerify:
     def test_round_trip(self):
         token = make_oauth_state(SECRET, WS_ID, USER_ID)
@@ -45,6 +46,7 @@ class TestMakeAndVerify:
 
 
 # ── verify_oauth_state — rejection cases ────────────────────────────────
+
 
 class TestVerifyRejects:
     def test_empty_state(self):
@@ -81,7 +83,7 @@ class TestVerifyRejects:
         token = make_oauth_state(SECRET, WS_ID, USER_ID)
         real_time = time.time
         try:
-            time.time = lambda: real_time() + 3600   # jump 1 h ahead
+            time.time = lambda: real_time() + 3600  # jump 1 h ahead
             assert verify_oauth_state(SECRET, token) is None
         finally:
             time.time = real_time
@@ -92,8 +94,8 @@ class TestVerifyRejects:
 
         payload = {
             "user_id": USER_ID,
-            "exp":     int(time.time()) + 300,
-            "nonce":   _secrets.token_urlsafe(8),
+            "exp": int(time.time()) + 300,
+            "nonce": _secrets.token_urlsafe(8),
         }
         raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
         sig = hmac.new(SECRET.encode(), raw, hashlib.sha256).digest()
@@ -107,8 +109,8 @@ class TestVerifyRejects:
 
         payload = {
             "workspace_id": WS_ID,
-            "exp":          int(time.time()) + 300,
-            "nonce":        _secrets.token_urlsafe(8),
+            "exp": int(time.time()) + 300,
+            "nonce": _secrets.token_urlsafe(8),
         }
         raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
         sig = hmac.new(SECRET.encode(), raw, hashlib.sha256).digest()
@@ -139,6 +141,7 @@ class TestVerifyRejects:
 
 
 # ── Cross-connector isolation ────────────────────────────────────────────
+
 
 class TestCrossConnectorIsolation:
     """A token signed with the Slack secret must not verify with the Gmail secret."""

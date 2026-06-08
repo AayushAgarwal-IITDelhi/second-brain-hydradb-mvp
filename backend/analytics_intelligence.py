@@ -56,16 +56,13 @@ def _fetch_memories(
     if not workspace_id:
         return []
     safe_days = max(1, min(int(days or 30), 365))
-    cutoff = (
-        datetime.now(timezone.utc) - timedelta(days=safe_days)
-    ).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=safe_days)).isoformat()
     try:
         client = get_supabase()
         resp = (
             client.table("extracted_memories")
             .select(
-                "id, kind, content, owner, entity_type, source_kind, "
-                "source_stable_key, source_timestamp, created_at"
+                "id, kind, content, owner, entity_type, source_kind, " "source_stable_key, source_timestamp, created_at"
             )
             .eq("workspace_id", workspace_id)
             .gte("created_at", cutoff)
@@ -78,7 +75,7 @@ def _fetch_memories(
             "analytics_fetch_memories_failed",
             extra={
                 "workspace_id": workspace_id,
-                "error":        type(e).__name__,
+                "error": type(e).__name__,
             },
         )
         return []
@@ -134,11 +131,11 @@ def topic_overview(
     # via different patterns.
     key_of = lambda r: (
         (r.get("entity_type") or "").strip().lower(),
-        (r.get("content")     or "").strip().lower(),
+        (r.get("content") or "").strip().lower(),
     )
     counts: Counter = Counter()
     first_seen: Dict[Tuple[str, str], str] = {}
-    last_seen:  Dict[Tuple[str, str], str] = {}
+    last_seen: Dict[Tuple[str, str], str] = {}
     display_name: Dict[Tuple[str, str], str] = {}
     for r in entities:
         k = key_of(r)
@@ -149,7 +146,7 @@ def topic_overview(
         # UI can render "Kafka" not "kafka".
         if k not in display_name:
             display_name[k] = (r.get("content") or "").strip()
-        ts = (r.get("source_timestamp") or r.get("created_at") or "")
+        ts = r.get("source_timestamp") or r.get("created_at") or ""
         if ts:
             if k not in first_seen or ts < first_seen[k]:
                 first_seen[k] = ts
@@ -194,23 +191,26 @@ def topic_overview(
         # Top 5 co-mentions; deterministic ordering.
         co = co_counts.get(key, Counter())
         co_list = sorted(
-            co.items(), key=lambda kv: (-kv[1], kv[0][1]),
+            co.items(),
+            key=lambda kv: (-kv[1], kv[0][1]),
         )[:5]
-        top_entities.append({
-            "content":     display_name.get(key, key[1]),
-            "entity_type": key[0],
-            "mentions":    mentions,
-            "co_mentions": [
-                {
-                    "content":     display_name.get(other, other[1]),
-                    "entity_type": other[0],
-                    "count":       cnt,
-                }
-                for other, cnt in co_list
-            ],
-            "first_seen":  first_seen.get(key),
-            "last_seen":   last_seen.get(key),
-        })
+        top_entities.append(
+            {
+                "content": display_name.get(key, key[1]),
+                "entity_type": key[0],
+                "mentions": mentions,
+                "co_mentions": [
+                    {
+                        "content": display_name.get(other, other[1]),
+                        "entity_type": other[0],
+                        "count": cnt,
+                    }
+                    for other, cnt in co_list
+                ],
+                "first_seen": first_seen.get(key),
+                "last_seen": last_seen.get(key),
+            }
+        )
     return {"top_entities": top_entities, "cluster_count": cluster_count}
 
 
@@ -242,7 +242,9 @@ def reconstruct_timeline(
     query patterns.
     """
     rows = _fetch_memories(
-        workspace_id=workspace_id, days=days, limit=2000,
+        workspace_id=workspace_id,
+        days=days,
+        limit=2000,
     )
     if not rows:
         return []
@@ -259,9 +261,7 @@ def reconstruct_timeline(
         filtered.append(r)
     # Chronological ASC; rows without source_timestamp sort last by
     # falling back to created_at.
-    filtered.sort(key=lambda r: (
-        r.get("source_timestamp") or r.get("created_at") or "",
-    ))
+    filtered.sort(key=lambda r: (r.get("source_timestamp") or r.get("created_at") or "",))
     safe_limit = max(1, min(int(limit or 50), 200))
     return filtered[:safe_limit]
 
@@ -298,7 +298,9 @@ def recurring_patterns(
     6 times" example without flooding with single-mention noise.
     """
     overview = topic_overview(
-        workspace_id=workspace_id, days=days, top_n=30,
+        workspace_id=workspace_id,
+        days=days,
+        top_n=30,
     )
     out: List[Dict[str, Any]] = []
     threshold = max(2, int(min_mentions or 3))
@@ -306,17 +308,16 @@ def recurring_patterns(
         if e["mentions"] < threshold:
             continue
         days_safe = max(1, int(days or 7))
-        out.append({
-            "content":     e["content"],
-            "entity_type": e["entity_type"],
-            "count":       e["mentions"],
-            "first_seen":  e.get("first_seen"),
-            "last_seen":   e.get("last_seen"),
-            "label":       (
-                f"{e['content']} mentioned {e['mentions']} times "
-                f"in the last {days_safe} days"
-            ),
-        })
+        out.append(
+            {
+                "content": e["content"],
+                "entity_type": e["entity_type"],
+                "count": e["mentions"],
+                "first_seen": e.get("first_seen"),
+                "last_seen": e.get("last_seen"),
+                "label": (f"{e['content']} mentioned {e['mentions']} times " f"in the last {days_safe} days"),
+            }
+        )
     return out
 
 
@@ -395,15 +396,17 @@ def proactive_insights(
         # as followed up (heuristic; not perfect, intentionally loose).
         if owner and decision_ts_by_owner.get(owner, "") > ts:
             continue
-        stale_action_items.append({
-            "id":                a.get("id"),
-            "content":           a.get("content"),
-            "owner":             a.get("owner"),
-            "source_kind":       a.get("source_kind"),
-            "source_stable_key": a.get("source_stable_key"),
-            "source_timestamp":  a.get("source_timestamp"),
-            "stale_since":       ts,
-        })
+        stale_action_items.append(
+            {
+                "id": a.get("id"),
+                "content": a.get("content"),
+                "owner": a.get("owner"),
+                "source_kind": a.get("source_kind"),
+                "source_stable_key": a.get("source_stable_key"),
+                "source_timestamp": a.get("source_timestamp"),
+                "stale_since": ts,
+            }
+        )
     stale_action_items.sort(
         key=lambda r: r.get("source_timestamp") or "",
     )
@@ -422,7 +425,7 @@ def proactive_insights(
             continue
         key = (
             (r.get("entity_type") or "").lower(),
-            (r.get("content")     or "").strip().lower(),
+            (r.get("content") or "").strip().lower(),
         )
         if not key[1]:
             continue
@@ -437,20 +440,22 @@ def proactive_insights(
         except ValueError:
             continue
         if ts_dt < dormant_cutoff:
-            dormant.append({
-                "content":     display.get(key, key[1]),
-                "entity_type": key[0],
-                "last_seen":   ts,
-            })
+            dormant.append(
+                {
+                    "content": display.get(key, key[1]),
+                    "entity_type": key[0],
+                    "last_seen": ts,
+                }
+            )
     dormant.sort(key=lambda r: r.get("last_seen") or "")
     dormant = dormant[:10]
 
     # ---- surging entities ----
     window = max(1, int(surge_window_days or 7))
-    surge_cutoff      = now - timedelta(days=window)
-    prior_cutoff      = now - timedelta(days=window * 2)
+    surge_cutoff = now - timedelta(days=window)
+    prior_cutoff = now - timedelta(days=window * 2)
     recent_counts: Counter = Counter()
-    prior_counts:  Counter = Counter()
+    prior_counts: Counter = Counter()
     last_seen_surge: Dict[Tuple[str, str], str] = {}
     display_surge: Dict[Tuple[str, str], str] = {}
     for r in rows:
@@ -465,7 +470,7 @@ def proactive_insights(
             continue
         key = (
             (r.get("entity_type") or "").lower(),
-            (r.get("content")     or "").strip().lower(),
+            (r.get("content") or "").strip().lower(),
         )
         if not key[1]:
             continue
@@ -484,13 +489,15 @@ def proactive_insights(
         # Doubling rule with `prior == 0` as a special case: a brand-
         # new topic with ≥3 mentions surges.
         if prior == 0 or recent >= prior * 2:
-            surging.append({
-                "content":         display_surge.get(key, key[1]),
-                "entity_type":     key[0],
-                "recent_mentions": recent,
-                "prior_mentions":  prior,
-                "last_seen":       last_seen_surge.get(key),
-            })
+            surging.append(
+                {
+                    "content": display_surge.get(key, key[1]),
+                    "entity_type": key[0],
+                    "recent_mentions": recent,
+                    "prior_mentions": prior,
+                    "last_seen": last_seen_surge.get(key),
+                }
+            )
     surging.sort(
         key=lambda r: (-r["recent_mentions"], r["content"]),
     )
@@ -498,8 +505,8 @@ def proactive_insights(
 
     return {
         "stale_action_items": stale_action_items,
-        "dormant_projects":   dormant,
-        "surging_entities":   surging,
+        "dormant_projects": dormant,
+        "surging_entities": surging,
     }
 
 

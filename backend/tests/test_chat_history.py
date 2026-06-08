@@ -10,7 +10,6 @@ list_user_workspaces.
 
 from unittest.mock import patch
 
-
 TEST_WS_ID = "00000000-0000-0000-0000-00000000aaaa"
 
 
@@ -19,14 +18,14 @@ class TestListSessions:
     def test_returns_sessions_list(self, client, jwt_auth_headers):
         rows = [
             {
-                "id":         "sess-1",
-                "title":      "First chat",
+                "id": "sess-1",
+                "title": "First chat",
                 "created_at": "2026-01-01T10:00:00+00:00",
                 "updated_at": "2026-01-01T10:05:00+00:00",
             },
             {
-                "id":         "sess-2",
-                "title":      "Second chat",
+                "id": "sess-2",
+                "title": "Second chat",
                 "created_at": "2026-01-02T11:00:00+00:00",
                 "updated_at": "2026-01-02T11:00:00+00:00",
             },
@@ -57,14 +56,12 @@ class TestListSessions:
 class TestCreateSession:
     def test_creates_session_with_title(self, client, jwt_auth_headers):
         created_row = {
-            "id":         "sess-new",
-            "title":      "About auth",
+            "id": "sess-new",
+            "title": "About auth",
             "created_at": "2026-01-03T09:00:00+00:00",
             "updated_at": "2026-01-03T09:00:00+00:00",
         }
-        with patch(
-            "main.create_chat_session", return_value=created_row
-        ) as mock_fn:
+        with patch("main.create_chat_session", return_value=created_row) as mock_fn:
             r = client.post(
                 "/api/chat/sessions",
                 headers=jwt_auth_headers,
@@ -80,12 +77,10 @@ class TestCreateSession:
 
     def test_title_defaults_to_new_chat(self, client, jwt_auth_headers):
         created_row = {
-            "id":    "sess-new",
+            "id": "sess-new",
             "title": "New chat",
         }
-        with patch(
-            "main.create_chat_session", return_value=created_row
-        ) as mock_fn:
+        with patch("main.create_chat_session", return_value=created_row) as mock_fn:
             r = client.post(
                 "/api/chat/sessions",
                 headers=jwt_auth_headers,
@@ -130,23 +125,21 @@ class TestListMessages:
     def test_returns_messages_oldest_first(self, client, jwt_auth_headers):
         rows = [
             {
-                "id":         "m1",
-                "role":       "user",
-                "content":    "What did we ship?",
-                "sources":    None,
+                "id": "m1",
+                "role": "user",
+                "content": "What did we ship?",
+                "sources": None,
                 "created_at": "2026-01-01T10:00:00+00:00",
             },
             {
-                "id":         "m2",
-                "role":       "assistant",
-                "content":    "The auth migration.",
-                "sources":    [],
+                "id": "m2",
+                "role": "assistant",
+                "content": "The auth migration.",
+                "sources": [],
                 "created_at": "2026-01-01T10:00:05+00:00",
             },
         ]
-        with patch(
-            "main.list_chat_messages", return_value=rows
-        ) as mock_fn:
+        with patch("main.list_chat_messages", return_value=rows) as mock_fn:
             r = client.get(
                 "/api/chat/sessions/sess-1/messages",
                 headers=jwt_auth_headers,
@@ -178,15 +171,13 @@ class TestListMessages:
 class TestCreateMessage:
     def test_appends_user_message(self, client, jwt_auth_headers):
         created = {
-            "id":         "msg-1",
-            "role":       "user",
-            "content":    "Hi",
-            "sources":    None,
+            "id": "msg-1",
+            "role": "user",
+            "content": "Hi",
+            "sources": None,
             "created_at": "2026-01-01T10:00:00+00:00",
         }
-        with patch(
-            "main.create_chat_message", return_value=created
-        ) as mock_fn:
+        with patch("main.create_chat_message", return_value=created) as mock_fn:
             r = client.post(
                 "/api/chat/sessions/sess-1/messages",
                 headers=jwt_auth_headers,
@@ -202,24 +193,24 @@ class TestCreateMessage:
         assert kwargs["sources"] is None
 
     def test_appends_assistant_message_with_sources(
-        self, client, jwt_auth_headers,
+        self,
+        client,
+        jwt_auth_headers,
     ):
         srcs = [{"title": "doc1", "url": "https://example.com/1"}]
         created = {
-            "id":         "msg-2",
-            "role":       "assistant",
-            "content":    "Answer.",
-            "sources":    srcs,
+            "id": "msg-2",
+            "role": "assistant",
+            "content": "Answer.",
+            "sources": srcs,
             "created_at": "2026-01-01T10:00:05+00:00",
         }
-        with patch(
-            "main.create_chat_message", return_value=created
-        ) as mock_fn:
+        with patch("main.create_chat_message", return_value=created) as mock_fn:
             r = client.post(
                 "/api/chat/sessions/sess-1/messages",
                 headers=jwt_auth_headers,
                 json={
-                    "role":    "assistant",
+                    "role": "assistant",
                     "content": "Answer.",
                     "sources": srcs,
                 },

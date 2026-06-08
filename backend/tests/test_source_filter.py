@@ -24,16 +24,21 @@ from unittest.mock import patch
 
 import pytest
 
-
 # ---------------------------------------------------------------------- #
 # Fixture helpers
 # ---------------------------------------------------------------------- #
 # Same chunk-shape conventions as test_recall_recency.py so the recency
 # co-tests below stay coherent with the existing fixtures.
 
+
 def _slack_chunk(
-    *, text, source_id, channel="general", ts=None,
-    score=0.9, document_type="message",
+    *,
+    text,
+    source_id,
+    channel="general",
+    ts=None,
+    score=0.9,
+    document_type="message",
 ):
     """A HydraDB chunk that represents an ingested Slack message.
 
@@ -46,14 +51,14 @@ def _slack_chunk(
         # parses it as unix seconds still gets a sane value.
         ts = f"1700{abs(hash(source_id)) % 1_000_000:06d}.0"
     return {
-        "text":      text,
-        "score":     score,
+        "text": text,
+        "score": score,
         "source_id": source_id,
-        "filename":  f"{source_id}.md",
-        "metadata":  {
-            "channel":       channel,
-            "stable_key":    f"slack:msg:C1:{ts}:{source_id}",
-            "timestamp":     ts,
+        "filename": f"{source_id}.md",
+        "metadata": {
+            "channel": channel,
+            "stable_key": f"slack:msg:C1:{ts}:{source_id}",
+            "timestamp": ts,
             "document_type": document_type,
         },
     }
@@ -62,12 +67,12 @@ def _slack_chunk(
 def _gmail_chunk(*, text, source_id, score=0.9):
     """A HydraDB chunk that represents an ingested Gmail email."""
     return {
-        "text":      text,
-        "score":     score,
+        "text": text,
+        "score": score,
         "source_id": source_id,
-        "filename":  f"{source_id}.md",
-        "metadata":  {
-            "stable_key":    f"gmail:msg:{source_id}",
+        "filename": f"{source_id}.md",
+        "metadata": {
+            "stable_key": f"gmail:msg:{source_id}",
             "document_type": "email",
         },
     }
@@ -78,16 +83,17 @@ def _unknown_chunk(*, text, source_id, score=0.9):
     stable_key prefix. Should pass through every source filter so we
     never silently drop a legitimate match (current policy)."""
     return {
-        "text":      text,
-        "score":     score,
+        "text": text,
+        "score": score,
         "source_id": source_id,
-        "filename":  f"{source_id}.md",
-        "metadata":  {},
+        "filename": f"{source_id}.md",
+        "metadata": {},
     }
 
 
 def _call(question, top_k=5, **kwargs):
     from recall import prepare_recall_context
+
     return prepare_recall_context(question, top_k, **kwargs)
 
 
@@ -106,51 +112,50 @@ def _source_ids(result):
 class TestExtractSourceKind:
     def test_slack_via_document_type(self):
         from recall import _extract_source_kind
+
         assert _extract_source_kind({"document_type": "message"}) == "slack"
-        assert _extract_source_kind({"document_type": "thread"})  == "slack"
+        assert _extract_source_kind({"document_type": "thread"}) == "slack"
 
     def test_gmail_via_document_type(self):
         from recall import _extract_source_kind
+
         assert _extract_source_kind({"document_type": "email"}) == "gmail"
 
     def test_slack_via_stable_key_fallback(self):
         from recall import _extract_source_kind
+
         # document_type missing; only the prefix tells us.
-        assert _extract_source_kind(
-            {"stable_key": "slack:msg:C1:123"}
-        ) == "slack"
-        assert _extract_source_kind(
-            {"stable_key": "slack:thread:C1:123"}
-        ) == "slack"
+        assert _extract_source_kind({"stable_key": "slack:msg:C1:123"}) == "slack"
+        assert _extract_source_kind({"stable_key": "slack:thread:C1:123"}) == "slack"
 
     def test_gmail_via_stable_key_fallback(self):
         from recall import _extract_source_kind
-        assert _extract_source_kind(
-            {"stable_key": "gmail:msg:abc"}
-        ) == "gmail"
+
+        assert _extract_source_kind({"stable_key": "gmail:msg:abc"}) == "gmail"
 
     def test_unknown_returns_none(self):
         from recall import _extract_source_kind
+
         # No document_type, no recognizable prefix -> None (unknown).
         assert _extract_source_kind({}) is None
         assert _extract_source_kind({"stable_key": "weird:thing"}) is None
-        assert _extract_source_kind(
-            {"document_type": "totally_made_up"}
-        ) is None
+        assert _extract_source_kind({"document_type": "totally_made_up"}) is None
 
     def test_document_type_wins_over_stable_key(self):
         # If both are present and they disagree, document_type wins
         # (it's the more authoritative signal — set by the ingest
         # builder directly).
         from recall import _extract_source_kind
+
         card = {
             "document_type": "email",
-            "stable_key":    "slack:msg:C1:123",   # contradictory
+            "stable_key": "slack:msg:C1:123",  # contradictory
         }
         assert _extract_source_kind(card) == "gmail"
 
     def test_non_dict_returns_none(self):
         from recall import _extract_source_kind
+
         assert _extract_source_kind(None) is None
         assert _extract_source_kind("not-a-card") is None
 
@@ -239,10 +244,12 @@ class TestSourceFilterEndToEnd:
         # silently drop" policy mirrors how channel/user filters behave).
         with patch(
             "hydradb_client.HydraDBClient.full_recall",
-            return_value={"chunks": [
-                _slack_chunk(text="slack-A", source_id="sa"),
-                _unknown_chunk(text="weird", source_id="weird"),
-            ]},
+            return_value={
+                "chunks": [
+                    _slack_chunk(text="slack-A", source_id="sa"),
+                    _unknown_chunk(text="weird", source_id="weird"),
+                ]
+            },
         ):
             result = _call("anything?", top_k=10, allowed_sources=["slack"])
         ids = _source_ids(result)
@@ -258,7 +265,7 @@ class TestSourceFilterEndToEnd:
 class TestSourceFilterComposesWithChannel:
     def _two_channel_corpus(self):
         return [
-            _slack_chunk(text="eng-1",  source_id="e1", channel="engineering"),
+            _slack_chunk(text="eng-1", source_id="e1", channel="engineering"),
             _slack_chunk(text="rand-1", source_id="r1", channel="random"),
             _gmail_chunk(text="email-1", source_id="g1"),
         ]
@@ -313,13 +320,17 @@ class TestRecencyStillWorksUnderSlackFilter:
         chunks = [
             _slack_chunk(
                 text="older slack",
-                source_id="old", channel="engineering",
-                ts="1700000000.0", score=0.99,
+                source_id="old",
+                channel="engineering",
+                ts="1700000000.0",
+                score=0.99,
             ),
             _slack_chunk(
                 text="NEWEST slack",
-                source_id="new", channel="engineering",
-                ts="1740000000.0", score=0.30,
+                source_id="new",
+                channel="engineering",
+                ts="1740000000.0",
+                score=0.30,
             ),
             _gmail_chunk(text="some email", source_id="email-1"),
         ]
@@ -372,6 +383,7 @@ class TestRecencyStillWorksUnderSlackFilter:
 class TestRequestModelValidation:
     def test_known_sources_accepted(self):
         from main import QueryRequest
+
         for s in ([], ["slack"], ["gmail"], ["slack", "gmail"]):
             req = QueryRequest(question="hello world", allowed_sources=s)
             assert req.allowed_sources == s
@@ -381,15 +393,18 @@ class TestRequestModelValidation:
         # API boundary instead of silently no-op'ing in the filter.
         from pydantic import ValidationError
         from main import QueryRequest
+
         with pytest.raises(ValidationError):
             QueryRequest(question="hello world", allowed_sources=["notion"])
 
     def test_null_accepted(self):
         from main import QueryRequest
+
         req = QueryRequest(question="hello world", allowed_sources=None)
         assert req.allowed_sources is None
 
     def test_field_omitted_defaults_to_none(self):
         from main import QueryRequest
+
         req = QueryRequest(question="hello world")
         assert req.allowed_sources is None

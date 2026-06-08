@@ -46,6 +46,7 @@ class TestRateLimitHelpers:
 
     def test_bucket_limit_bad_value_returns_default(self):
         from rate_limit import _bucket_limit
+
         # Bad value -> per-bucket default (query bucket: 20).
         with patch.dict(os.environ, {"RATE_LIMIT_PER_5_MIN": "not-a-number"}):
             assert _bucket_limit("query") == 20
@@ -59,11 +60,15 @@ class TestRateLimitHelpers:
     def test_bucket_limit_per_bucket_envs(self):
         # Each bucket reads its own env var.
         from rate_limit import _bucket_limit
-        with patch.dict(os.environ, {
-            "RATE_LIMIT_AUTH_PER_5_MIN":          "7",
-            "RATE_LIMIT_SLACK_WEBHOOK_PER_5_MIN": "777",
-            "RATE_LIMIT_INGEST_PER_5_MIN":        "2",
-        }):
+
+        with patch.dict(
+            os.environ,
+            {
+                "RATE_LIMIT_AUTH_PER_5_MIN": "7",
+                "RATE_LIMIT_SLACK_WEBHOOK_PER_5_MIN": "777",
+                "RATE_LIMIT_INGEST_PER_5_MIN": "2",
+            },
+        ):
             assert _bucket_limit("auth") == 7
             assert _bucket_limit("slack_webhook") == 777
             assert _bucket_limit("ingest") == 2
@@ -71,6 +76,7 @@ class TestRateLimitHelpers:
     def test_bucket_limit_override(self):
         # Explicit override bypasses env reading entirely.
         from rate_limit import _bucket_limit
+
         assert _bucket_limit("any_bucket", override=9) == 9
 
     def test_client_id_from_key_header(self):
@@ -103,6 +109,7 @@ class TestRateLimitHelpers:
         # single user is throttled across workspaces.
         from rate_limit import _client_id_from
         from logging_config import bind_user_context
+
         bind_user_context("user-abc", "workspace-1")
         try:
             req = MagicMock()
@@ -116,6 +123,7 @@ class TestRateLimitHelpers:
 class TestBucketedLimiter:
     def _fresh_limiter(self):
         from rate_limit import _BucketedLimiter
+
         return _BucketedLimiter()
 
     def test_below_limit_does_not_raise(self):
@@ -162,12 +170,11 @@ class TestBucketedLimiter:
         """Requests older than the window should not count."""
         from collections import deque
         from rate_limit import _BucketedLimiter, WINDOW_SECONDS
+
         limiter = _BucketedLimiter()
         # Manually insert old timestamps just outside the window.
         now = time.monotonic()
-        limiter._buckets["query"]["stale-client"] = deque(
-            [now - WINDOW_SECONDS - 1] * 5
-        )
+        limiter._buckets["query"]["stale-client"] = deque([now - WINDOW_SECONDS - 1] * 5)
         # The old entries should be evicted; this should not raise.
         limiter.hit("query", "stale-client", limit=3)
 
@@ -205,6 +212,7 @@ class TestRateLimitDependencyFactory:
 
     def test_returns_callable_dependency(self):
         from rate_limit import make_rate_limit_dependency
+
         dep = make_rate_limit_dependency("auth")
         assert callable(dep)
 

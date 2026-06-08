@@ -13,7 +13,6 @@ from unittest.mock import patch
 
 import pytest
 
-
 TEST_WS_ID = "00000000-0000-0000-0000-00000000aaaa"
 
 
@@ -28,6 +27,7 @@ def _reset_rate_limit_state():
     so each assertion sees the correct status code.
     """
     from rate_limit import _limiter
+
     with _limiter._lock:
         _limiter._buckets.clear()
     yield
@@ -46,37 +46,40 @@ class TestListChannels:
         assert body["channels"] == []
 
     def test_connected_returns_channels_and_refreshes(
-        self, client, jwt_auth_headers,
+        self,
+        client,
+        jwt_auth_headers,
     ):
         install = {
-            "workspace_id":    TEST_WS_ID,
+            "workspace_id": TEST_WS_ID,
             "slack_team_name": "Acme",
-            "bot_token":       "xoxb-test",
+            "bot_token": "xoxb-test",
         }
         fresh_from_slack = [
             {"slack_channel_id": "C1", "name": "general", "is_archived": False},
-            {"slack_channel_id": "C2", "name": "random",  "is_archived": False},
+            {"slack_channel_id": "C2", "name": "random", "is_archived": False},
         ]
         stored_rows = [
             {
                 "slack_channel_id": "C1",
-                "name":             "general",
-                "is_selected":      True,
-                "is_archived":      False,
-                "updated_at":       "2026-01-01T10:00:00+00:00",
+                "name": "general",
+                "is_selected": True,
+                "is_archived": False,
+                "updated_at": "2026-01-01T10:00:00+00:00",
             },
             {
                 "slack_channel_id": "C2",
-                "name":             "random",
-                "is_selected":      False,
-                "is_archived":      False,
-                "updated_at":       "2026-01-01T10:00:00+00:00",
+                "name": "random",
+                "is_selected": False,
+                "is_archived": False,
+                "updated_at": "2026-01-01T10:00:00+00:00",
             },
         ]
-        with patch("main.get_slack_installation", return_value=install), \
-             patch("main.list_slack_channels", return_value=fresh_from_slack) as mock_fresh, \
-             patch("main.upsert_slack_channels", return_value=2) as mock_upsert, \
-             patch("main.list_workspace_channels", return_value=stored_rows) as mock_list:
+        with patch("main.get_slack_installation", return_value=install), patch(
+            "main.list_slack_channels", return_value=fresh_from_slack
+        ) as mock_fresh, patch("main.upsert_slack_channels", return_value=2) as mock_upsert, patch(
+            "main.list_workspace_channels", return_value=stored_rows
+        ) as mock_list:
             r = client.get("/api/slack/channels", headers=jwt_auth_headers)
         assert r.status_code == 200
         body = r.json()
@@ -91,20 +94,27 @@ class TestListChannels:
         assert kwargs["workspace_id"] == TEST_WS_ID
 
     def test_connected_but_slack_refresh_fails_still_returns_stored(
-        self, client, jwt_auth_headers,
+        self,
+        client,
+        jwt_auth_headers,
     ):
         # Slack API hiccup shouldn't break the picker — we just return
         # what's already in the DB.
         install = {"slack_team_name": "Acme", "bot_token": "xoxb-test"}
-        stored_ch = [{
-            "slack_channel_id": "C1", "name": "general",
-            "is_selected": True, "is_archived": False,
-            "updated_at": "2026-01-01T10:00:00+00:00",
-        }]
-        with patch("main.get_slack_installation", return_value=install), \
-             patch("main.list_slack_channels", return_value=[]), \
-             patch("main.upsert_slack_channels", return_value=0) as mock_upsert, \
-             patch("main.list_workspace_channels", return_value=stored_ch):
+        stored_ch = [
+            {
+                "slack_channel_id": "C1",
+                "name": "general",
+                "is_selected": True,
+                "is_archived": False,
+                "updated_at": "2026-01-01T10:00:00+00:00",
+            }
+        ]
+        with patch("main.get_slack_installation", return_value=install), patch(
+            "main.list_slack_channels", return_value=[]
+        ), patch("main.upsert_slack_channels", return_value=0) as mock_upsert, patch(
+            "main.list_workspace_channels", return_value=stored_ch
+        ):
             r = client.get("/api/slack/channels", headers=jwt_auth_headers)
         assert r.status_code == 200
         body = r.json()
@@ -122,7 +132,8 @@ class TestListChannels:
 class TestSaveChannels:
     def test_saves_selected_set(self, client, jwt_auth_headers):
         with patch(
-            "main.set_selected_channels", return_value=True,
+            "main.set_selected_channels",
+            return_value=True,
         ) as mock_fn:
             r = client.post(
                 "/api/slack/channels",
@@ -138,7 +149,8 @@ class TestSaveChannels:
 
     def test_saves_empty_set(self, client, jwt_auth_headers):
         with patch(
-            "main.set_selected_channels", return_value=True,
+            "main.set_selected_channels",
+            return_value=True,
         ) as mock_fn:
             r = client.post(
                 "/api/slack/channels",
@@ -180,16 +192,20 @@ class TestRunIngest:
     def test_kicks_off_background_ingest(self, client, jwt_auth_headers):
         install = {"bot_token": "xoxb-test"}
         with patch(
-            "main.get_slack_installation", return_value=install,
+            "main.get_slack_installation",
+            return_value=install,
         ), patch(
-            "main.list_selected_channel_ids", return_value=["C1", "C2"],
+            "main.list_selected_channel_ids",
+            return_value=["C1", "C2"],
         ), patch(
             # Phase 4: the route resolves the workspace's HydraDB
             # sub-tenant before scheduling the runner. Patch this so
             # the test doesn't hit Supabase.
-            "main.ensure_workspace_sub_tenant", return_value="ws_test_abc",
+            "main.ensure_workspace_sub_tenant",
+            return_value="ws_test_abc",
         ), patch(
-            "main.run_workspace_ingest", return_value={},
+            "main.run_workspace_ingest",
+            return_value={},
         ) as mock_runner:
             r = client.post("/api/slack/ingest", headers=jwt_auth_headers)
         assert r.status_code == 202
@@ -224,13 +240,16 @@ class TestRunIngest:
             "main.get_slack_installation",
             return_value={"bot_token": "xoxb-test"},
         ), patch(
-            "main.list_selected_channel_ids", return_value=[],
+            "main.list_selected_channel_ids",
+            return_value=[],
         ):
             r = client.post("/api/slack/ingest", headers=jwt_auth_headers)
         assert r.status_code == 400
 
     def test_sub_tenant_lookup_failure_returns_502(
-        self, client, jwt_auth_headers,
+        self,
+        client,
+        jwt_auth_headers,
     ):
         # Phase 4: if ensure_workspace_sub_tenant returns None we
         # refuse rather than fall back to the env default -- that
@@ -239,9 +258,11 @@ class TestRunIngest:
             "main.get_slack_installation",
             return_value={"bot_token": "xoxb-test"},
         ), patch(
-            "main.list_selected_channel_ids", return_value=["C1"],
+            "main.list_selected_channel_ids",
+            return_value=["C1"],
         ), patch(
-            "main.ensure_workspace_sub_tenant", return_value=None,
+            "main.ensure_workspace_sub_tenant",
+            return_value=None,
         ), patch(
             "main.run_workspace_ingest",
         ) as mock_runner:
@@ -264,6 +285,7 @@ class TestUpsertChannelsProductionPayload:
 
     def _mock_supabase(self, exec_result=None, exec_raises=None):
         from unittest.mock import MagicMock
+
         execute = MagicMock()
         if exec_raises is not None:
             execute.side_effect = exec_raises
@@ -280,6 +302,7 @@ class TestUpsertChannelsProductionPayload:
         carry it."""
         from unittest.mock import patch
         from supabase_client import upsert_slack_channels
+
         client, upsert = self._mock_supabase(
             exec_result=[{"id": "r-1"}, {"id": "r-2"}],
         )
@@ -303,6 +326,7 @@ class TestUpsertChannelsProductionPayload:
         excluded from the payload when blank."""
         from unittest.mock import patch
         from supabase_client import upsert_slack_channels
+
         client, upsert = self._mock_supabase()
         with patch("supabase_client.get_supabase", return_value=client):
             upsert_slack_channels(
@@ -317,20 +341,23 @@ class TestUpsertChannelsProductionPayload:
         with a value of the right type."""
         from unittest.mock import patch
         from supabase_client import upsert_slack_channels
+
         client, upsert = self._mock_supabase()
         with patch("supabase_client.get_supabase", return_value=client):
             upsert_slack_channels(
                 workspace_id=TEST_WS_ID,
                 installation_id="inst-1",
-                channels=[{
-                    "slack_channel_id": "C1",
-                    "name":             "engineering",
-                    "is_private":       True,
-                    "is_archived":      False,
-                    "member_count":     42,
-                    "topic":            "ship it",
-                    "purpose":          "where we ship",
-                }],
+                channels=[
+                    {
+                        "slack_channel_id": "C1",
+                        "name": "engineering",
+                        "is_private": True,
+                        "is_archived": False,
+                        "member_count": 42,
+                        "topic": "ship it",
+                        "purpose": "where we ship",
+                    }
+                ],
             )
         row = upsert.call_args.args[0][0]
         assert row["workspace_id"] == TEST_WS_ID
@@ -342,7 +369,7 @@ class TestUpsertChannelsProductionPayload:
         assert row["member_count"] == 42
         assert row["topic"] == "ship it"
         assert row["purpose"] == "where we ship"
-        assert "last_seen_at" in row   # ISO timestamp string
+        assert "last_seen_at" in row  # ISO timestamp string
         # is_selected MUST NOT appear — we'd clobber user selections.
         assert "is_selected" not in row
 
@@ -351,6 +378,7 @@ class TestUpsertChannelsProductionPayload:
         in. The payload must not insert NULL into a NOT NULL column."""
         from unittest.mock import patch
         from supabase_client import upsert_slack_channels
+
         client, upsert = self._mock_supabase()
         with patch("supabase_client.get_supabase", return_value=client):
             upsert_slack_channels(
@@ -371,18 +399,22 @@ class TestUpsertChannelsProductionPayload:
         WHY the upsert failed."""
         import logging
         from unittest.mock import patch
+
         try:
             from postgrest.exceptions import APIError as PGAPIError
         except ImportError:  # pragma: no cover
             pytest.skip("postgrest not installed")
 
-        err = PGAPIError({
-            "code":    "23502",
-            "message": "null value in column \"installation_id\" violates NOT NULL",
-            "hint":    None,
-            "details": "Failing row contains...",
-        })
+        err = PGAPIError(
+            {
+                "code": "23502",
+                "message": "null value in column \"installation_id\" violates NOT NULL",
+                "hint": None,
+                "details": "Failing row contains...",
+            }
+        )
         from supabase_client import upsert_slack_channels
+
         client, _ = self._mock_supabase(exec_raises=err)
 
         with caplog.at_level(logging.WARNING, logger="supabase_client"):
@@ -392,10 +424,7 @@ class TestUpsertChannelsProductionPayload:
                     channels=[{"slack_channel_id": "C1", "name": "g"}],
                 )
         assert result == 0
-        records = [
-            r for r in caplog.records
-            if r.message == "supabase_upsert_channels_failed"
-        ]
+        records = [r for r in caplog.records if r.message == "supabase_upsert_channels_failed"]
         assert len(records) == 1
         rec = records[0]
         assert getattr(rec, "pg_code") == "23502"
@@ -411,24 +440,26 @@ class TestListSlackChannelsMapping:
         DB has a column for: is_private, num_members → member_count,
         topic.value, purpose.value."""
         from unittest.mock import MagicMock, patch
+
         # WebClient is constructed inside the function; intercept it.
         fake_resp = {
-            "channels": [{
-                "id":          "C1",
-                "name":        "engineering",
-                "is_archived": False,
-                "is_private":  True,
-                "num_members": 12,
-                "topic":       {"value": "ship it", "creator": "U1",
-                                "last_set": 0},
-                "purpose":     {"value": "where we ship", "creator": "U1",
-                                "last_set": 0},
-            }],
+            "channels": [
+                {
+                    "id": "C1",
+                    "name": "engineering",
+                    "is_archived": False,
+                    "is_private": True,
+                    "num_members": 12,
+                    "topic": {"value": "ship it", "creator": "U1", "last_set": 0},
+                    "purpose": {"value": "where we ship", "creator": "U1", "last_set": 0},
+                }
+            ],
             "response_metadata": {"next_cursor": ""},
         }
         mock_client = MagicMock()
         mock_client.conversations_list.return_value = fake_resp
         from slack_oauth import list_slack_channels
+
         with patch("slack_oauth.WebClient", return_value=mock_client):
             out = list_slack_channels("xoxb-test")
         assert len(out) == 1
@@ -445,38 +476,46 @@ class TestListSlackChannelsMapping:
         """Slack omits num_members for private channels the bot isn't
         a member of. Must default to 0, not raise."""
         from unittest.mock import MagicMock, patch
+
         fake_resp = {
-            "channels": [{
-                "id":          "C1",
-                "name":        "private-thing",
-                "is_archived": False,
-                "is_private":  True,
-                # num_members deliberately absent.
-            }],
+            "channels": [
+                {
+                    "id": "C1",
+                    "name": "private-thing",
+                    "is_archived": False,
+                    "is_private": True,
+                    # num_members deliberately absent.
+                }
+            ],
             "response_metadata": {"next_cursor": ""},
         }
         mock_client = MagicMock()
         mock_client.conversations_list.return_value = fake_resp
         from slack_oauth import list_slack_channels
+
         with patch("slack_oauth.WebClient", return_value=mock_client):
             out = list_slack_channels("xoxb-test")
         assert out[0]["member_count"] == 0
 
     def test_handles_missing_topic_and_purpose(self):
         from unittest.mock import MagicMock, patch
+
         fake_resp = {
-            "channels": [{
-                "id":          "C1",
-                "name":        "g",
-                "is_archived": False,
-                "is_private":  False,
-                # topic and purpose absent entirely.
-            }],
+            "channels": [
+                {
+                    "id": "C1",
+                    "name": "g",
+                    "is_archived": False,
+                    "is_private": False,
+                    # topic and purpose absent entirely.
+                }
+            ],
             "response_metadata": {"next_cursor": ""},
         }
         mock_client = MagicMock()
         mock_client.conversations_list.return_value = fake_resp
         from slack_oauth import list_slack_channels
+
         with patch("slack_oauth.WebClient", return_value=mock_client):
             out = list_slack_channels("xoxb-test")
         assert out[0]["topic"] == ""
@@ -486,22 +525,31 @@ class TestListSlackChannelsMapping:
 # ── /api/slack/channels route forwards installation_id ────────────────────
 class TestRouteForwardsInstallationId:
     def test_get_channels_passes_installation_id_to_upsert(
-        self, client, jwt_auth_headers,
+        self,
+        client,
+        jwt_auth_headers,
     ):
         install = {
-            "id":              "inst-uuid-real",
+            "id": "inst-uuid-real",
             "slack_team_name": "Acme",
-            "bot_token":       "xoxb-test",
+            "bot_token": "xoxb-test",
         }
-        fresh_from_slack = [{
-            "slack_channel_id": "C1", "name": "g",
-            "is_archived": False, "is_private": False,
-            "member_count": 0, "topic": "", "purpose": "",
-        }]
-        with patch("main.get_slack_installation", return_value=install), \
-             patch("main.list_slack_channels", return_value=fresh_from_slack), \
-             patch("main.upsert_slack_channels", return_value=1) as mock_upsert, \
-             patch("main.list_workspace_channels", return_value=[]):
+        fresh_from_slack = [
+            {
+                "slack_channel_id": "C1",
+                "name": "g",
+                "is_archived": False,
+                "is_private": False,
+                "member_count": 0,
+                "topic": "",
+                "purpose": "",
+            }
+        ]
+        with patch("main.get_slack_installation", return_value=install), patch(
+            "main.list_slack_channels", return_value=fresh_from_slack
+        ), patch("main.upsert_slack_channels", return_value=1) as mock_upsert, patch(
+            "main.list_workspace_channels", return_value=[]
+        ):
             r = client.get("/api/slack/channels", headers=jwt_auth_headers)
         assert r.status_code == 200
         kwargs = mock_upsert.call_args.kwargs

@@ -290,9 +290,9 @@ def retry_with_backoff(
                 logger.warning(
                     "retry_giveup",
                     extra={
-                        "op_name":  op_name,
+                        "op_name": op_name,
                         "attempts": attempts,
-                        "error":    type(e).__name__,
+                        "error": type(e).__name__,
                     },
                 )
                 if on_giveup is not None:
@@ -311,8 +311,8 @@ def retry_with_backoff(
                 extra={
                     "op_name": op_name,
                     "attempt": attempt,
-                    "of":      attempts,
-                    "error":   type(e).__name__,
+                    "of": attempts,
+                    "error": type(e).__name__,
                     "next_delay_s": round(delay, 3),
                 },
             )

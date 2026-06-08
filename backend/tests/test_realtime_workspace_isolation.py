@@ -32,12 +32,13 @@ import pytest
 def _sign(body: bytes) -> dict:
     ts = int(time.time())
     secret = os.environ.get(
-        "SLACK_SIGNING_SECRET", "test-slack-signing-secret",
+        "SLACK_SIGNING_SECRET",
+        "test-slack-signing-secret",
     )
     base = b"v0:" + str(ts).encode() + b":" + body
     digest = hmac.new(secret.encode(), base, hashlib.sha256).hexdigest()
     return {
-        "X-Slack-Signature":         f"v0={digest}",
+        "X-Slack-Signature": f"v0={digest}",
         "X-Slack-Request-Timestamp": str(ts),
     }
 
@@ -52,10 +53,13 @@ def _post(client, payload: dict):
 # ---------------------------------------------------------------------- #
 class TestWebhookShellPreserved:
     def test_url_verification_still_works(self, client):
-        r = _post(client, {
-            "type":      "url_verification",
-            "challenge": "phase5-challenge",
-        })
+        r = _post(
+            client,
+            {
+                "type": "url_verification",
+                "challenge": "phase5-challenge",
+            },
+        )
         assert r.status_code == 200
         assert "phase5-challenge" in r.text
 
@@ -65,7 +69,7 @@ class TestWebhookShellPreserved:
             "/slack/events",
             content=body,
             headers={
-                "X-Slack-Signature":         "v0=badhash",
+                "X-Slack-Signature": "v0=badhash",
                 "X-Slack-Request-Timestamp": str(int(time.time())),
             },
         )
@@ -74,10 +78,10 @@ class TestWebhookShellPreserved:
     def test_event_callback_acks_200_even_when_dropped(self, client):
         """Slack must always see 200 -- otherwise it retries forever."""
         payload = {
-            "type":     "event_callback",
+            "type": "event_callback",
             "event_id": "Ev_phase5_ack_1",
-            "team_id":  "T_UNKNOWN",
-            "event":    {"type": "message", "channel": "C1", "text": "hi"},
+            "team_id": "T_UNKNOWN",
+            "event": {"type": "message", "channel": "C1", "text": "hi"},
         }
         with patch(
             "realtime_ingest.get_slack_installation_by_team_id",
@@ -89,10 +93,10 @@ class TestWebhookShellPreserved:
 
     def test_duplicate_event_id_suppressed(self, client):
         payload = {
-            "type":     "event_callback",
+            "type": "event_callback",
             "event_id": "Ev_phase5_dup_1",
-            "team_id":  "T_TEAM",
-            "event":    {"type": "message", "channel": "C1", "text": "hi"},
+            "team_id": "T_TEAM",
+            "event": {"type": "message", "channel": "C1", "text": "hi"},
         }
         with patch(
             "main.process_slack_event",
@@ -112,10 +116,10 @@ class TestRoutePassesFullPayload:
     def test_route_forwards_full_payload(self, client):
         """The handler needs `team_id` from the envelope to route."""
         payload = {
-            "type":     "event_callback",
+            "type": "event_callback",
             "event_id": "Ev_phase5_passthrough",
-            "team_id":  "T_PASS",
-            "event":    {"type": "message", "channel": "C1", "text": "hi"},
+            "team_id": "T_PASS",
+            "event": {"type": "message", "channel": "C1", "text": "hi"},
         }
         with patch(
             "main.process_slack_event",
@@ -145,6 +149,7 @@ class TestProcessSlackEventRouting:
     def _reset_seen_cache(self):
         """Each test starts with a fresh in-memory dedupe cache."""
         import realtime_ingest as r
+
         r._seen_event_ids.clear()
         r._bot_user_id_by_token.clear()
         r._in_flight.clear()
@@ -154,32 +159,39 @@ class TestProcessSlackEventRouting:
         r._in_flight.clear()
 
     def _build_payload(
-        self, *, team_id="T_TEAM", channel="C1",
-        text="hello world", ts="1700000000.000100",
-        thread_ts=None, subtype=None, user="U_HUMAN",
+        self,
+        *,
+        team_id="T_TEAM",
+        channel="C1",
+        text="hello world",
+        ts="1700000000.000100",
+        thread_ts=None,
+        subtype=None,
+        user="U_HUMAN",
     ):
         event = {
-            "type":    "message",
+            "type": "message",
             "channel": channel,
-            "text":    text,
-            "ts":      ts,
-            "user":    user,
+            "text": text,
+            "ts": ts,
+            "user": user,
         }
         if thread_ts:
             event["thread_ts"] = thread_ts
         if subtype:
             event["subtype"] = subtype
         return {
-            "type":     "event_callback",
+            "type": "event_callback",
             "event_id": "Ev_test",
-            "team_id":  team_id,
-            "event":    event,
+            "team_id": team_id,
+            "event": event,
         }
 
     def test_unknown_team_id_is_silently_dropped(self):
         """Slack apps can be installed in multiple teams; we ignore
         events from teams we have no installation row for."""
         from realtime_ingest import process_slack_event
+
         payload = self._build_payload(team_id="T_UNKNOWN")
         with patch(
             "realtime_ingest.get_slack_installation_by_team_id",
@@ -199,10 +211,11 @@ class TestProcessSlackEventRouting:
         construct a SlackClientWrapper -- saving an unnecessary
         auth.test round-trip."""
         from realtime_ingest import process_slack_event
+
         payload = self._build_payload(team_id="T_TEAM", channel="C_NOT_PICKED")
         installation = {
-            "workspace_id":  "ws-1",
-            "bot_token":     "xoxb-team-1",
+            "workspace_id": "ws-1",
+            "bot_token": "xoxb-team-1",
             "slack_team_id": "T_TEAM",
         }
         with patch(
@@ -218,7 +231,8 @@ class TestProcessSlackEventRouting:
         ) as mock_hydra:
             process_slack_event(payload)
         mock_sel.assert_called_once_with(
-            workspace_id="ws-1", slack_channel_id="C_NOT_PICKED",
+            workspace_id="ws-1",
+            slack_channel_id="C_NOT_PICKED",
         )
         mock_slack.assert_not_called()
         mock_hydra.assert_not_called()
@@ -228,10 +242,11 @@ class TestProcessSlackEventRouting:
         with the workspace's bot_token and a HydraDBClient with the
         workspace's sub_tenant_id."""
         from realtime_ingest import process_slack_event
+
         payload = self._build_payload(team_id="T_TEAM", channel="C_PICKED")
         installation = {
-            "workspace_id":  "ws-1",
-            "bot_token":     "xoxb-team-1",
+            "workspace_id": "ws-1",
+            "bot_token": "xoxb-team-1",
             "slack_team_id": "T_TEAM",
         }
 
@@ -243,7 +258,9 @@ class TestProcessSlackEventRouting:
 
         mock_hydra_instance = MagicMock()
         mock_hydra_instance.upload_knowledge.return_value = {
-            "success": True, "success_count": 1, "failed_count": 0,
+            "success": True,
+            "success_count": 1,
+            "failed_count": 0,
         }
 
         with patch(
@@ -262,14 +279,15 @@ class TestProcessSlackEventRouting:
             "realtime_ingest.HydraDBClient",
             return_value=mock_hydra_instance,
         ) as mock_hydra_cls, patch(
-            "realtime_ingest.fetch_channel_name", return_value="general",
+            "realtime_ingest.fetch_channel_name",
+            return_value="general",
         ), patch(
             "realtime_ingest.build_message_file",
             return_value={
-                "filename":   "slack_general_1700000000_000100.md",
-                "content":    "# msg",
+                "filename": "slack_general_1700000000_000100.md",
+                "content": "# msg",
                 "stable_key": "slack:msg:C_PICKED:1700000000.000100",
-                "doc_type":   "message",
+                "doc_type": "message",
             },
         ), patch(
             "realtime_ingest.IngestionState",
@@ -277,8 +295,7 @@ class TestProcessSlackEventRouting:
             mock_state = MagicMock()
             mock_state.has.return_value = False
             mock_state_cls.return_value = mock_state
-            mock_state_cls.locked.return_value.__enter__.return_value = \
-                mock_state
+            mock_state_cls.locked.return_value.__enter__.return_value = mock_state
 
             process_slack_event(payload)
 
@@ -301,33 +318,38 @@ class TestEventFiltering:
     @pytest.fixture(autouse=True)
     def _reset(self):
         import realtime_ingest as r
+
         r._seen_event_ids.clear()
         r._bot_user_id_by_token.clear()
         r._in_flight.clear()
         yield
 
-    @pytest.mark.parametrize("subtype", [
-        "message_changed",
-        "message_deleted",
-        "bot_message",
-        "channel_join",
-        "channel_leave",
-    ])
+    @pytest.mark.parametrize(
+        "subtype",
+        [
+            "message_changed",
+            "message_deleted",
+            "bot_message",
+            "channel_join",
+            "channel_leave",
+        ],
+    )
     def test_ignored_subtypes_short_circuit_before_lookup(self, subtype):
         """We drop edits/deletes/joins/leaves/bot_message BEFORE we even
         hit Supabase -- no point looking up an installation for an
         event we're going to ignore."""
         from realtime_ingest import process_slack_event
+
         payload = {
-            "type":     "event_callback",
+            "type": "event_callback",
             "event_id": f"Ev_{subtype}",
-            "team_id":  "T_TEAM",
+            "team_id": "T_TEAM",
             "event": {
-                "type":    "message",
+                "type": "message",
                 "subtype": subtype,
                 "channel": "C1",
-                "text":    "x",
-                "ts":      "1700000000.000100",
+                "text": "x",
+                "ts": "1700000000.000100",
             },
         }
         with patch(
@@ -338,11 +360,12 @@ class TestEventFiltering:
 
     def test_non_message_event_ignored(self):
         from realtime_ingest import process_slack_event
+
         payload = {
-            "type":     "event_callback",
+            "type": "event_callback",
             "event_id": "Ev_reaction",
-            "team_id":  "T_TEAM",
-            "event":    {"type": "reaction_added", "channel": "C1"},
+            "team_id": "T_TEAM",
+            "event": {"type": "reaction_added", "channel": "C1"},
         }
         with patch(
             "realtime_ingest.get_slack_installation_by_team_id",
@@ -358,6 +381,7 @@ class TestTeamIdResolution:
     def test_prefers_authorizations_team_id(self):
         """Slack-recommended path: read team_id from authorizations[0]."""
         from realtime_ingest import _resolve_team_id
+
         payload = {
             "team_id": "T_OUTER",
             "authorizations": [{"team_id": "T_AUTHED"}],
@@ -367,19 +391,22 @@ class TestTeamIdResolution:
 
     def test_falls_back_to_top_level_team_id(self):
         from realtime_ingest import _resolve_team_id
+
         payload = {
             "team_id": "T_OUTER",
-            "event":   {"team": "T_EVENT"},
+            "event": {"team": "T_EVENT"},
         }
         assert _resolve_team_id(payload) == "T_OUTER"
 
     def test_falls_back_to_event_team(self):
         from realtime_ingest import _resolve_team_id
+
         payload = {"event": {"team": "T_EVENT"}}
         assert _resolve_team_id(payload) == "T_EVENT"
 
     def test_returns_empty_when_nothing_present(self):
         from realtime_ingest import _resolve_team_id
+
         assert _resolve_team_id({}) == ""
         assert _resolve_team_id({"event": {}}) == ""
 
@@ -390,14 +417,18 @@ class TestTeamIdResolution:
 class TestRealtimeDisabled:
     def test_short_circuits_when_disabled(self, monkeypatch):
         from realtime_ingest import process_slack_event
+
         monkeypatch.setenv("REALTIME_INGEST_ENABLED", "false")
         with patch(
             "realtime_ingest.get_slack_installation_by_team_id",
         ) as mock_lookup:
-            process_slack_event({
-                "type": "event_callback", "team_id": "T_TEAM",
-                "event": {"type": "message", "channel": "C1", "text": "x"},
-            })
+            process_slack_event(
+                {
+                    "type": "event_callback",
+                    "team_id": "T_TEAM",
+                    "event": {"type": "message", "channel": "C1", "text": "x"},
+                }
+            )
         mock_lookup.assert_not_called()
 
 
@@ -407,14 +438,15 @@ class TestRealtimeDisabled:
 class TestSupabaseHelpers:
     def test_get_slack_installation_by_team_id_returns_row(self):
         from supabase_client import get_slack_installation_by_team_id
+
         mock_client = MagicMock()
-        mock_client.table.return_value.select.return_value.eq \
-            .return_value.limit.return_value.execute.return_value \
-            .data = [{
-                "workspace_id":  "ws-1",
+        mock_client.table.return_value.select.return_value.eq.return_value.limit.return_value.execute.return_value.data = [
+            {
+                "workspace_id": "ws-1",
                 "slack_team_id": "T1",
-                "bot_token":     "xoxb-x",
-            }]
+                "bot_token": "xoxb-x",
+            }
+        ]
         with patch("supabase_client.get_supabase", return_value=mock_client):
             row = get_slack_installation_by_team_id(slack_team_id="T1")
         assert row is not None
@@ -422,15 +454,18 @@ class TestSupabaseHelpers:
 
     def test_get_slack_installation_by_team_id_returns_none_when_missing(self):
         from supabase_client import get_slack_installation_by_team_id
+
         mock_client = MagicMock()
-        mock_client.table.return_value.select.return_value.eq \
-            .return_value.limit.return_value.execute.return_value.data = []
+        mock_client.table.return_value.select.return_value.eq.return_value.limit.return_value.execute.return_value.data = (
+            []
+        )
         with patch("supabase_client.get_supabase", return_value=mock_client):
             row = get_slack_installation_by_team_id(slack_team_id="T_UNKNOWN")
         assert row is None
 
     def test_get_slack_installation_by_team_id_handles_blank(self):
         from supabase_client import get_slack_installation_by_team_id
+
         # No round-trip when the input is blank.
         with patch("supabase_client.get_supabase") as mock_get:
             assert get_slack_installation_by_team_id(slack_team_id="") is None
@@ -438,36 +473,42 @@ class TestSupabaseHelpers:
 
     def test_is_channel_selected_true_when_selected(self):
         from supabase_client import is_channel_selected_for_workspace
+
         mock_client = MagicMock()
-        mock_client.table.return_value.select.return_value.eq \
-            .return_value.eq.return_value.limit.return_value \
-            .execute.return_value.data = [{"is_selected": True}]
+        mock_client.table.return_value.select.return_value.eq.return_value.eq.return_value.limit.return_value.execute.return_value.data = [
+            {"is_selected": True}
+        ]
         with patch("supabase_client.get_supabase", return_value=mock_client):
             ok = is_channel_selected_for_workspace(
-                workspace_id="ws-1", slack_channel_id="C1",
+                workspace_id="ws-1",
+                slack_channel_id="C1",
             )
         assert ok is True
 
     def test_is_channel_selected_false_when_unselected(self):
         from supabase_client import is_channel_selected_for_workspace
+
         mock_client = MagicMock()
-        mock_client.table.return_value.select.return_value.eq \
-            .return_value.eq.return_value.limit.return_value \
-            .execute.return_value.data = [{"is_selected": False}]
+        mock_client.table.return_value.select.return_value.eq.return_value.eq.return_value.limit.return_value.execute.return_value.data = [
+            {"is_selected": False}
+        ]
         with patch("supabase_client.get_supabase", return_value=mock_client):
             ok = is_channel_selected_for_workspace(
-                workspace_id="ws-1", slack_channel_id="C1",
+                workspace_id="ws-1",
+                slack_channel_id="C1",
             )
         assert ok is False
 
     def test_is_channel_selected_false_when_no_row(self):
         from supabase_client import is_channel_selected_for_workspace
+
         mock_client = MagicMock()
-        mock_client.table.return_value.select.return_value.eq \
-            .return_value.eq.return_value.limit.return_value \
-            .execute.return_value.data = []
+        mock_client.table.return_value.select.return_value.eq.return_value.eq.return_value.limit.return_value.execute.return_value.data = (
+            []
+        )
         with patch("supabase_client.get_supabase", return_value=mock_client):
             ok = is_channel_selected_for_workspace(
-                workspace_id="ws-1", slack_channel_id="C_NEW",
+                workspace_id="ws-1",
+                slack_channel_id="C_NEW",
             )
         assert ok is False

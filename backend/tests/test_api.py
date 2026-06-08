@@ -209,6 +209,7 @@ class TestQueryAuth:
     # tests/test_supabase_auth.py::TestRequireUserFailures — see the
     # expired / wrong-signature / wrong-audience / malformed cases there.
 
+
 # ── /api/query/stream ─────────────────────────────────────────────────────
 
 

@@ -276,9 +276,9 @@ class TestSaveLocked:
         state_a.save_locked()
 
         final = IngestionState(path)
-        assert final.get_last_synced_ts("C1") == "1000000500.000000", (
-            "Newer watermark from concurrent write must be preserved"
-        )
+        assert (
+            final.get_last_synced_ts("C1") == "1000000500.000000"
+        ), "Newer watermark from concurrent write must be preserved"
 
     def test_save_locked_advances_newer_watermark(self, tmp_path):
         """A newer watermark in-memory wins over an older one on disk."""

@@ -57,10 +57,10 @@ WINDOW_SECONDS = 5 * 60  # 5 minutes
 #   ingest        — low. Manual /api/slack/ingest is expensive
 #                   (HydraDB uploads). 5/5min stops accidental loops.
 _BUCKET_DEFAULTS = {
-    "auth":          ("RATE_LIMIT_AUTH_PER_5_MIN",           30),
-    "query":         ("RATE_LIMIT_PER_5_MIN",                20),
-    "slack_webhook": ("RATE_LIMIT_SLACK_WEBHOOK_PER_5_MIN",  600),
-    "ingest":        ("RATE_LIMIT_INGEST_PER_5_MIN",         5),
+    "auth": ("RATE_LIMIT_AUTH_PER_5_MIN", 30),
+    "query": ("RATE_LIMIT_PER_5_MIN", 20),
+    "slack_webhook": ("RATE_LIMIT_SLACK_WEBHOOK_PER_5_MIN", 600),
+    "ingest": ("RATE_LIMIT_INGEST_PER_5_MIN", 5),
 }
 
 
@@ -97,6 +97,7 @@ def _client_id_from(request: Request) -> str:
     # only when needed. Falls back gracefully if it's unset.
     try:
         from logging_config import _user_id  # noqa: PLC0415
+
         uid = _user_id.get()
         if uid:
             return f"user:{uid}"
@@ -143,10 +144,10 @@ class _BucketedLimiter:
                 logger.info(
                     "rate_limit_exceeded",
                     extra={
-                        "bucket":      bucket,
-                        "client_id":   client_id,
-                        "count":       len(dq),
-                        "limit":       limit,
+                        "bucket": bucket,
+                        "client_id": client_id,
+                        "count": len(dq),
+                        "limit": limit,
                         "retry_after": retry_after,
                     },
                 )
@@ -156,10 +157,7 @@ class _BucketedLimiter:
                         f"(limit {limit} per 5 minutes). "
                         f"Try again in about {retry_after} seconds."
                     ),
-                    log_context=(
-                        f"bucket={bucket} client={client_id} "
-                        f"count={len(dq)} limit={limit}"
-                    ),
+                    log_context=(f"bucket={bucket} client={client_id} " f"count={len(dq)} limit={limit}"),
                 )
 
             dq.append(now)

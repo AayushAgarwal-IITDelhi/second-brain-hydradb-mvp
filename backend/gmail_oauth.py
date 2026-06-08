@@ -74,6 +74,7 @@ def _max_messages_per_run() -> int:
 # Env access (helpers wrapped so tests can monkeypatch fresh values)
 # ---------------------------------------------------------------------- #
 
+
 def _env(name: str) -> str:
     return (os.getenv(name) or "").strip()
 
@@ -111,6 +112,7 @@ def gmail_oauth_configured() -> bool:
 # a single fix applies to both Slack and Gmail; the connector-specific
 # secret lookup and fail-closed guard stay here.
 
+
 def make_oauth_state(workspace_id: str, user_id: str) -> str:
     """
     Build a tamper-evident state token for Google OAuth.
@@ -135,6 +137,7 @@ def verify_oauth_state(state: str) -> Optional[Dict[str, Any]]:
 # Connect-Gmail URL
 # ---------------------------------------------------------------------- #
 
+
 def build_connect_url(*, workspace_id: str, user_id: str) -> str:
     """
     Build the Google OAuth 2.0 authorize URL.
@@ -149,22 +152,25 @@ def build_connect_url(*, workspace_id: str, user_id: str) -> str:
       - include_granted_scopes=true -> incremental auth, future-proof.
     """
     state = make_oauth_state(workspace_id, user_id)
-    qs = urlencode({
-        "client_id":               _client_id(),
-        "redirect_uri":            _redirect_uri(),
-        "response_type":           "code",
-        "scope":                   " ".join(GMAIL_SCOPES),
-        "access_type":             "offline",
-        "prompt":                  "consent",
-        "include_granted_scopes":  "true",
-        "state":                   state,
-    })
+    qs = urlencode(
+        {
+            "client_id": _client_id(),
+            "redirect_uri": _redirect_uri(),
+            "response_type": "code",
+            "scope": " ".join(GMAIL_SCOPES),
+            "access_type": "offline",
+            "prompt": "consent",
+            "include_granted_scopes": "true",
+            "state": state,
+        }
+    )
     return f"https://accounts.google.com/o/oauth2/v2/auth?{qs}"
 
 
 # ---------------------------------------------------------------------- #
 # OAuth code exchange + token refresh
 # ---------------------------------------------------------------------- #
+
 
 def exchange_code(code: str) -> Optional[Dict[str, Any]]:
     """
@@ -177,11 +183,11 @@ def exchange_code(code: str) -> Optional[Dict[str, Any]]:
         resp = requests.post(
             "https://oauth2.googleapis.com/token",
             data={
-                "code":          code,
-                "client_id":     _client_id(),
+                "code": code,
+                "client_id": _client_id(),
                 "client_secret": _client_secret(),
-                "redirect_uri":  _redirect_uri(),
-                "grant_type":    "authorization_code",
+                "redirect_uri": _redirect_uri(),
+                "grant_type": "authorization_code",
             },
             timeout=15,
         )
@@ -222,10 +228,10 @@ def refresh_access_token(refresh_token: str) -> Optional[Dict[str, Any]]:
         resp = requests.post(
             "https://oauth2.googleapis.com/token",
             data={
-                "client_id":     _client_id(),
+                "client_id": _client_id(),
                 "client_secret": _client_secret(),
                 "refresh_token": refresh_token,
-                "grant_type":    "refresh_token",
+                "grant_type": "refresh_token",
             },
             timeout=15,
         )
@@ -296,16 +302,17 @@ def installation_from_token_response(
     if isinstance(expires_in, (int, float)) and expires_in > 0:
         expiry = datetime.now(timezone.utc).timestamp() + int(expires_in)
         expiry_iso = datetime.fromtimestamp(
-            expiry, tz=timezone.utc,
+            expiry,
+            tz=timezone.utc,
         ).isoformat()
 
     return {
         "google_user_id": (user_info.get("sub") or "").strip(),
-        "email":          (user_info.get("email") or "").strip(),
-        "access_token":   (token_resp.get("access_token") or "").strip(),
-        "refresh_token":  (token_resp.get("refresh_token") or "").strip(),
-        "scopes":         (token_resp.get("scope") or "").strip(),
-        "token_expiry":   expiry_iso,
+        "email": (user_info.get("email") or "").strip(),
+        "access_token": (token_resp.get("access_token") or "").strip(),
+        "refresh_token": (token_resp.get("refresh_token") or "").strip(),
+        "scopes": (token_resp.get("scope") or "").strip(),
+        "token_expiry": expiry_iso,
     }
 
 
@@ -316,6 +323,7 @@ def installation_from_token_response(
 # handles "access token expired -> refresh -> retry". The refresh
 # updates the in-memory `access_token` on the passed connection dict
 # AND returns the new value so callers can persist it back.
+
 
 class GmailApiError(Exception):
     """Raised by helpers when Gmail returns a permanent error."""
@@ -358,7 +366,11 @@ def _authed_request(
     headers = {"Authorization": f"Bearer {access_token}"}
     try:
         resp = requests.request(
-            method, url, headers=headers, params=params, timeout=timeout,
+            method,
+            url,
+            headers=headers,
+            params=params,
+            timeout=timeout,
         )
     except requests.RequestException as e:
         raise GmailApiError(f"Gmail HTTP failed: {type(e).__name__}")
@@ -374,7 +386,11 @@ def _authed_request(
         headers = {"Authorization": f"Bearer {access_token}"}
         try:
             resp = requests.request(
-                method, url, headers=headers, params=params, timeout=timeout,
+                method,
+                url,
+                headers=headers,
+                params=params,
+                timeout=timeout,
             )
         except requests.RequestException as e:
             raise GmailApiError(f"Gmail HTTP retry failed: {type(e).__name__}")
@@ -408,11 +424,13 @@ def list_labels(connection: Dict[str, Any]) -> List[Dict[str, Any]]:
         lid = (row.get("id") or "").strip()
         if not lid:
             continue
-        out.append({
-            "label_id": lid,
-            "name":     (row.get("name") or "").strip(),
-            "type":     (row.get("type") or "user").strip(),
-        })
+        out.append(
+            {
+                "label_id": lid,
+                "name": (row.get("name") or "").strip(),
+                "type": (row.get("type") or "user").strip(),
+            }
+        )
     return out
 
 
@@ -431,7 +449,7 @@ def list_message_ids_for_label(
     page_token: Optional[str] = None
     while len(ids) < max_results:
         params: Dict[str, Any] = {
-            "labelIds":   label_id,
+            "labelIds": label_id,
             "maxResults": min(100, max_results - len(ids)),
         }
         if page_token:
@@ -474,6 +492,7 @@ def list_message_ids_for_label(
 # Both call _authed_request and inherit the 401-refresh + 429-retry
 # behavior. Neither requires new OAuth scopes -- gmail.readonly already
 # covers history.list.
+
 
 class GmailHistoryInvalidated(Exception):
     """Raised internally when Gmail returns 404 for a history.list call.
@@ -531,8 +550,8 @@ def list_history_message_ids(
     while len(out_ids) < max_results:
         params: Dict[str, Any] = {
             "startHistoryId": str(start_history_id),
-            "historyTypes":   "messageAdded",
-            "maxResults":     min(500, max_results - len(out_ids)),
+            "historyTypes": "messageAdded",
+            "maxResults": min(500, max_results - len(out_ids)),
         }
         if label_id:
             params["labelId"] = label_id
@@ -553,9 +572,9 @@ def list_history_message_ids(
             msg = str(e)
             if "HTTP 404" in msg:
                 return {
-                    "message_ids":     [],
+                    "message_ids": [],
                     "next_history_id": None,
-                    "invalidated":     True,
+                    "invalidated": True,
                 }
             raise
 
@@ -583,14 +602,15 @@ def list_history_message_ids(
             break
 
     return {
-        "message_ids":     out_ids[:max_results],
+        "message_ids": out_ids[:max_results],
         "next_history_id": last_seen_history_id,
-        "invalidated":     False,
+        "invalidated": False,
     }
 
 
 def fetch_message(
-    connection: Dict[str, Any], message_id: str,
+    connection: Dict[str, Any],
+    message_id: str,
 ) -> Optional[Dict[str, Any]]:
     """
     Fetch a single message with `format=full` so we get headers + body.
@@ -615,6 +635,7 @@ def fetch_message(
 # ---------------------------------------------------------------------- #
 # Message -> Markdown
 # ---------------------------------------------------------------------- #
+
 
 def _decode_b64url(s: str) -> str:
     if not s:
@@ -704,11 +725,13 @@ def _gmail_ts_to_iso(value: Any) -> Optional[str]:
     try:
         if isinstance(value, (int, float)):
             return datetime.fromtimestamp(
-                float(value), tz=timezone.utc,
+                float(value),
+                tz=timezone.utc,
             ).isoformat()
         if isinstance(value, str) and value.strip():
             return datetime.fromtimestamp(
-                float(value.strip()), tz=timezone.utc,
+                float(value.strip()),
+                tz=timezone.utc,
             ).isoformat()
     except (TypeError, ValueError, OSError, OverflowError):
         return None
@@ -772,10 +795,7 @@ def build_email_document(
 
     stable_key = stable_key_for_gmail_message(message_id)
     # Gmail web client deep link. Always works for the mailbox owner.
-    permalink = (
-        f"https://mail.google.com/mail/u/0/#all/{message_id}"
-        if message_id else None
-    )
+    permalink = f"https://mail.google.com/mail/u/0/#all/{message_id}" if message_id else None
 
     # Build the header block. `Cc:` is only emitted when present so we
     # don't pollute every email doc with a blank line.
@@ -790,11 +810,13 @@ def build_email_document(
     ]
     if cc:
         header_lines.append(f"Cc: {_truncate(cc, 200)}")
-    header_lines.extend([
-        f"Date: {date}",
-        f"Labels: {', '.join(label_ids)}",
-        f"Snippet: {_truncate(snippet, 280)}",
-    ])
+    header_lines.extend(
+        [
+            f"Date: {date}",
+            f"Labels: {', '.join(label_ids)}",
+            f"Snippet: {_truncate(snippet, 280)}",
+        ]
+    )
     if permalink:
         header_lines.append(f"Permalink: {permalink}")
 
@@ -805,16 +827,16 @@ def build_email_document(
 
     filename = f"gmail_{_safe_filename_part(message_id)}.md"
     return {
-        "filename":      filename,
-        "content":       content,
-        "stable_key":    stable_key,
+        "filename": filename,
+        "content": content,
+        "stable_key": stable_key,
         # Extra metadata that HydraDB / state.mark_uploaded carry forward.
         # We intentionally do NOT include the subject or body here --
         # only IDs, so a state.json leak doesn't expose mail content.
-        "message_id":    message_id,
+        "message_id": message_id,
         "document_type": "email",
-        "snippet":       _truncate(snippet, 280),
-        "permalink":     permalink,
+        "snippet": _truncate(snippet, 280),
+        "permalink": permalink,
     }
 
 
@@ -824,6 +846,7 @@ def build_email_document(
 # Synchronous on purpose: the caller wires this into a FastAPI
 # BackgroundTask so the HTTP request returns immediately and the heavy
 # lifting happens in the worker. Mirrors slack_oauth.run_workspace_ingest.
+
 
 def run_workspace_gmail_ingest(
     *,
@@ -873,33 +896,33 @@ def run_workspace_gmail_ingest(
     The function returns a stats dict; it never raises to the caller.
     """
     from hydradb_client import HydraDBClient, summarize_upload_response  # noqa: PLC0415
-    from supabase_client import (                                        # noqa: PLC0415
+    from supabase_client import (  # noqa: PLC0415
         get_gmail_ingestion_state_map,
         update_gmail_connection_tokens,
         upsert_gmail_ingestion_state,
     )
-    import time as _time                                                  # noqa: PLC0415
+    import time as _time  # noqa: PLC0415
 
     started_at = datetime.now(timezone.utc)
     started_perf = _time.perf_counter()
     summary: Dict[str, Any] = {
-        "labels_processed":   0,
-        "labels_skipped":     0,
-        "labels_failed":      0,
-        "messages_fetched":   0,
-        "messages_uploaded":  0,
-        "messages_failed":    0,
-        "messages_skipped":   0,
+        "labels_processed": 0,
+        "labels_skipped": 0,
+        "labels_failed": 0,
+        "messages_fetched": 0,
+        "messages_uploaded": 0,
+        "messages_failed": 0,
+        "messages_skipped": 0,
         # Phase 11 observability fields.
-        "sync_mode_requested":      sync_mode,
-        "sync_started_at":          started_at.isoformat(),
-        "sync_finished_at":         None,
-        "duration_ms":              0,
-        "refresh_token_used":       False,
-        "incremental_label_count":  0,
-        "full_label_count":         0,
-        "invalidations":            0,
-        "per_label":                [],     # one entry per label processed
+        "sync_mode_requested": sync_mode,
+        "sync_started_at": started_at.isoformat(),
+        "sync_finished_at": None,
+        "duration_ms": 0,
+        "refresh_token_used": False,
+        "incremental_label_count": 0,
+        "full_label_count": 0,
+        "invalidations": 0,
+        "per_label": [],  # one entry per label processed
     }
     if not label_ids:
         summary["sync_finished_at"] = datetime.now(timezone.utc).isoformat()
@@ -918,10 +941,7 @@ def run_workspace_gmail_ingest(
 
     cap_total = max_messages if max_messages is not None else _max_messages_per_run()
     cap_total = max(1, int(cap_total))
-    allow_spam_trash = (
-        os.getenv("GMAIL_ALLOW_SPAM_TRASH", "").strip().lower()
-        in ("1", "true", "yes", "on")
-    )
+    allow_spam_trash = os.getenv("GMAIL_ALLOW_SPAM_TRASH", "").strip().lower() in ("1", "true", "yes", "on")
 
     if hydradb_sub_tenant_id:
         hydra = HydraDBClient(sub_tenant_id=hydradb_sub_tenant_id)
@@ -954,9 +974,9 @@ def run_workspace_gmail_ingest(
         logger.warning(
             "gmail_state_map_failed",
             extra={
-                "workspace_id":  workspace_id,
+                "workspace_id": workspace_id,
                 "connection_id": connection_id,
-                "error":         type(e).__name__,
+                "error": type(e).__name__,
             },
         )
         state_map = {}
@@ -969,14 +989,12 @@ def run_workspace_gmail_ingest(
     logger.info(
         "gmail_ingest_start",
         extra={
-            "workspace_id":          workspace_id,
-            "connection_id":         connection_id,
-            "label_count":           len(label_ids),
-            "cap_total":             cap_total,
-            "sync_mode_requested":   sync_mode,
-            "labels_with_watermark": sum(
-                1 for v in state_map.values() if v.get("last_history_id")
-            ),
+            "workspace_id": workspace_id,
+            "connection_id": connection_id,
+            "label_count": len(label_ids),
+            "cap_total": cap_total,
+            "sync_mode_requested": sync_mode,
+            "labels_with_watermark": sum(1 for v in state_map.values() if v.get("last_history_id")),
         },
     )
 
@@ -991,10 +1009,10 @@ def run_workspace_gmail_ingest(
             logger.info(
                 "gmail_ingest_label_blocked",
                 extra={
-                    "workspace_id":  workspace_id,
+                    "workspace_id": workspace_id,
                     "connection_id": connection_id,
-                    "label_id":      label_id,
-                    "reason":        "spam_or_trash",
+                    "label_id": label_id,
+                    "reason": "spam_or_trash",
                 },
             )
             summary["labels_skipped"] += 1
@@ -1038,8 +1056,8 @@ def run_workspace_gmail_ingest(
                     error=e,
                     context={
                         "connection_id": connection_id,
-                        "label_id":      label_id,
-                        "stage":         "list_history",
+                        "label_id": label_id,
+                        "stage": "list_history",
                     },
                 )
                 continue
@@ -1054,9 +1072,9 @@ def run_workspace_gmail_ingest(
                 logger.info(
                     "gmail_history_invalidated",
                     extra={
-                        "workspace_id":  workspace_id,
+                        "workspace_id": workspace_id,
                         "connection_id": connection_id,
-                        "label_id":      label_id,
+                        "label_id": label_id,
                     },
                 )
                 # Fall through to the full-listing path below.
@@ -1071,7 +1089,8 @@ def run_workspace_gmail_ingest(
             try:
                 message_ids = retry_with_backoff(
                     list_message_ids_for_label,
-                    connection, label_id,
+                    connection,
+                    label_id,
                     max_results=min(remaining, 100),
                     attempts=3,
                     initial_delay=0.5,
@@ -1087,8 +1106,8 @@ def run_workspace_gmail_ingest(
                     error=e,
                     context={
                         "connection_id": connection_id,
-                        "label_id":      label_id,
-                        "stage":         "list_messages",
+                        "label_id": label_id,
+                        "stage": "list_messages",
                     },
                 )
                 continue
@@ -1113,10 +1132,7 @@ def run_workspace_gmail_ingest(
                     new_history_id = None
 
         # Dedupe across labels in this same run.
-        message_ids = [
-            mid for mid in message_ids
-            if mid and mid not in seen_message_ids_this_run
-        ]
+        message_ids = [mid for mid in message_ids if mid and mid not in seen_message_ids_this_run]
 
         prepared: List[Dict[str, Any]] = []
         for mid in message_ids:
@@ -1126,7 +1142,8 @@ def run_workspace_gmail_ingest(
             try:
                 msg = retry_with_backoff(
                     fetch_message,
-                    connection, mid,
+                    connection,
+                    mid,
                     attempts=2,
                     initial_delay=0.5,
                     max_delay=2.0,
@@ -1157,8 +1174,8 @@ def run_workspace_gmail_ingest(
                     error=e,
                     context={
                         "connection_id": connection_id,
-                        "label_id":      label_id,
-                        "file_count":    len(prepared),
+                        "label_id": label_id,
+                        "file_count": len(prepared),
                     },
                 )
                 summary["messages_failed"] += len(prepared)
@@ -1177,7 +1194,8 @@ def run_workspace_gmail_ingest(
             # email builder always writes it as a header line) so the
             # extractor sees it.
             try:
-                from memory_store import extract_and_persist        # noqa: PLC0415
+                from memory_store import extract_and_persist  # noqa: PLC0415
+
                 for f in prepared:
                     stable_key = f.get("stable_key") or ""
                     if not stable_key:
@@ -1194,18 +1212,16 @@ def run_workspace_gmail_ingest(
                         text=f.get("content") or "",
                         # Sender owns any "I will..." action item in
                         # their email by default.
-                        default_owner=(
-                            f.get("from_name") or f.get("from_email") or None
-                        ),
+                        default_owner=(f.get("from_name") or f.get("from_email") or None),
                     )
             except Exception as e:  # noqa: BLE001
                 logger.warning(
                     "gmail_memory_extract_failed",
                     extra={
-                        "workspace_id":  workspace_id,
+                        "workspace_id": workspace_id,
                         "connection_id": connection_id,
-                        "label_id":      label_id,
-                        "error":         type(e).__name__,
+                        "label_id": label_id,
+                        "error": type(e).__name__,
                     },
                 )
 
@@ -1222,10 +1238,10 @@ def run_workspace_gmail_ingest(
             logger.warning(
                 "gmail_ingestion_state_update_failed",
                 extra={
-                    "workspace_id":  workspace_id,
+                    "workspace_id": workspace_id,
                     "connection_id": connection_id,
-                    "label_id":      label_id,
-                    "error":         type(e).__name__,
+                    "label_id": label_id,
+                    "error": type(e).__name__,
                 },
             )
 
@@ -1234,13 +1250,15 @@ def run_workspace_gmail_ingest(
             summary["incremental_label_count"] += 1
         else:
             summary["full_label_count"] += 1
-        summary["per_label"].append({
-            "label_id":       label_id,
-            "mode":           effective_label_mode,
-            "invalidated":    invalidated_this_label,
-            "messages":       len(message_ids),
-            "new_history_id": new_history_id,
-        })
+        summary["per_label"].append(
+            {
+                "label_id": label_id,
+                "mode": effective_label_mode,
+                "invalidated": invalidated_this_label,
+                "messages": len(message_ids),
+                "new_history_id": new_history_id,
+            }
+        )
 
     # Persist refreshed access token, if a refresh happened.
     current_access_token = (connection.get("access_token") or "").strip()
@@ -1262,9 +1280,9 @@ def run_workspace_gmail_ingest(
             logger.warning(
                 "gmail_token_persist_failed",
                 extra={
-                    "workspace_id":  workspace_id,
+                    "workspace_id": workspace_id,
                     "connection_id": connection_id,
-                    "error":         type(e).__name__,
+                    "error": type(e).__name__,
                 },
             )
         summary["refresh_token_used"] = bool(ok)
@@ -1279,25 +1297,26 @@ def run_workspace_gmail_ingest(
     logger.info(
         "gmail_ingest_complete",
         extra={
-            "workspace_id":             workspace_id,
-            "connection_id":            connection_id,
-            "duration_ms":              summary["duration_ms"],
-            "labels_processed":         summary["labels_processed"],
-            "labels_skipped":           summary["labels_skipped"],
-            "labels_failed":            summary["labels_failed"],
-            "messages_uploaded":        summary["messages_uploaded"],
-            "messages_failed":          summary["messages_failed"],
-            "incremental_label_count":  summary["incremental_label_count"],
-            "full_label_count":         summary["full_label_count"],
-            "invalidations":            summary["invalidations"],
-            "refresh_token_used":       summary["refresh_token_used"],
+            "workspace_id": workspace_id,
+            "connection_id": connection_id,
+            "duration_ms": summary["duration_ms"],
+            "labels_processed": summary["labels_processed"],
+            "labels_skipped": summary["labels_skipped"],
+            "labels_failed": summary["labels_failed"],
+            "messages_uploaded": summary["messages_uploaded"],
+            "messages_failed": summary["messages_failed"],
+            "incremental_label_count": summary["incremental_label_count"],
+            "full_label_count": summary["full_label_count"],
+            "invalidations": summary["invalidations"],
+            "refresh_token_used": summary["refresh_token_used"],
         },
     )
 
     # Phase 15: emit analytics. Defensive -- analytics failure must
     # NOT affect the ingest summary.
     try:
-        from analytics_store import emit_event   # noqa: PLC0415
+        from analytics_store import emit_event  # noqa: PLC0415
+
         emit_event(
             workspace_id=workspace_id,
             kind="ingest_completed",
@@ -1305,15 +1324,15 @@ def run_workspace_gmail_ingest(
             latency_ms=summary["duration_ms"],
             success=summary["labels_failed"] == 0,
             payload={
-                "connection_id":           connection_id,
-                "labels_processed":        summary["labels_processed"],
-                "labels_failed":           summary["labels_failed"],
-                "messages_uploaded":       summary["messages_uploaded"],
-                "messages_failed":         summary["messages_failed"],
+                "connection_id": connection_id,
+                "labels_processed": summary["labels_processed"],
+                "labels_failed": summary["labels_failed"],
+                "messages_uploaded": summary["messages_uploaded"],
+                "messages_failed": summary["messages_failed"],
                 "incremental_label_count": summary["incremental_label_count"],
-                "full_label_count":        summary["full_label_count"],
-                "invalidations":           summary["invalidations"],
-                "sync_mode_requested":     summary["sync_mode_requested"],
+                "full_label_count": summary["full_label_count"],
+                "invalidations": summary["invalidations"],
+                "sync_mode_requested": summary["sync_mode_requested"],
             },
         )
     except Exception:  # noqa: BLE001
