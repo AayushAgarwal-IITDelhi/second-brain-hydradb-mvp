@@ -66,6 +66,7 @@ class TestSentryHooks:
 class TestDeadLetter:
     def test_emit_dead_letter_logs_with_stable_event_name(self, caplog):
         import logging
+
         from observability import emit_dead_letter
 
         with caplog.at_level(logging.ERROR, logger="observability"):
@@ -139,7 +140,9 @@ class TestDependencyChecks:
         assert names == ["hydradb", "openai", "supabase"]
 
     def test_one_unhealthy_dep_fails_overall(self):
-        import observability, requests
+        import requests
+
+        import observability
 
         good_resp = MagicMock()
         good_resp.status_code = 200
@@ -415,7 +418,7 @@ class TestProductionValidation:
         validate_required_env()
 
     def test_production_rejects_localhost_cors(self, monkeypatch):
-        from startup import validate_required_env, StartupConfigError
+        from startup import StartupConfigError, validate_required_env
 
         self._populate_valid_env(monkeypatch)
         monkeypatch.setenv("CORS_ORIGINS", "http://localhost:5173")
@@ -425,7 +428,7 @@ class TestProductionValidation:
         assert "CORS_ORIGINS" in str(exc.value)
 
     def test_production_rejects_missing_frontend_base_url(self, monkeypatch):
-        from startup import validate_required_env, StartupConfigError
+        from startup import StartupConfigError, validate_required_env
 
         self._populate_valid_env(monkeypatch)
         monkeypatch.delenv("FRONTEND_BASE_URL", raising=False)
@@ -435,7 +438,7 @@ class TestProductionValidation:
         assert "FRONTEND_BASE_URL" in str(exc.value)
 
     def test_production_rejects_http_slack_redirect(self, monkeypatch):
-        from startup import validate_required_env, StartupConfigError
+        from startup import StartupConfigError, validate_required_env
 
         self._populate_valid_env(monkeypatch)
         monkeypatch.setenv("SLACK_REDIRECT_URI", "http://api.example.com/api/slack/oauth/callback")
@@ -445,7 +448,7 @@ class TestProductionValidation:
         assert "HTTPS" in str(exc.value) or "https" in str(exc.value).lower()
 
     def test_production_rejects_placeholder_secret(self, monkeypatch):
-        from startup import validate_required_env, StartupConfigError
+        from startup import StartupConfigError, validate_required_env
 
         self._populate_valid_env(monkeypatch)
         # A common .env.example placeholder.
@@ -467,6 +470,7 @@ class TestProductionValidation:
 class TestSecretsAudit:
     def test_audit_logs_redacted_summary(self, caplog, monkeypatch):
         import logging
+
         from startup import _audit_secrets
 
         monkeypatch.setenv("APP_API_KEY", "abcd1234efgh5678")
@@ -604,7 +608,8 @@ class TestLogContextBinding:
         # Build a real bearer token that decodes to a known user id,
         # then call require_user as a plain function (no FastAPI plumbing).
         import jwt as pyjwt
-        from auth_supabase import require_user, SUPABASE_JWT_ALGORITHM
+
+        from auth_supabase import SUPABASE_JWT_ALGORITHM, require_user
         from logging_config import _user_id, _workspace_id
 
         token = pyjwt.encode(

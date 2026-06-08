@@ -201,7 +201,7 @@ class TestListHistoryMessageIds:
         assert out["next_history_id"] == "987654"
 
     def test_history_404_returns_invalidated_sentinel(self):
-        from gmail_oauth import list_history_message_ids, GmailApiError
+        from gmail_oauth import GmailApiError, list_history_message_ids
 
         with patch(
             "gmail_oauth._authed_request",
@@ -217,7 +217,7 @@ class TestListHistoryMessageIds:
         assert out["next_history_id"] is None
 
     def test_non_404_error_propagates(self):
-        from gmail_oauth import list_history_message_ids, GmailApiError
+        from gmail_oauth import GmailApiError, list_history_message_ids
 
         with patch(
             "gmail_oauth._authed_request",

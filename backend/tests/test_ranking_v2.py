@@ -557,12 +557,12 @@ class TestRecencyPlusSender:
 class TestNamedWeights:
     def test_weight_constants_are_exported(self):
         from search_utils import (
-            W_KEYWORD_HIT,
-            W_SUBJECT_HIT,
             W_CHANNEL_MATCH,
-            W_SENDER_MATCH,
+            W_KEYWORD_HIT,
             W_LABEL_MATCH,
             W_RECENCY,
+            W_SENDER_MATCH,
+            W_SUBJECT_HIT,
         )
 
         # Sanity: weights are positive numbers and keyword > subject

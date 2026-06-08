@@ -23,9 +23,8 @@ import os
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
-from supabase import Client, create_client
-
 from logging_config import get_logger
+from supabase import Client, create_client
 
 logger = get_logger(__name__)
 

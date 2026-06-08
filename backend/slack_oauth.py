@@ -28,10 +28,8 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 from logging_config import get_logger
-from oauth_common import (
-    make_oauth_state as _core_make_state,
-    verify_oauth_state as _core_verify_state,
-)
+from oauth_common import make_oauth_state as _core_make_state
+from oauth_common import verify_oauth_state as _core_verify_state
 
 logger = get_logger(__name__)
 
@@ -328,14 +326,14 @@ def run_workspace_ingest(
 
     # Lazy imports so a missing slack_sdk dep at startup doesn't tank
     # the whole module (and so the test suite can monkeypatch).
+    from hydradb_client import HydraDBClient
     from ingestion.ingest_slack import (
+        STATE_PATH,
         process_channel,
         upload_in_batches,
-        STATE_PATH,
     )
     from ingestion.ingestion_state import IngestionState
     from ingestion.slack_client import SlackClientWrapper
-    from hydradb_client import HydraDBClient
 
     slack = SlackClientWrapper(token=bot_token)
     # Phase 4: route uploads to the workspace's HydraDB sub-tenant.

@@ -90,7 +90,11 @@ class TestVerifyRejects:
 
     def test_missing_workspace_id_rejected(self):
         # Craft a token that is otherwise valid but omits workspace_id.
-        import base64, hashlib, hmac, json, secrets as _secrets
+        import base64
+        import hashlib
+        import hmac
+        import json
+        import secrets as _secrets
 
         payload = {
             "user_id": USER_ID,
@@ -105,7 +109,11 @@ class TestVerifyRejects:
         assert verify_oauth_state(SECRET, token) is None
 
     def test_missing_user_id_rejected(self):
-        import base64, hashlib, hmac, json, secrets as _secrets
+        import base64
+        import hashlib
+        import hmac
+        import json
+        import secrets as _secrets
 
         payload = {
             "workspace_id": WS_ID,
@@ -121,7 +129,9 @@ class TestVerifyRejects:
 
     def test_non_json_payload_rejected(self):
         # Payload that is valid base64 but not JSON.
-        import base64, hashlib, hmac
+        import base64
+        import hashlib
+        import hmac
 
         raw = b"this-is-not-json"
         sig = hmac.new(SECRET.encode(), raw, hashlib.sha256).digest()
@@ -131,7 +141,10 @@ class TestVerifyRejects:
 
     def test_json_array_rejected(self):
         # JSON but not a dict.
-        import base64, hashlib, hmac, json
+        import base64
+        import hashlib
+        import hmac
+        import json
 
         raw = json.dumps([1, 2, 3]).encode()
         sig = hmac.new(SECRET.encode(), raw, hashlib.sha256).digest()

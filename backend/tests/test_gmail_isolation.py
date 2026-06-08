@@ -272,6 +272,7 @@ class TestOAuthStateIsolation:
         rejects the tampered state."""
         import base64
         import json
+
         from gmail_oauth import make_oauth_state, verify_oauth_state
 
         token = make_oauth_state(WORKSPACE_A, "user-a")

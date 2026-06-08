@@ -41,10 +41,8 @@ from urllib.parse import urlencode
 import requests
 
 from logging_config import get_logger
-from oauth_common import (
-    make_oauth_state as _core_make_state,
-    verify_oauth_state as _core_verify_state,
-)
+from oauth_common import make_oauth_state as _core_make_state
+from oauth_common import verify_oauth_state as _core_verify_state
 from observability import emit_dead_letter
 from retry import retry_with_backoff
 
@@ -895,13 +893,14 @@ def run_workspace_gmail_ingest(
 
     The function returns a stats dict; it never raises to the caller.
     """
+    import time as _time  # noqa: PLC0415
+
     from hydradb_client import HydraDBClient, summarize_upload_response  # noqa: PLC0415
     from supabase_client import (  # noqa: PLC0415
         get_gmail_ingestion_state_map,
         update_gmail_connection_tokens,
         upsert_gmail_ingestion_state,
     )
-    import time as _time  # noqa: PLC0415
 
     started_at = datetime.now(timezone.utc)
     started_perf = _time.perf_counter()

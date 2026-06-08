@@ -642,7 +642,9 @@ def _extract_memory_from_prepared(
     unix-seconds string; convert to ISO so the timestamptz column
     accepts it.
     """
-    from datetime import datetime as _dt, timezone as _tz  # noqa: PLC0415
+    from datetime import datetime as _dt  # noqa: PLC0415
+    from datetime import timezone as _tz
+
     from memory_store import extract_and_persist  # noqa: PLC0415
 
     stable_key = prepared.get("stable_key") or ""

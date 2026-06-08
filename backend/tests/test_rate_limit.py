@@ -107,8 +107,8 @@ class TestRateLimitHelpers:
         # Phase 7: bound logging context (set by require_user /
         # require_workspace) takes precedence over headers + IP so a
         # single user is throttled across workspaces.
-        from rate_limit import _client_id_from
         from logging_config import bind_user_context
+        from rate_limit import _client_id_from
 
         bind_user_context("user-abc", "workspace-1")
         try:
@@ -169,7 +169,8 @@ class TestBucketedLimiter:
     def test_old_timestamps_are_evicted(self):
         """Requests older than the window should not count."""
         from collections import deque
-        from rate_limit import _BucketedLimiter, WINDOW_SECONDS
+
+        from rate_limit import WINDOW_SECONDS, _BucketedLimiter
 
         limiter = _BucketedLimiter()
         # Manually insert old timestamps just outside the window.
@@ -217,8 +218,8 @@ class TestRateLimitDependencyFactory:
         assert callable(dep)
 
     def test_dependency_enforces_bucket_limit(self):
-        from rate_limit import make_rate_limit_dependency, _limiter
         from errors import RateLimitedError
+        from rate_limit import _limiter, make_rate_limit_dependency
 
         # Reset the global limiter so prior test state doesn't bleed in.
         with _limiter._lock:
@@ -237,7 +238,7 @@ class TestRateLimitDependencyFactory:
     def test_legacy_dependency_targets_query_bucket(self):
         # The legacy rate_limit_dependency still works and targets
         # the "query" bucket.
-        from rate_limit import rate_limit_dependency, _limiter
+        from rate_limit import _limiter, rate_limit_dependency
 
         with _limiter._lock:
             _limiter._buckets.clear()

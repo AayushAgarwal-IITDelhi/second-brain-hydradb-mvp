@@ -392,6 +392,7 @@ class TestRequestModelValidation:
         # Pydantic's Literal enforcement turns a typo into a 422 at the
         # API boundary instead of silently no-op'ing in the filter.
         from pydantic import ValidationError
+
         from main import QueryRequest
 
         with pytest.raises(ValidationError):

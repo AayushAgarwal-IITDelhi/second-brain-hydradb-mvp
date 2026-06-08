@@ -51,6 +51,7 @@ class TestOAuthState:
 
     def test_tampered_signature_rejected(self):
         import base64
+
         from gmail_oauth import make_oauth_state, verify_oauth_state
 
         token = make_oauth_state("ws-1", "u-1")
@@ -129,6 +130,7 @@ class TestBuildConnectUrl:
 
     def test_state_in_url_is_verifiable(self):
         from urllib.parse import parse_qs, urlparse
+
         from gmail_oauth import build_connect_url, verify_oauth_state
 
         url = build_connect_url(workspace_id="ws-7", user_id="u-7")
@@ -200,6 +202,7 @@ class TestExchangeCode:
 
     def test_request_exception_returns_none(self):
         import requests
+
         from gmail_oauth import exchange_code
 
         with patch(
@@ -345,6 +348,7 @@ class TestBuildEmailDocument:
 
     def test_cc_header_included_when_present(self):
         import base64
+
         from gmail_oauth import build_email_document
 
         # Construct a message that includes a Cc header.
@@ -381,6 +385,7 @@ class TestBuildEmailDocument:
 
     def test_falls_back_to_html_when_no_text_plain(self):
         import base64
+
         from gmail_oauth import build_email_document
 
         html_body = (
@@ -406,6 +411,7 @@ class TestBuildEmailDocument:
 
     def test_walks_multipart_for_text_plain(self):
         import base64
+
         from gmail_oauth import build_email_document
 
         text_body = base64.urlsafe_b64encode(b"Plain part wins.").rstrip(b"=").decode("ascii")
@@ -447,6 +453,7 @@ class TestBuildEmailDocument:
 
     def test_body_capped_at_32k(self):
         import base64
+
         from gmail_oauth import build_email_document
 
         huge = ("x" * 40_000).encode()

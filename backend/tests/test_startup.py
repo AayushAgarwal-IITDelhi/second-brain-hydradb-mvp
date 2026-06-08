@@ -152,7 +152,7 @@ class TestGmailEnvGroupValidation:
     def test_three_set_one_missing_raises(self, missing_var):
         """The dangerous case: any 3 set, one missing → partial config →
         StartupConfigError naming the missing one."""
-        from startup import validate_required_env, StartupConfigError
+        from startup import StartupConfigError, validate_required_env
 
         env = dict(self._BASE_ENV)
         env.update(
@@ -174,7 +174,7 @@ class TestGmailEnvGroupValidation:
 
     def test_one_set_three_missing_raises(self):
         """The other partial case — single Gmail var set, rest blank."""
-        from startup import validate_required_env, StartupConfigError
+        from startup import StartupConfigError, validate_required_env
 
         env = dict(self._BASE_ENV)
         env["GMAIL_CLIENT_ID"] = "gid"  # only one set

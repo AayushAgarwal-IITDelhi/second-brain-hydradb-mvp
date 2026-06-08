@@ -104,8 +104,9 @@ def _patched_app():
         patch("scheduler.start_scheduler"),
         patch("scheduler.stop_scheduler"),
     ):
-        import main as _main  # noqa: PLC0415
         from fastapi import Header, HTTPException, status  # noqa: PLC0415
+
+        import main as _main  # noqa: PLC0415
         from auth_supabase import (  # noqa: PLC0415
             SupabaseUser,
             WorkspaceContext,

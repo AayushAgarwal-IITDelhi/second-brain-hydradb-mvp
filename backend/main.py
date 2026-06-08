@@ -77,6 +77,22 @@ from auth_supabase import (  # noqa: E402
 )
 from date_utils import parse_date_query  # noqa: E402
 from errors import AppError, app_error_handler  # noqa: E402
+
+# Phase 8: Gmail connector. Aliased on import so the symbol names don't
+# clash with the Slack helpers above (both modules expose
+# build_connect_url, exchange_code, verify_oauth_state, etc.).
+from gmail_oauth import build_connect_url as gmail_build_connect_url  # noqa: E402
+from gmail_oauth import exchange_code as gmail_exchange_code
+from gmail_oauth import fetch_user_info as gmail_fetch_user_info
+from gmail_oauth import (
+    gmail_oauth_configured,
+)
+from gmail_oauth import installation_from_token_response as gmail_installation_from_token_response
+from gmail_oauth import list_labels as list_gmail_labels_from_api
+from gmail_oauth import (
+    run_workspace_gmail_ingest,
+)
+from gmail_oauth import verify_oauth_state as verify_gmail_oauth_state
 from health import router as health_router  # noqa: E402
 from llm import stream_grounded_answer  # noqa: E402
 from logging_config import configure_logging, get_logger  # noqa: E402
@@ -100,12 +116,22 @@ from recall import (  # noqa: E402
 )
 from request_context import RequestContextMiddleware  # noqa: E402
 from scheduler import auto_ingest_enabled, start_scheduler, stop_scheduler  # noqa: E402
+from slack_oauth import (  # noqa: E402
+    build_connect_url,
+    exchange_code,
+    installation_from_oauth_response,
+    list_slack_channels,
+    run_workspace_ingest,
+    slack_oauth_configured,
+    verify_oauth_state,
+)
 from slack_signature import verify_slack_signature  # noqa: E402
 from startup import validate_required_env  # noqa: E402
 from supabase_client import (  # noqa: E402
     create_chat_message,
     create_chat_session,
     create_saved_answer,
+    create_share_link,
     delete_gmail_connection,
     delete_saved_answer,
     ensure_workspace_sub_tenant,
@@ -132,30 +158,6 @@ from supabase_client import (  # noqa: E402
     upsert_gmail_labels,
     upsert_slack_channels,
     upsert_slack_installation,
-    create_share_link,
-)
-from slack_oauth import (  # noqa: E402
-    build_connect_url,
-    exchange_code,
-    installation_from_oauth_response,
-    list_slack_channels,
-    run_workspace_ingest,
-    slack_oauth_configured,
-    verify_oauth_state,
-)
-
-# Phase 8: Gmail connector. Aliased on import so the symbol names don't
-# clash with the Slack helpers above (both modules expose
-# build_connect_url, exchange_code, verify_oauth_state, etc.).
-from gmail_oauth import (  # noqa: E402
-    build_connect_url as gmail_build_connect_url,
-    exchange_code as gmail_exchange_code,
-    fetch_user_info as gmail_fetch_user_info,
-    gmail_oauth_configured,
-    installation_from_token_response as gmail_installation_from_token_response,
-    list_labels as list_gmail_labels_from_api,
-    run_workspace_gmail_ingest,
-    verify_oauth_state as verify_gmail_oauth_state,
 )
 
 configure_logging(level=os.getenv('LOG_LEVEL', 'INFO'))
@@ -1497,8 +1499,8 @@ def analytics_overview(
     analytics panel.
     """
     from analytics_store import (  # local import keeps boot fast
-        aggregate_query_stats,
         aggregate_ingest_stats,
+        aggregate_query_stats,
         aggregate_retrieval_failure_stats,
     )
 

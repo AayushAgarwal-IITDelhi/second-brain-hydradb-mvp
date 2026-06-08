@@ -277,8 +277,8 @@ class TestMemoryPersistence:
         return client, upsert
 
     def test_persists_workspace_scoped_rows(self):
+        from memory_extraction import _content_hash, _record
         from memory_store import persist_memories
-        from memory_extraction import _record, _content_hash
 
         client, upsert = self._mock_supabase()
         memories = [
@@ -386,7 +386,7 @@ class TestMemoryDedupe:
     dedupes identical text against the same source."""
 
     def test_same_content_same_source_dedupes_by_hash(self):
-        from memory_extraction import _record, _content_hash
+        from memory_extraction import _content_hash, _record
 
         # Two records with identical canonical form -> same content_hash.
         r1 = _record(kind="action_item", content="Migrate kafka consumer")

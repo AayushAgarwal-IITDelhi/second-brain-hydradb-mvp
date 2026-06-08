@@ -13,9 +13,9 @@ import pytest
 
 from slack_oauth import (
     build_connect_url,
+    installation_from_oauth_response,
     make_oauth_state,
     verify_oauth_state,
-    installation_from_oauth_response,
 )
 
 TEST_WS_ID = "00000000-0000-0000-0000-00000000aaaa"
@@ -312,6 +312,7 @@ class TestUpsertSlackInstallationPayload:
         """The persisted column is `scope` (singular). Sending `scopes`
         is what was triggering the production 400."""
         from unittest.mock import patch
+
         from supabase_client import upsert_slack_installation
 
         client, upsert = self._mock_supabase()
@@ -334,6 +335,7 @@ class TestUpsertSlackInstallationPayload:
 
     def test_upsert_includes_installed_by_when_provided(self):
         from unittest.mock import patch
+
         from supabase_client import upsert_slack_installation
 
         client, upsert = self._mock_supabase()
@@ -355,6 +357,7 @@ class TestUpsertSlackInstallationPayload:
         # may not have the column or may have a stricter FK; the
         # nullable-default-omit path is safest.
         from unittest.mock import patch
+
         from supabase_client import upsert_slack_installation
 
         client, upsert = self._mock_supabase()
@@ -424,6 +427,7 @@ class TestUpsertSlackInstallationPayload:
 
     def test_upsert_returns_none_on_failure(self):
         from unittest.mock import patch
+
         from supabase_client import upsert_slack_installation
 
         client, _ = self._mock_supabase(

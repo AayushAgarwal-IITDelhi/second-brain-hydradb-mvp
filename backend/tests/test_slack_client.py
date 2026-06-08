@@ -356,6 +356,7 @@ class TestHelpers:
     def test_init_raises_when_no_token(self):
         """ValueError is raised when no token is provided and env var is absent."""
         import os
+
         from ingestion.slack_client import SlackClientWrapper
 
         with patch.dict(os.environ, {}, clear=True):

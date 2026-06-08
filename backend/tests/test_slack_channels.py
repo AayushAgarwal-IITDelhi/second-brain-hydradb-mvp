@@ -301,6 +301,7 @@ class TestUpsertChannelsProductionPayload:
         When the route passes it, every row in the upsert payload must
         carry it."""
         from unittest.mock import patch
+
         from supabase_client import upsert_slack_channels
 
         client, upsert = self._mock_supabase(
@@ -325,6 +326,7 @@ class TestUpsertChannelsProductionPayload:
         column must still work. The kwarg is optional and the field is
         excluded from the payload when blank."""
         from unittest.mock import patch
+
         from supabase_client import upsert_slack_channels
 
         client, upsert = self._mock_supabase()
@@ -340,6 +342,7 @@ class TestUpsertChannelsProductionPayload:
         """Every production schema column must end up in the payload
         with a value of the right type."""
         from unittest.mock import patch
+
         from supabase_client import upsert_slack_channels
 
         client, upsert = self._mock_supabase()
@@ -377,6 +380,7 @@ class TestUpsertChannelsProductionPayload:
         """Slack omits num_members for private channels the bot isn't
         in. The payload must not insert NULL into a NOT NULL column."""
         from unittest.mock import patch
+
         from supabase_client import upsert_slack_channels
 
         client, upsert = self._mock_supabase()

@@ -1574,6 +1574,7 @@ def answer_question(
     if workspace_id:
         try:
             import time as _t  # noqa: PLC0415
+
             from analytics_store import emit_event  # noqa: PLC0415
 
             # The caller measured no latency; we approximate using the
