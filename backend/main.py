@@ -3,6 +3,8 @@ FastAPI app for the Second Brain MVP.
 
 Endpoints:
     GET    /                                              -> service info card             (public)
+    GET    /api/health/live                               -> liveness probe               (public)
+    GET    /api/health/ready                              -> readiness probe              (public)
     GET    /api/health                                    -> {"status": "ok", ...}         (public)
     POST   /api/query                                     -> {"answer", "sources", ...}    (Supabase JWT + Workspace)
     POST   /api/query/stream                              -> Server-Sent Events            (Supabase JWT + Workspace)
@@ -53,8 +55,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import (  # noqa: E402
-    BackgroundTasks, Depends, FastAPI, Header, HTTPException,
-    Request, Response, status,
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    status,
 )
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse  # noqa: E402
@@ -69,18 +77,36 @@ from auth_supabase import (  # noqa: E402
 )
 from date_utils import parse_date_query  # noqa: E402
 from errors import AppError, app_error_handler  # noqa: E402
+
+# Phase 8: Gmail connector. Aliased on import so the symbol names don't
+# clash with the Slack helpers above (both modules expose
+# build_connect_url, exchange_code, verify_oauth_state, etc.).
+from gmail_oauth import build_connect_url as gmail_build_connect_url  # noqa: E402
+from gmail_oauth import exchange_code as gmail_exchange_code
+from gmail_oauth import fetch_user_info as gmail_fetch_user_info
+from gmail_oauth import (
+    gmail_oauth_configured,
+)
+from gmail_oauth import installation_from_token_response as gmail_installation_from_token_response
+from gmail_oauth import list_labels as list_gmail_labels_from_api
+from gmail_oauth import (
+    run_workspace_gmail_ingest,
+)
+from gmail_oauth import verify_oauth_state as verify_gmail_oauth_state
+from health import router as health_router  # noqa: E402
 from llm import stream_grounded_answer  # noqa: E402
 from logging_config import configure_logging, get_logger  # noqa: E402
 from prompts import INSUFFICIENT_CONTEXT_ANSWER  # noqa: E402
-from query_cache import build_cache_key, get_cached, put as cache_put  # noqa: E402
+from query_cache import build_cache_key, get_cached  # noqa: E402
+from query_cache import put as cache_put  # noqa: E402
 from query_rewriter import rewrite_query  # noqa: E402
 from rate_limit import (  # noqa: E402
     make_rate_limit_dependency,
     rate_limit_dependency,
 )
 from realtime_ingest import (  # noqa: E402
-    admin_status_snapshot,
     _event_already_seen,
+    admin_status_snapshot,
     process_slack_event,
 )
 from recall import (  # noqa: E402
@@ -90,12 +116,22 @@ from recall import (  # noqa: E402
 )
 from request_context import RequestContextMiddleware  # noqa: E402
 from scheduler import auto_ingest_enabled, start_scheduler, stop_scheduler  # noqa: E402
+from slack_oauth import (  # noqa: E402
+    build_connect_url,
+    exchange_code,
+    installation_from_oauth_response,
+    list_slack_channels,
+    run_workspace_ingest,
+    slack_oauth_configured,
+    verify_oauth_state,
+)
 from slack_signature import verify_slack_signature  # noqa: E402
 from startup import validate_required_env  # noqa: E402
 from supabase_client import (  # noqa: E402
     create_chat_message,
     create_chat_session,
     create_saved_answer,
+    create_share_link,
     delete_gmail_connection,
     delete_saved_answer,
     ensure_workspace_sub_tenant,
@@ -122,29 +158,6 @@ from supabase_client import (  # noqa: E402
     upsert_gmail_labels,
     upsert_slack_channels,
     upsert_slack_installation,
-    create_share_link,
-)
-from slack_oauth import (  # noqa: E402
-    build_connect_url,
-    exchange_code,
-    installation_from_oauth_response,
-    list_slack_channels,
-    run_workspace_ingest,
-    slack_oauth_configured,
-    verify_oauth_state,
-)
-# Phase 8: Gmail connector. Aliased on import so the symbol names don't
-# clash with the Slack helpers above (both modules expose
-# build_connect_url, exchange_code, verify_oauth_state, etc.).
-from gmail_oauth import (  # noqa: E402
-    build_connect_url as gmail_build_connect_url,
-    exchange_code as gmail_exchange_code,
-    fetch_user_info as gmail_fetch_user_info,
-    gmail_oauth_configured,
-    installation_from_token_response as gmail_installation_from_token_response,
-    list_labels as list_gmail_labels_from_api,
-    run_workspace_gmail_ingest,
-    verify_oauth_state as verify_gmail_oauth_state,
 )
 
 configure_logging(level=os.getenv('LOG_LEVEL', 'INFO'))
@@ -186,6 +199,7 @@ async def lifespan(app: FastAPI):
     # Initialized AFTER env validation so a startup config error
     # surfaces in stdout logs, not Sentry.
     from observability import init_sentry  # noqa: PLC0415
+
     init_sentry()
     start_scheduler()
     try:
@@ -195,7 +209,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Second Brain (Slack MVP)", lifespan=lifespan)
+
+# Translate every typed AppError into a normalized JSON 4xx/5xx response.
 app.add_exception_handler(AppError, app_error_handler)
+
+# Health endpoints: /api/health/live, /api/health/ready, /api/health
+app.include_router(health_router)
 
 
 # ---------- CORS ---------- #
@@ -219,8 +238,13 @@ app.add_middleware(RequestContextMiddleware)
 
 # ---------- Request validation ---------- #
 QueryMode = Literal[
-    "default", "summary", "decisions", "action_items", "who_said",
-    "exact", "hybrid",
+    "default",
+    "summary",
+    "decisions",
+    "action_items",
+    "who_said",
+    "exact",
+    "hybrid",
 ]
 DocumentType = Literal["message", "thread"]
 HistoryRole = Literal["user", "assistant"]
@@ -239,6 +263,7 @@ MAX_CONVERSATION_HISTORY = 6
 
 class ConversationMessage(BaseModel):
     """One turn of recent chat history sent by the frontend."""
+
     model_config = ConfigDict(str_strip_whitespace=True)
 
     role: HistoryRole = Field(
@@ -250,7 +275,7 @@ class ConversationMessage(BaseModel):
         min_length=1,
         max_length=10000,
         description="The turn's text. Long assistant answers are truncated "
-                    "downstream when formatted into the prompt.",
+        "downstream when formatted into the prompt.",
     )
 
 
@@ -261,8 +286,7 @@ class QueryRequest(BaseModel):
         ...,
         min_length=3,
         max_length=2000,
-        description="The user's natural-language question (3–2000 chars, "
-                    "leading/trailing whitespace is stripped).",
+        description="The user's natural-language question (3–2000 chars, " "leading/trailing whitespace is stripped).",
     )
     top_k: int = Field(
         5,
@@ -273,15 +297,17 @@ class QueryRequest(BaseModel):
     mode: QueryMode = Field(
         "default",
         description="Answer style + retrieval strategy. 'default' is a "
-                    "concise grounded answer; 'exact' prefers literal "
-                    "keyword matches; 'hybrid' combines semantic + keyword.",
+        "concise grounded answer; 'exact' prefers literal "
+        "keyword matches; 'hybrid' combines semantic + keyword.",
     )
     channel: Optional[str] = Field(
-        None, max_length=200,
+        None,
+        max_length=200,
         description="Optional channel-name filter (e.g. 'all-second-brain').",
     )
     user: Optional[str] = Field(
-        None, max_length=200,
+        None,
+        max_length=200,
         description="Optional user-name filter.",
     )
     document_type: Optional[DocumentType] = Field(
@@ -296,9 +322,9 @@ class QueryRequest(BaseModel):
     allowed_sources: Optional[List[SourceKind]] = Field(
         None,
         description="Optional restriction on connector source(s). "
-                    "Omit or pass null for all sources; pass ['slack'] "
-                    "or ['gmail'] to filter to one connector; pass "
-                    "['slack','gmail'] to allow both explicitly.",
+        "Omit or pass null for all sources; pass ['slack'] "
+        "or ['gmail'] to filter to one connector; pass "
+        "['slack','gmail'] to allow both explicitly.",
     )
     # Date range — accept either a Slack ts string ("1778775842.876209")
     # or a unix-timestamp number. recall.py normalizes both. Explicit
@@ -315,10 +341,11 @@ class QueryRequest(BaseModel):
     # "after May 10"). Parsed server-side; explicit start/end_timestamp
     # win where they overlap.
     date_query: Optional[str] = Field(
-        None, max_length=200,
+        None,
+        max_length=200,
         description="Natural-language date phrase. Examples: 'today', "
-                    "'last week', 'last 7 days', 'after May 10', "
-                    "'from May 1 to May 7'.",
+        "'last week', 'last 7 days', 'after May 10', "
+        "'from May 1 to May 7'.",
     )
     # Recent chat turns (oldest first). Used by the LLM to resolve
     # references like 'he' / 'that' / 'the earlier discussion'. Does NOT
@@ -328,8 +355,8 @@ class QueryRequest(BaseModel):
     conversation_history: Optional[List[ConversationMessage]] = Field(
         None,
         description="Recent chat turns (oldest first), up to "
-                    f"{MAX_CONVERSATION_HISTORY}. Anything beyond that is "
-                    "truncated server-side to the most recent turns.",
+        f"{MAX_CONVERSATION_HISTORY}. Anything beyond that is "
+        "truncated server-side to the most recent turns.",
     )
 
 
@@ -359,7 +386,7 @@ def _resolve_date_filters(req: QueryRequest) -> Dict[str, Any]:
         # User didn't send date_query at all. No debug info needed.
         return {
             "start_timestamp": explicit_start,
-            "end_timestamp":   explicit_end,
+            "end_timestamp": explicit_end,
             "date_query_debug": None,
         }
 
@@ -370,13 +397,13 @@ def _resolve_date_filters(req: QueryRequest) -> Dict[str, Any]:
 
     return {
         "start_timestamp": effective_start,
-        "end_timestamp":   effective_end,
+        "end_timestamp": effective_end,
         "date_query_debug": {
-            "phrase":         parsed["phrase"],
-            "matched":        parsed["matched"],
-            "note":           parsed["note"],
-            "applied_start":  parsed["start_timestamp"] if explicit_start is None else None,
-            "applied_end":    parsed["end_timestamp"] if explicit_end is None else None,
+            "phrase": parsed["phrase"],
+            "matched": parsed["matched"],
+            "note": parsed["note"],
+            "applied_start": parsed["start_timestamp"] if explicit_start is None else None,
+            "applied_end": parsed["end_timestamp"] if explicit_end is None else None,
         },
     }
 
@@ -400,20 +427,22 @@ def _cache_key_from_request(
     `metadata_bias` is also keyed because weak inference still changes
     the ranking order.
     """
-    return build_cache_key({
-        "question":        req.question,
-        "top_k":           req.top_k,
-        "mode":            req.mode,
-        # Use the EFFECTIVE filters (explicit OR strong-inferred) so an
-        # inferred filter cache-isolates from an unfiltered query.
-        "channel":         rewrite["effective_channel"],
-        "user":            rewrite["effective_user"],
-        "document_type":   req.document_type,
-        "start_timestamp": resolved["start_timestamp"],
-        "end_timestamp":   resolved["end_timestamp"],
-        # Weak inference: metadata_bias is a dict or None.
-        "metadata_bias":   rewrite["metadata_bias"],
-    })
+    return build_cache_key(
+        {
+            "question": req.question,
+            "top_k": req.top_k,
+            "mode": req.mode,
+            # Use the EFFECTIVE filters (explicit OR strong-inferred) so an
+            # inferred filter cache-isolates from an unfiltered query.
+            "channel": rewrite["effective_channel"],
+            "user": rewrite["effective_user"],
+            "document_type": req.document_type,
+            "start_timestamp": resolved["start_timestamp"],
+            "end_timestamp": resolved["end_timestamp"],
+            # Weak inference: metadata_bias is a dict or None.
+            "metadata_bias": rewrite["metadata_bias"],
+        }
+    )
 
 
 def _normalize_history(req: QueryRequest) -> List[Dict[str, str]]:
@@ -481,22 +510,22 @@ def _resolve_query_rewrite(req: QueryRequest) -> Dict[str, Any]:
     bias: Dict[str, str] = {}
 
     # Strong inference → hard filter (only when caller didn't set one).
-    if (rewrite["inferred_channel"]
-            and rewrite["channel_confidence"] == "strong"
-            and not (req.channel and req.channel.strip())):
+    if (
+        rewrite["inferred_channel"]
+        and rewrite["channel_confidence"] == "strong"
+        and not (req.channel and req.channel.strip())
+    ):
         effective_channel = rewrite["inferred_channel"]
-    elif (rewrite["inferred_channel"]
-            and rewrite["channel_confidence"] == "weak"
-            and not (req.channel and req.channel.strip())):
+    elif (
+        rewrite["inferred_channel"]
+        and rewrite["channel_confidence"] == "weak"
+        and not (req.channel and req.channel.strip())
+    ):
         bias["channel"] = rewrite["inferred_channel"]
 
-    if (rewrite["inferred_person"]
-            and rewrite["person_confidence"] == "strong"
-            and not (req.user and req.user.strip())):
+    if rewrite["inferred_person"] and rewrite["person_confidence"] == "strong" and not (req.user and req.user.strip()):
         effective_user = rewrite["inferred_person"]
-    elif (rewrite["inferred_person"]
-            and rewrite["person_confidence"] == "weak"
-            and not (req.user and req.user.strip())):
+    elif rewrite["inferred_person"] and rewrite["person_confidence"] == "weak" and not (req.user and req.user.strip()):
         bias["user"] = rewrite["inferred_person"]
 
     rewrite_debug = None
@@ -504,18 +533,18 @@ def _resolve_query_rewrite(req: QueryRequest) -> Dict[str, Any]:
         # Only attach the debug record when we actually inferred something —
         # otherwise the UI would have to special-case empty rewrite blobs.
         rewrite_debug = {
-            "inferred_person":          rewrite["inferred_person"],
-            "inferred_channel":         rewrite["inferred_channel"],
-            "person_confidence":        rewrite["person_confidence"],
-            "channel_confidence":       rewrite["channel_confidence"],
+            "inferred_person": rewrite["inferred_person"],
+            "inferred_channel": rewrite["inferred_channel"],
+            "person_confidence": rewrite["person_confidence"],
+            "channel_confidence": rewrite["channel_confidence"],
             "retrieval_biases_applied": rewrite["retrieval_biases_applied"],
         }
 
     return {
         "effective_channel": effective_channel,
-        "effective_user":    effective_user,
-        "metadata_bias":     bias or None,
-        "rewrite_debug":     rewrite_debug,
+        "effective_user": effective_user,
+        "metadata_bias": bias or None,
+        "rewrite_debug": rewrite_debug,
     }
 
 
@@ -523,10 +552,12 @@ def _resolve_query_rewrite(req: QueryRequest) -> Dict[str, Any]:
 @app.get("/")
 def root() -> Dict[str, str]:
     return {
-        "name":   "Second Brain HydraDB MVP",
+        "name": "Second Brain HydraDB MVP",
         "status": "ok",
-        "docs":   "/docs",
+        "docs": "/docs",
         "health": "/api/health",
+        "liveness": "/api/health/live",
+        "readiness": "/api/health/ready",
     }
 
 
@@ -542,8 +573,8 @@ def health() -> Dict[str, str]:
     ingestion telemetry.
     """
     return {
-        "status":      "ok",
-        "service":     "second-brain-api",
+        "status": "ok",
+        "service": "second-brain-api",
         # ENVIRONMENT lets dashboards distinguish prod vs preview vs
         # local. Blank when unset rather than guessing.
         "environment": (os.getenv("ENVIRONMENT") or "").strip(),
@@ -551,10 +582,7 @@ def health() -> Dict[str, str]:
         # RENDER_GIT_COMMIT, Railway's RAILWAY_GIT_COMMIT_SHA). Falling
         # back to "dev" makes local responses obvious in logs.
         "version": (
-            os.getenv("APP_VERSION")
-            or os.getenv("RENDER_GIT_COMMIT")
-            or os.getenv("RAILWAY_GIT_COMMIT_SHA")
-            or "dev"
+            os.getenv("APP_VERSION") or os.getenv("RENDER_GIT_COMMIT") or os.getenv("RAILWAY_GIT_COMMIT_SHA") or "dev"
         ).strip(),
     }
 
@@ -574,6 +602,7 @@ def ready(response: Response) -> Dict[str, Any]:
     per-check breakdown so a probe failure is debuggable from logs.
     """
     from observability import check_dependencies  # noqa: PLC0415
+
     result = check_dependencies()
     if not result.get("ok"):
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
@@ -612,14 +641,47 @@ def query(
     #     3. Stateless queries (no history) keep working through the cache
     #        exactly as before — no regression.
     use_cache = not history
-    cache_key = (
-        _cache_key_from_request(req, resolved, rewrite) if use_cache else None
-    )
+    cache_key = _cache_key_from_request(req, resolved, rewrite) if use_cache else None
 
     if use_cache:
         cached = get_cached(cache_key)
         if cached is not None:
             return cached
+
+    # Phase 16: intelligence query routing. A narrow regex classifier
+    # detects ownership / status-blocker / decision-history / timeline
+    # questions and answers them from structured memory with citations
+    # to source_stable_keys. The contract is strict: when the question
+    # matches no intent (zero I/O in that case), or matches but has no
+    # supporting memory data, or anything fails, the router returns
+    # None and this route proceeds byte-identically to the existing
+    # retrieval pipeline below. Stateless queries only -- follow-ups
+    # need the conversation history the LLM path provides. Routed
+    # answers are never cached (they're cheap to recompute and track
+    # live memory state).
+    if not history:
+        intel_result: Optional[Dict[str, Any]] = None
+        try:
+            from memory_intelligence import route_intelligence_query  # noqa: PLC0415
+
+            intel_result = route_intelligence_query(
+                workspace_id=workspace.workspace_id,
+                question=req.question,
+            )
+        except Exception as _e:  # noqa: BLE001
+            logger.debug(
+                "intelligence_route_skipped",
+                extra={"error": type(_e).__name__},
+            )
+            intel_result = None
+        if intel_result is not None:
+            debug = dict(intel_result.get("debug") or {})
+            debug["cache_hit"] = False
+            if resolved["date_query_debug"] is not None:
+                debug["date_query"] = resolved["date_query_debug"]
+            if rewrite["rewrite_debug"] is not None:
+                debug["query_rewrite"] = rewrite["rewrite_debug"]
+            return {**intel_result, "debug": debug}
 
     result = answer_question(
         question=req.question,
@@ -670,8 +732,7 @@ def query(
     # was found) AND there's no conversation history. Don't cache the
     # fallback string either — letting it retry next time is harmless
     # and the answer might change after fresh ingestion.
-    if use_cache and result.get("answer") \
-            and result["answer"] != INSUFFICIENT_CONTEXT_ANSWER:
+    if use_cache and result.get("answer") and result["answer"] != INSUFFICIENT_CONTEXT_ANSWER:
         cache_put(cache_key, result)
     return result
 
@@ -716,9 +777,7 @@ def query_stream(
     # Same bypass rule as /api/query: when conversation_history is set,
     # don't use or write the cache. Stateless streams still cache.
     use_cache = not history
-    cache_key = (
-        _cache_key_from_request(req, resolved, rewrite) if use_cache else None
-    )
+    cache_key = _cache_key_from_request(req, resolved, rewrite) if use_cache else None
     cached = get_cached(cache_key) if use_cache else None
 
     # Snapshot the date_query + rewrite debug records once; both the
@@ -737,11 +796,14 @@ def query_stream(
                 cached_debug["date_query"] = date_query_debug
             if rewrite_debug is not None:
                 cached_debug["query_rewrite"] = rewrite_debug
-            yield _sse_event("done", {
-                "answer":  cached.get("answer", ""),
-                "sources": cached.get("sources", []),
-                "debug":   cached_debug,
-            })
+            yield _sse_event(
+                "done",
+                {
+                    "answer": cached.get("answer", ""),
+                    "sources": cached.get("sources", []),
+                    "debug": cached_debug,
+                },
+            )
             return
 
         # ----- Prepare context first (HydraDB recall + source build) ---
@@ -768,15 +830,22 @@ def query_stream(
                 ),
             )
         except AppError as e:
-            yield _sse_event("error", {
-                "detail": e.detail, "error_type": e.error_type,
-            })
+            yield _sse_event(
+                "error",
+                {
+                    "detail": e.detail,
+                    "error_type": e.error_type,
+                },
+            )
             return
         except Exception as e:  # noqa: BLE001
-            yield _sse_event("error", {
-                "detail": "Unexpected server error.",
-                "error_type": "internal_error",
-            })
+            yield _sse_event(
+                "error",
+                {
+                    "detail": "Unexpected server error.",
+                    "error_type": "internal_error",
+                },
+            )
             logger.error('query_stream_unexpected_error', extra={'error': type(e).__name__})
             return
 
@@ -791,11 +860,14 @@ def query_stream(
                 fallback_debug["query_rewrite"] = rewrite_debug
             if history:
                 fallback_debug["cache_bypassed"] = "conversation_history present"
-            yield _sse_event("done", {
-                "answer":  INSUFFICIENT_CONTEXT_ANSWER,
-                "sources": [],
-                "debug":   fallback_debug,
-            })
+            yield _sse_event(
+                "done",
+                {
+                    "answer": INSUFFICIENT_CONTEXT_ANSWER,
+                    "sources": [],
+                    "debug": fallback_debug,
+                },
+            )
             return
 
         # ----- Stream tokens from the LLM ------------------------------
@@ -813,15 +885,22 @@ def query_stream(
                 accumulated_parts.append(piece)
                 yield _sse_event("token", {"text": piece})
         except AppError as e:
-            yield _sse_event("error", {
-                "detail": e.detail, "error_type": e.error_type,
-            })
+            yield _sse_event(
+                "error",
+                {
+                    "detail": e.detail,
+                    "error_type": e.error_type,
+                },
+            )
             return
         except Exception as e:  # noqa: BLE001
-            yield _sse_event("error", {
-                "detail": "Unexpected LLM error.",
-                "error_type": "internal_error",
-            })
+            yield _sse_event(
+                "error",
+                {
+                    "detail": "Unexpected LLM error.",
+                    "error_type": "internal_error",
+                },
+            )
             logger.error('query_stream_llm_error', extra={'error': type(e).__name__})
             return
 
@@ -833,19 +912,19 @@ def query_stream(
             top_k=req.top_k,
         )
         debug = {
-            "chunks_returned":      prepared["chunks_count"],
-            "chunks_used":          len(prepared["sources"]),
-            "chunks_filtered_out":  prepared["filtered_out"],
+            "chunks_returned": prepared["chunks_count"],
+            "chunks_used": len(prepared["sources"]),
+            "chunks_filtered_out": prepared["filtered_out"],
             "sources_before_clean": finalized["sources_before"],
-            "sources_after_clean":  finalized["sources_after"],
-            "mode":                 req.mode,
-            "retrieval_mode":       prepared.get("retrieval_mode", req.mode),
-            "exact_matches_found":  prepared.get("exact_matches", 0),
-            "query_terms":          prepared.get("query_terms", []),
-            "top_k":                req.top_k,
-            "cache_hit":            False,
-            "history_used":         bool(history),
-            "history_turns":        len(history),
+            "sources_after_clean": finalized["sources_after"],
+            "mode": req.mode,
+            "retrieval_mode": prepared.get("retrieval_mode", req.mode),
+            "exact_matches_found": prepared.get("exact_matches", 0),
+            "query_terms": prepared.get("query_terms", []),
+            "top_k": req.top_k,
+            "cache_hit": False,
+            "history_used": bool(history),
+            "history_turns": len(history),
         }
         if date_query_debug is not None:
             debug["date_query"] = date_query_debug
@@ -854,17 +933,16 @@ def query_stream(
         if history:
             debug["cache_bypassed"] = "conversation_history present"
         full_payload = {
-            "answer":  finalized["answer"],
+            "answer": finalized["answer"],
             "sources": finalized["cleaned_sources"],
-            "debug":   debug,
+            "debug": debug,
         }
         yield _sse_event("done", full_payload)
 
         # Cache the finalized result for next identical request, same
         # rules as /api/query: only when stateless AND not the no-context
         # fallback.
-        if use_cache and full_payload["answer"] \
-                and full_payload["answer"] != INSUFFICIENT_CONTEXT_ANSWER:
+        if use_cache and full_payload["answer"] and full_payload["answer"] != INSUFFICIENT_CONTEXT_ANSWER:
             cache_put(cache_key, full_payload)
 
     return StreamingResponse(
@@ -891,9 +969,7 @@ async def slack_events(
     request: Request,
     background_tasks: BackgroundTasks,
     x_slack_signature: Optional[str] = Header(default=None, alias="X-Slack-Signature"),
-    x_slack_request_timestamp: Optional[str] = Header(
-        default=None, alias="X-Slack-Request-Timestamp"
-    ),
+    x_slack_request_timestamp: Optional[str] = Header(default=None, alias="X-Slack-Request-Timestamp"),
 ):
     # Read body BEFORE parsing so we can verify the signature over the
     # exact bytes Slack sent. Reparsing the JSON to bytes would change
@@ -954,32 +1030,36 @@ async def slack_events(
 # ---------- Phase 2 request models (chat history + saved answers) ---------- #
 class ChatSessionCreate(BaseModel):
     """Body for POST /api/chat/sessions."""
+
     model_config = ConfigDict(extra="forbid")
     title: Optional[str] = Field(default=None, max_length=200)
 
 
 class ChatMessageCreate(BaseModel):
     """Body for POST /api/chat/sessions/{session_id}/messages."""
+
     model_config = ConfigDict(extra="forbid")
-    role:    Literal["user", "assistant"]
+    role: Literal["user", "assistant"]
     content: str = Field(default="", max_length=200_000)
     sources: Optional[List[Dict[str, Any]]] = None
 
 
 class SavedAnswerCreate(BaseModel):
     """Body for POST /api/saved-answers."""
+
     model_config = ConfigDict(extra="forbid")
     question: str = Field(default="", max_length=5000)
-    answer:   str = Field(default="", max_length=200_000)
-    sources:  Optional[List[Dict[str, Any]]] = None
-    mode:     Optional[str] = Field(default=None, max_length=64)
-    filters:  Optional[Dict[str, Any]] = None
-    debug:    Optional[Dict[str, Any]] = None
+    answer: str = Field(default="", max_length=200_000)
+    sources: Optional[List[Dict[str, Any]]] = None
+    mode: Optional[str] = Field(default=None, max_length=64)
+    filters: Optional[Dict[str, Any]] = None
+    debug: Optional[Dict[str, Any]] = None
 
 
 # ---------- Phase 3 request models (Slack Connect) ---------- #
 class SlackChannelSelection(BaseModel):
     """Body for POST /api/slack/channels."""
+
     model_config = ConfigDict(extra="forbid")
     selected_channel_ids: List[str] = Field(default_factory=list)
 
@@ -987,13 +1067,15 @@ class SlackChannelSelection(BaseModel):
 # ---------- Phase 8: Gmail request models ---------- #
 class GmailLabelSelection(BaseModel):
     """Body for POST /api/gmail/labels."""
+
     model_config = ConfigDict(extra="forbid")
-    connection_id:      str
+    connection_id: str
     selected_label_ids: List[str] = Field(default_factory=list)
 
 
 class GmailIngestRequest(BaseModel):
     """Body for POST /api/gmail/ingest."""
+
     model_config = ConfigDict(extra="forbid")
     connection_id: str
 
@@ -1038,6 +1120,7 @@ def my_workspaces(
 # private threads. Messages live under sessions and are read-scoped by
 # the same rule. All routes require Supabase JWT + X-Workspace-Id —
 # enforced once by the require_workspace dependency.
+
 
 @app.get("/api/chat/sessions")
 def chat_sessions_list(
@@ -1118,6 +1201,7 @@ def chat_session_messages_create(
 
 
 # ---------- Saved answers (Phase 2) ---------- #
+
 
 @app.get("/api/saved-answers")
 def saved_answers_list(
@@ -1213,7 +1297,8 @@ def saved_answers_share(
     other's bookmarks. (Revoke is still tied to created_by.)
     """
     saved = get_saved_answer(
-        saved_id=saved_id, workspace_id=workspace.workspace_id,
+        saved_id=saved_id,
+        workspace_id=workspace.workspace_id,
     )
     if not saved:
         raise HTTPException(
@@ -1233,11 +1318,11 @@ def saved_answers_share(
             detail="Could not create share link.",
         )
     return {
-        "id":              row.get("id"),
-        "share_token":     token,
-        "url":             _share_url_for(token),
+        "id": row.get("id"),
+        "share_token": token,
+        "url": _share_url_for(token),
         "saved_answer_id": saved_id,
-        "created_at":      row.get("created_at"),
+        "created_at": row.get("created_at"),
     }
 
 
@@ -1259,12 +1344,12 @@ def saved_answers_shares_list(
     # link is effectively gone from the user's perspective.
     active = [
         {
-            "id":          r.get("id"),
+            "id": r.get("id"),
             "share_token": r.get("share_token"),
-            "url":         _share_url_for(r.get("share_token") or ""),
-            "created_at":  r.get("created_at"),
-            "expires_at":  r.get("expires_at"),
-            "created_by":  r.get("created_by"),
+            "url": _share_url_for(r.get("share_token") or ""),
+            "created_at": r.get("created_at"),
+            "expires_at": r.get("expires_at"),
+            "created_by": r.get("created_by"),
         }
         for r in rows
         if not r.get("revoked_at")
@@ -1331,10 +1416,10 @@ def shared_answer_public(
     # PUBLIC projection allowlist -- nothing here ties back to a
     # workspace or user.
     return {
-        "question":   saved.get("question") or "",
-        "answer":     saved.get("answer") or "",
-        "sources":    saved.get("sources") or [],
-        "mode":       saved.get("mode"),
+        "question": saved.get("question") or "",
+        "answer": saved.get("answer") or "",
+        "sources": saved.get("sources") or [],
+        "mode": saved.get("mode"),
         "created_at": saved.get("created_at"),
     }
 
@@ -1368,7 +1453,7 @@ def workspace_status(
         workspace_id=workspace.workspace_id,
     )
     slack_status = {
-        "connected":         bool(slack_install),
+        "connected": bool(slack_install),
         "channels_selected": len(slack_channels),
         "scheduler_enabled": auto_ingest_enabled(),
     }
@@ -1392,7 +1477,11 @@ def workspace_status(
                 workspace_id=workspace.workspace_id,
                 gmail_connection_id=cid,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as _e:  # noqa: BLE001
+            logger.warning(
+                "workspace_status_gmail_summary_failed",
+                extra={"connection_id": cid, "error": type(_e).__name__},
+            )
             summary = {"last_synced_at": None, "labels_synced": 0}
         ts = summary.get("last_synced_at")
         if ts and (last_synced is None or str(ts) > str(last_synced)):
@@ -1403,12 +1492,15 @@ def workspace_status(
                 gmail_connection_id=cid,
             )
             labels_total += len(label_ids or [])
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as _e:  # noqa: BLE001
+            logger.warning(
+                "workspace_status_gmail_labels_failed",
+                extra={"connection_id": cid, "error": type(_e).__name__},
+            )
     gmail_status = {
         "connection_count": len(gmail_conns),
-        "labels_selected":  labels_total,
-        "last_synced_at":   last_synced,
+        "labels_selected": labels_total,
+        "last_synced_at": last_synced,
     }
 
     return {"slack": slack_status, "gmail": gmail_status}
@@ -1441,22 +1533,26 @@ def analytics_overview(
     configured window. The UI renders this as the top of the
     analytics panel.
     """
-    from analytics_store import (   # local import keeps boot fast
-        aggregate_query_stats,
+    from analytics_store import (  # local import keeps boot fast
         aggregate_ingest_stats,
+        aggregate_query_stats,
         aggregate_retrieval_failure_stats,
     )
+
     safe_days = _clamp_days(days)
     return {
-        "window_days":         safe_days,
-        "query":               aggregate_query_stats(
-            workspace_id=workspace.workspace_id, days=safe_days,
+        "window_days": safe_days,
+        "query": aggregate_query_stats(
+            workspace_id=workspace.workspace_id,
+            days=safe_days,
         ),
-        "ingest":              aggregate_ingest_stats(
-            workspace_id=workspace.workspace_id, days=safe_days,
+        "ingest": aggregate_ingest_stats(
+            workspace_id=workspace.workspace_id,
+            days=safe_days,
         ),
-        "retrieval_failures":  aggregate_retrieval_failure_stats(
-            workspace_id=workspace.workspace_id, days=safe_days,
+        "retrieval_failures": aggregate_retrieval_failure_stats(
+            workspace_id=workspace.workspace_id,
+            days=safe_days,
         ),
     }
 
@@ -1472,6 +1568,7 @@ def analytics_topics(
     a cluster count. Drives the "Top Topics" card.
     """
     from analytics_intelligence import topic_overview
+
     safe_days = _clamp_days(days, default=30)
     safe_top = max(1, min(int(top_n or 10), 50))
     return topic_overview(
@@ -1498,6 +1595,7 @@ def analytics_timeline(
     can be passed comma-separated.
     """
     from analytics_intelligence import reconstruct_timeline
+
     kinds = None
     if kind:
         kinds = [k.strip() for k in kind.split(",") if k.strip()]
@@ -1524,13 +1622,80 @@ def analytics_insights(
       separate cards in the analytics panel.
     """
     from analytics_intelligence import (
-        proactive_insights, recurring_patterns,
+        proactive_insights,
+        recurring_patterns,
     )
+
     insights = proactive_insights(workspace_id=workspace.workspace_id)
     recurring = recurring_patterns(
-        workspace_id=workspace.workspace_id, days=7, min_mentions=3,
+        workspace_id=workspace.workspace_id,
+        days=7,
+        min_mentions=3,
     )
     return {**insights, "recurring": recurring}
+
+
+# ---------- Phase 16: memory intelligence ---------- #
+# Three read-only endpoints under /api/intelligence. Each one
+# delegates to memory_intelligence, which derives everything on read
+# from extracted_memories -- workspace-scoped, defensive, no writes.
+
+
+@app.get("/api/intelligence/graph")
+def intelligence_graph(
+    days: int = 90,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Canonical entity relationship graph: people / projects / services
+    / channels / decisions / action items as nodes, recurrence-x-
+    recency-weighted co-occurrence edges, cross-source flags, and the
+    full alias map for traceability.
+    """
+    from memory_intelligence import relationship_graph  # noqa: PLC0415
+
+    return relationship_graph(
+        workspace_id=workspace.workspace_id,
+        days=_clamp_days(days, default=90, max_days=365),
+    )
+
+
+@app.get("/api/intelligence/projects")
+def intelligence_projects(
+    days: int = 90,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Inferred project intelligence: active/dormant status, owners,
+    timeline, linked decisions, blockers, unresolved tasks.
+    """
+    from memory_intelligence import project_intelligence  # noqa: PLC0415
+
+    return {
+        "projects": project_intelligence(
+            workspace_id=workspace.workspace_id,
+            days=_clamp_days(days, default=90, max_days=365),
+        )
+    }
+
+
+@app.get("/api/intelligence/conversation")
+def intelligence_conversation(
+    decision: str,
+    days: int = 180,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Conversation reconstruction: walk backward from the decision
+    matching `decision` through the pre-dating co-occurring memories.
+    """
+    from memory_intelligence import reconstruct_conversation  # noqa: PLC0415
+
+    return reconstruct_conversation(
+        workspace_id=workspace.workspace_id,
+        decision=decision,
+        days=_clamp_days(days, default=180, max_days=365),
+    )
 
 
 # ---------- Slack Connect (Phase 3) ---------- #
@@ -1539,6 +1704,7 @@ def analytics_insights(
 # the frontend. The frontend only needs to know that Slack is connected
 # (team name + when), then can list channels and toggle which ones to
 # ingest.
+
 
 def _frontend_base_url() -> str:
     """
@@ -1660,6 +1826,7 @@ def _oauth_redirect(frontend: str, connector: str, result: str, reason: str):
     (validated upstream); on failure it's a short fixed code we choose.
     """
     from fastapi.responses import RedirectResponse  # noqa: PLC0415
+
     qs = urlencode_safely({connector: result, "reason": reason})
     return RedirectResponse(url=f"{frontend}/?{qs}", status_code=302)
 
@@ -1675,6 +1842,7 @@ def urlencode_safely(d: Dict[str, str]) -> str:
     string on a successful connect where reason happens to be blank.
     """
     from urllib.parse import urlencode  # noqa: PLC0415
+
     cleaned = {k: v for k, v in d.items() if v not in (None, "")}
     return urlencode(cleaned)
 
@@ -1701,7 +1869,7 @@ def slack_channels_list(
         return {
             "connected": False,
             "team_name": "",
-            "channels":  [],
+            "channels": [],
         }
 
     bot_token = (install.get("bot_token") or "").strip()
@@ -1725,7 +1893,7 @@ def slack_channels_list(
     return {
         "connected": True,
         "team_name": install.get("slack_team_name") or "",
-        "channels":  rows,
+        "channels": rows,
     }
 
 
@@ -1815,8 +1983,8 @@ def slack_ingest(
         hydradb_sub_tenant_id=sub_tenant,
     )
     return {
-        "status":           "started",
-        "channels_queued":  len(channel_ids),
+        "status": "started",
+        "channels_queued": len(channel_ids),
     }
 
 
@@ -1833,6 +2001,7 @@ def slack_ingest(
 #     take a connection_id query/body param.
 #
 # All routes except the OAuth callback require auth + workspace.
+
 
 @app.get(
     "/api/gmail/connect-url",
@@ -1860,7 +2029,7 @@ def gmail_connect_url(
 
 @app.get("/api/gmail/oauth/callback")
 def gmail_oauth_callback(
-    code:  Optional[str] = None,
+    code: Optional[str] = None,
     state: Optional[str] = None,
     error: Optional[str] = None,
 ):
@@ -1939,7 +2108,8 @@ def gmail_connections_list(
     for conn in connections:
         cid = conn.get("id") or ""
         sync_summary: Dict[str, Any] = {
-            "last_synced_at": None, "labels_synced": 0,
+            "last_synced_at": None,
+            "labels_synced": 0,
         }
         if cid:
             try:
@@ -1991,7 +2161,8 @@ def gmail_labels_list(
         )
 
     connection = get_gmail_connection(
-        connection_id=connection_id, workspace_id=workspace.workspace_id,
+        connection_id=connection_id,
+        workspace_id=workspace.workspace_id,
     )
     if not connection:
         # Defensive: return an empty set rather than 404 so a deleted
@@ -2004,9 +2175,9 @@ def gmail_labels_list(
         logger.warning(
             "gmail_labels_refresh_failed",
             extra={
-                "workspace_id":  workspace.workspace_id,
+                "workspace_id": workspace.workspace_id,
                 "connection_id": connection_id,
-                "error":         type(e).__name__,
+                "error": type(e).__name__,
             },
         )
         live_labels = []
@@ -2063,7 +2234,7 @@ def gmail_labels_save(
 @app.post(
     "/api/gmail/ingest",
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(slack_ingest_rate_limit)],   # reuse "ingest" bucket
+    dependencies=[Depends(slack_ingest_rate_limit)],  # reuse "ingest" bucket
 )
 def gmail_ingest(
     req: GmailIngestRequest,
@@ -2116,6 +2287,6 @@ def gmail_ingest(
         hydradb_sub_tenant_id=sub_tenant,
     )
     return {
-        "status":        "started",
+        "status": "started",
         "labels_queued": len(label_ids),
     }
