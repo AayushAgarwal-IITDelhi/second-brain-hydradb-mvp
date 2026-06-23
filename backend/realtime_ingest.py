@@ -51,6 +51,7 @@ from ingestion.ingest_slack import (
 from ingestion.ingestion_state import (
     IngestionState,
     stable_key_for_message,
+    stable_key_for_thread,
 )
 from ingestion.normalize import is_noise
 from ingestion.slack_client import SlackClientWrapper
@@ -442,7 +443,7 @@ def _process_slack_payload_inner(payload: Dict[str, Any]) -> None:
         _handle_message_changed(slack, hydra, channel_id, channel_name, event, workspace_id=workspace_id)
         return
     if subtype == "message_deleted":
-        _handle_message_deleted(channel_id, event)
+        _handle_message_deleted(channel_id, channel_name, event, hydra, slack, workspace_id=workspace_id)
         return
 
     # ----- Distinguish standalone vs thread -----
@@ -640,6 +641,28 @@ def _ingest_thread(
             )
 
 
+def _hydradb_delete_by_stable_key(
+    hydra: HydraDBClient,
+    stable_key: str,
+) -> bool:
+    """
+    Look up the HydraDB source_id for `stable_key` and delete it.
+    Returns True if the delete was attempted (source_id was known),
+    False if source_id was null (delete skipped).
+    """
+    with _state_lock:
+        entry = IngestionState(STATE_PATH).get(stable_key)
+    source_id = (entry or {}).get("source_id")
+    if not source_id:
+        logger.debug(
+            "realtime_hydradb_delete_skipped_no_source_id",
+            extra={"stable_key": stable_key},
+        )
+        return False
+    hydra.delete_knowledge([source_id])
+    return True
+
+
 def _handle_message_changed(
     slack: SlackClientWrapper,
     hydra: HydraDBClient,
@@ -649,51 +672,111 @@ def _handle_message_changed(
     *,
     workspace_id: str = "",
 ) -> None:
-    """Re-upload an edited message so HydraDB reflects its current text."""
+    """
+    Re-upload the new version of an edited message, then delete the stale
+    HydraDB document.  The delete is intentionally deferred until after a
+    successful re-upload so a transient upload failure cannot leave a data hole.
+    """
     updated = event.get("message")
     if not isinstance(updated, dict):
         logger.debug("realtime_message_changed_no_message")
         return
     if is_noise(updated):
         return
+
     thread_ts = updated.get("thread_ts")
     if thread_ts:
-        # Thread parent or reply was edited — re-upload the full thread so
-        # every chunk reflects the current state of all messages.
+        thread_stable_key = stable_key_for_thread(channel_id, thread_ts)
+        with _state_lock:
+            old_entry = IngestionState(STATE_PATH).get(thread_stable_key)
+        old_source_id = (old_entry or {}).get("source_id")
+        old_uploaded_at = (old_entry or {}).get("uploaded_at")
+
         _ingest_thread(slack, hydra, channel_id, channel_name, thread_ts, updated, workspace_id=workspace_id)
+
+        with _state_lock:
+            new_entry = IngestionState(STATE_PATH).get(thread_stable_key)
+        if (new_entry or {}).get("uploaded_at") != old_uploaded_at and old_source_id:
+            hydra.delete_knowledge([old_source_id])
     else:
+        msg_ts = updated.get("ts", "")
+        msg_stable_key = stable_key_for_message(channel_id, msg_ts)
+        with _state_lock:
+            old_entry = IngestionState(STATE_PATH).get(msg_stable_key)
+        old_source_id = (old_entry or {}).get("source_id")
+        old_uploaded_at = (old_entry or {}).get("uploaded_at")
+
         _ingest_standalone(
             slack, hydra, channel_id, channel_name, updated,
             workspace_id=workspace_id, force_reupload=True,
         )
 
+        with _state_lock:
+            new_entry = IngestionState(STATE_PATH).get(msg_stable_key)
+        if (new_entry or {}).get("uploaded_at") != old_uploaded_at and old_source_id:
+            hydra.delete_knowledge([old_source_id])
 
-def _handle_message_deleted(channel_id: str, event: Dict[str, Any]) -> None:
+
+def _handle_message_deleted(
+    channel_id: str,
+    channel_name: str,
+    event: Dict[str, Any],
+    hydra: HydraDBClient,
+    slack: SlackClientWrapper,
+    *,
+    workspace_id: str = "",
+) -> None:
     """
-    Remove a deleted message from the local ingestion state.
+    Handle a message_deleted event.
 
-    Note: HydraDB has no delete endpoint, so the document remains searchable
-    in the vector store. Removing it from state at least ensures polling won't
-    attempt to re-ingest it and the state file stays consistent.
+    - Standalone message or thread parent: delete from HydraDB and remove from state.
+    - Thread reply: re-upload the thread so the stored doc reflects current state
+      (Slack's replies API excludes the deleted reply), then delete the stale HydraDB
+      doc using delete-after-reupload to avoid a data hole on upload failure.
     """
     deleted_ts = event.get("deleted_ts") or (event.get("previous_message") or {}).get("ts")
     if not deleted_ts:
         logger.debug("realtime_message_deleted_no_ts")
         return
 
+    previous = event.get("previous_message") or {}
+    thread_ts = previous.get("thread_ts")
+    is_reply = bool(thread_ts) and thread_ts != deleted_ts
+
+    if is_reply:
+        # Re-upload the thread (Slack returns replies excluding the deleted one),
+        # then delete the now-stale HydraDB doc only if re-upload succeeded.
+        thread_stable_key = stable_key_for_thread(channel_id, thread_ts)
+        with _state_lock:
+            old_entry = IngestionState(STATE_PATH).get(thread_stable_key)
+        old_source_id = (old_entry or {}).get("source_id")
+        old_uploaded_at = (old_entry or {}).get("uploaded_at")
+
+        _ingest_thread(slack, hydra, channel_id, channel_name, thread_ts, event, workspace_id=workspace_id)
+
+        with _state_lock:
+            new_entry = IngestionState(STATE_PATH).get(thread_stable_key)
+        if (new_entry or {}).get("uploaded_at") != old_uploaded_at and old_source_id:
+            hydra.delete_knowledge([old_source_id])
+        logger.info(
+            "realtime_reply_deleted_thread_refreshed",
+            extra={"thread_stable_key": thread_stable_key, "deleted_ts": deleted_ts},
+        )
+        return
+
+    # Standalone message or thread parent: remove the whole doc.
     stable_key = stable_key_for_message(channel_id, deleted_ts)
+
+    # Delete from HydraDB first (while source_id is still in state).
+    _hydradb_delete_by_stable_key(hydra, stable_key)
+
+    # Remove from state regardless of whether HydraDB delete succeeded.
     with _state_lock:
         with IngestionState.locked(STATE_PATH) as state:
             removed = state.remove(stable_key)
 
     if removed:
-        logger.info(
-            "realtime_message_deleted",
-            extra={
-                "stable_key": stable_key,
-                "hydradb_note": "document remains in vector store (no delete endpoint)",
-            },
-        )
+        logger.info("realtime_message_deleted", extra={"stable_key": stable_key})
     else:
         logger.debug("realtime_message_deleted_not_tracked", extra={"stable_key": stable_key})
 
