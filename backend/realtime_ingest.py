@@ -335,15 +335,14 @@ def _process_slack_payload_inner(payload: Dict[str, Any]) -> None:
         )
         return
 
-    # Filter out edits, deletes, joins/leaves, bot messages, and
-    # anything ingestion.normalize flags as noise. This matches what
-    # the polling path does in process_channel.
     subtype = event.get("subtype")
-    if subtype in ("message_changed", "message_deleted", "bot_message", "channel_join", "channel_leave"):
-        logger.debug(
-            'realtime_event_ignored',
-            extra={'subtype': subtype},
-        )
+
+    # Edits and deletes are handled before the workspace/channel routing
+    # below because they need the same clients (slack, hydra) already
+    # resolved. We defer to after that block — see the routing calls below.
+
+    if subtype in ("bot_message", "channel_join", "channel_leave"):
+        logger.debug('realtime_event_ignored', extra={'subtype': subtype})
         return
     if is_noise(event):
         logger.debug(
@@ -429,14 +428,22 @@ def _process_slack_payload_inner(payload: Dict[str, Any]) -> None:
             extra={'reason': 'own_bot_user'},
         )
         return
-    if not (event.get("text") or "").strip():
-        logger.debug(
-            'realtime_event_ignored',
-            extra={'reason': 'empty_text'},
-        )
-        return
+    # Edit/delete events carry no top-level text; exempt them before the
+    # empty-text guard so they reach the handlers below.
+    if subtype not in ("message_changed", "message_deleted"):
+        if not (event.get("text") or "").strip():
+            logger.debug('realtime_event_ignored', extra={'reason': 'empty_text'})
+            return
 
     channel_name = fetch_channel_name(slack, channel_id)
+
+    # ----- Route edit/delete subtypes -----
+    if subtype == "message_changed":
+        _handle_message_changed(slack, hydra, channel_id, channel_name, event, workspace_id=workspace_id)
+        return
+    if subtype == "message_deleted":
+        _handle_message_deleted(channel_id, event)
+        return
 
     # ----- Distinguish standalone vs thread -----
     # A message belongs to a thread if `thread_ts` is set AND differs
@@ -481,6 +488,7 @@ def _ingest_standalone(
     message: Dict[str, Any],
     *,
     workspace_id: str = "",
+    force_reupload: bool = False,
 ) -> None:
     """Build + upload a single standalone-message doc."""
     ts = message.get("ts", "")
@@ -488,7 +496,7 @@ def _ingest_standalone(
 
     with _state_lock:
         state = IngestionState(STATE_PATH)
-        if state.has(stable_key) or stable_key in _in_flight:
+        if (not force_reupload and state.has(stable_key)) or stable_key in _in_flight:
             logger.debug(
                 'realtime_already_ingested',
                 extra={'stable_key': stable_key},
@@ -630,6 +638,64 @@ def _ingest_thread(
                     "error": type(e).__name__,
                 },
             )
+
+
+def _handle_message_changed(
+    slack: SlackClientWrapper,
+    hydra: HydraDBClient,
+    channel_id: str,
+    channel_name: str,
+    event: Dict[str, Any],
+    *,
+    workspace_id: str = "",
+) -> None:
+    """Re-upload an edited message so HydraDB reflects its current text."""
+    updated = event.get("message")
+    if not isinstance(updated, dict):
+        logger.debug("realtime_message_changed_no_message")
+        return
+    if is_noise(updated):
+        return
+    thread_ts = updated.get("thread_ts")
+    if thread_ts:
+        # Thread parent or reply was edited — re-upload the full thread so
+        # every chunk reflects the current state of all messages.
+        _ingest_thread(slack, hydra, channel_id, channel_name, thread_ts, updated, workspace_id=workspace_id)
+    else:
+        _ingest_standalone(
+            slack, hydra, channel_id, channel_name, updated,
+            workspace_id=workspace_id, force_reupload=True,
+        )
+
+
+def _handle_message_deleted(channel_id: str, event: Dict[str, Any]) -> None:
+    """
+    Remove a deleted message from the local ingestion state.
+
+    Note: HydraDB has no delete endpoint, so the document remains searchable
+    in the vector store. Removing it from state at least ensures polling won't
+    attempt to re-ingest it and the state file stays consistent.
+    """
+    deleted_ts = event.get("deleted_ts") or (event.get("previous_message") or {}).get("ts")
+    if not deleted_ts:
+        logger.debug("realtime_message_deleted_no_ts")
+        return
+
+    stable_key = stable_key_for_message(channel_id, deleted_ts)
+    with _state_lock:
+        with IngestionState.locked(STATE_PATH) as state:
+            removed = state.remove(stable_key)
+
+    if removed:
+        logger.info(
+            "realtime_message_deleted",
+            extra={
+                "stable_key": stable_key,
+                "hydradb_note": "document remains in vector store (no delete endpoint)",
+            },
+        )
+    else:
+        logger.debug("realtime_message_deleted_not_tracked", extra={"stable_key": stable_key})
 
 
 def _extract_memory_from_prepared(
