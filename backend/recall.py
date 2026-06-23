@@ -1216,6 +1216,29 @@ def prepare_recall_context(
                 },
             )
             memory_rows = []
+        # Phase 16: derive an importance score per memory row
+        # (recurrence + recency + owner-presence + cluster-size) so
+        # important memories carry a higher card score than the old
+        # flat 0.5. Defensive: any failure inside the importance
+        # computation degrades to the legacy 0.5 baseline so memory
+        # injection itself can never break.
+        importance_by_id: Dict[Any, float] = {}
+        if memory_rows:
+            try:
+                # Deferred import for the same reason as memory_store
+                # above: tests mock at this module boundary.
+                from memory_intelligence import compute_memory_importance  # noqa: PLC0415
+
+                importance_by_id = compute_memory_importance(memory_rows) or {}
+            except Exception as e:  # noqa: BLE001
+                logger.debug(
+                    "memory_importance_skipped",
+                    extra={
+                        "workspace_id": workspace_id,
+                        "error": type(e).__name__,
+                    },
+                )
+                importance_by_id = {}
         memory_start_index = len(chunks_with_meta) + 1
         for offset, row in enumerate(memory_rows):
             content = (row.get("content") or "").strip()
@@ -1226,6 +1249,15 @@ def prepare_recall_context(
             source_stable_key = row.get("source_stable_key") or ""
             source_ts = row.get("source_timestamp")
             ts_float = _coerce_to_unix_seconds(source_ts) if source_ts else None
+            # Phase 16: importance-aware score. When the importance
+            # computation succeeded for this row, scale it into
+            # [0.3, 1.0]; otherwise keep the legacy neutral 0.5 so
+            # pre-Phase-16 behavior (and its tests) is preserved.
+            _imp = importance_by_id.get(row.get("id"))
+            if isinstance(_imp, (int, float)) and 0.0 <= float(_imp) <= 1.0:
+                memory_score = round(0.3 + 0.7 * float(_imp), 6)
+            else:
+                memory_score = 0.5  # neutral semantic baseline
             # Build a memory-flavored source card. The `source_kind`
             # field carries the ORIGINAL connector ("slack"/"gmail")
             # so existing source-filter logic keeps working --
@@ -1235,7 +1267,7 @@ def prepare_recall_context(
             card: Dict[str, Any] = {
                 "index": memory_start_index + offset,
                 "source": source_stable_key or f"memory:{kind}",
-                "score": 0.5,  # neutral semantic baseline
+                "score": memory_score,
                 "stable_key": source_stable_key,
                 "source_kind": source_kind,
                 "document_type": f"memory_{kind}" if kind else "memory",

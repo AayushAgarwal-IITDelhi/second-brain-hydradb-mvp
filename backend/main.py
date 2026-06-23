@@ -648,6 +648,41 @@ def query(
         if cached is not None:
             return cached
 
+    # Phase 16: intelligence query routing. A narrow regex classifier
+    # detects ownership / status-blocker / decision-history / timeline
+    # questions and answers them from structured memory with citations
+    # to source_stable_keys. The contract is strict: when the question
+    # matches no intent (zero I/O in that case), or matches but has no
+    # supporting memory data, or anything fails, the router returns
+    # None and this route proceeds byte-identically to the existing
+    # retrieval pipeline below. Stateless queries only -- follow-ups
+    # need the conversation history the LLM path provides. Routed
+    # answers are never cached (they're cheap to recompute and track
+    # live memory state).
+    if not history:
+        intel_result: Optional[Dict[str, Any]] = None
+        try:
+            from memory_intelligence import route_intelligence_query  # noqa: PLC0415
+
+            intel_result = route_intelligence_query(
+                workspace_id=workspace.workspace_id,
+                question=req.question,
+            )
+        except Exception as _e:  # noqa: BLE001
+            logger.debug(
+                "intelligence_route_skipped",
+                extra={"error": type(_e).__name__},
+            )
+            intel_result = None
+        if intel_result is not None:
+            debug = dict(intel_result.get("debug") or {})
+            debug["cache_hit"] = False
+            if resolved["date_query_debug"] is not None:
+                debug["date_query"] = resolved["date_query_debug"]
+            if rewrite["rewrite_debug"] is not None:
+                debug["query_rewrite"] = rewrite["rewrite_debug"]
+            return {**intel_result, "debug": debug}
+
     result = answer_question(
         question=req.question,
         top_k=req.top_k,
@@ -1598,6 +1633,69 @@ def analytics_insights(
         min_mentions=3,
     )
     return {**insights, "recurring": recurring}
+
+
+# ---------- Phase 16: memory intelligence ---------- #
+# Three read-only endpoints under /api/intelligence. Each one
+# delegates to memory_intelligence, which derives everything on read
+# from extracted_memories -- workspace-scoped, defensive, no writes.
+
+
+@app.get("/api/intelligence/graph")
+def intelligence_graph(
+    days: int = 90,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Canonical entity relationship graph: people / projects / services
+    / channels / decisions / action items as nodes, recurrence-x-
+    recency-weighted co-occurrence edges, cross-source flags, and the
+    full alias map for traceability.
+    """
+    from memory_intelligence import relationship_graph  # noqa: PLC0415
+
+    return relationship_graph(
+        workspace_id=workspace.workspace_id,
+        days=_clamp_days(days, default=90, max_days=365),
+    )
+
+
+@app.get("/api/intelligence/projects")
+def intelligence_projects(
+    days: int = 90,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Inferred project intelligence: active/dormant status, owners,
+    timeline, linked decisions, blockers, unresolved tasks.
+    """
+    from memory_intelligence import project_intelligence  # noqa: PLC0415
+
+    return {
+        "projects": project_intelligence(
+            workspace_id=workspace.workspace_id,
+            days=_clamp_days(days, default=90, max_days=365),
+        )
+    }
+
+
+@app.get("/api/intelligence/conversation")
+def intelligence_conversation(
+    decision: str,
+    days: int = 180,
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, Any]:
+    """
+    Conversation reconstruction: walk backward from the decision
+    matching `decision` through the pre-dating co-occurring memories.
+    """
+    from memory_intelligence import reconstruct_conversation  # noqa: PLC0415
+
+    return reconstruct_conversation(
+        workspace_id=workspace.workspace_id,
+        decision=decision,
+        days=_clamp_days(days, default=180, max_days=365),
+    )
 
 
 # ---------- Slack Connect (Phase 3) ---------- #
