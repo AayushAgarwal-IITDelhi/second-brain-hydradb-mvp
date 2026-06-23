@@ -521,9 +521,6 @@ def _ingest_standalone(
             # saves and releases automatically on exit.
             with IngestionState.locked(STATE_PATH) as state:
                 _record_successful_uploads(state, [prepared], response or {})
-                # Advance the per-channel watermark so the next polling pass
-                # doesn't re-fetch this message just to skip it.
-                state.set_last_synced_ts(channel_id, ts)
                 state.touch_last_ingested()
 
         # Phase 12: extract structured memory. Realtime path mirrors the
@@ -607,11 +604,6 @@ def _ingest_thread(
             # state.entries, so re-uploads correctly refresh the snippet /
             # uploaded_at / source_id without creating duplicates.
             _record_successful_uploads(state, [prepared], response or {})
-            # Advance per-channel watermark to the triggering event's ts so
-            # the next polling pass doesn't refetch this reply window.
-            trigger_ts = triggering_event.get("ts")
-            if trigger_ts:
-                state.set_last_synced_ts(channel_id, trigger_ts)
             state.touch_last_ingested()
 
     # Phase 12: extract structured memory. Re-extracting on a thread
