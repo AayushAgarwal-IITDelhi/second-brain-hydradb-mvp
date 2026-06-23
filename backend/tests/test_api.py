@@ -28,9 +28,21 @@ class TestPublicEndpoints:
         assert r.status_code == 200
 
     def test_health_response_shape(self, client):
-        body = client.get("/api/health").json()
-        assert body["status"] == "ok"
-        assert "service" in body
+        # /api/health is our detailed diagnostics endpoint.
+        # It always returns 200; status reflects aggregate health across checks.
+        # In the test environment real services are not available, so we mock
+        # all checks to return ok so the shape assertion is deterministic.
+        from unittest.mock import AsyncMock
+        from unittest.mock import patch as _patch
+
+        from health import STATUS_OK, HealthResult, _get_registry
+
+        ok_result = HealthResult(status=STATUS_OK, latency_ms=1.0)
+        with _patch("health._run_check", new=AsyncMock(side_effect=lambda c: (c.name, ok_result))):
+            body = client.get("/api/health").json()
+        assert body["status"] in ("healthy", "degraded", "unhealthy")
+        assert "checks" in body
+        assert "timestamp" in body
 
     def test_docs_endpoint_available(self, client):
         r = client.get("/docs")
@@ -197,6 +209,7 @@ class TestQueryAuth:
     # tests/test_supabase_auth.py::TestRequireUserFailures — see the
     # expired / wrong-signature / wrong-audience / malformed cases there.
 
+
 # ── /api/query/stream ─────────────────────────────────────────────────────
 
 
@@ -231,14 +244,20 @@ class TestQueryStream:
             yield " world"
 
         mock_sources = [
-            {"index": 1, "source": "general", "channel": "general",
-             "user": "Alice", "snippet": "snippet", "stable_key": "k1",
-             "permalink": "https://slack.com/1"}
+            {
+                "index": 1,
+                "source": "general",
+                "channel": "general",
+                "user": "Alice",
+                "snippet": "snippet",
+                "stable_key": "k1",
+                "permalink": "https://slack.com/1",
+            }
         ]
 
-        with mp("main.prepare_recall_context") as mock_ctx, \
-             mp("main.stream_grounded_answer", side_effect=_fake_stream), \
-             mp("main.finalize_answer") as mock_fin:
+        with mp("main.prepare_recall_context") as mock_ctx, mp(
+            "main.stream_grounded_answer", side_effect=_fake_stream
+        ), mp("main.finalize_answer") as mock_fin:
             mock_ctx.return_value = {
                 "ready": True,
                 "context_text": "[1] content",
@@ -286,6 +305,7 @@ class TestQueryStream:
 
     def test_stream_hydradb_error_emits_error_event(self, client):
         from errors import HydraDBError
+
         with patch("main.prepare_recall_context", side_effect=HydraDBError("down")):
             r = client.post(
                 "/api/query/stream",
@@ -314,7 +334,10 @@ class TestAdminStatus:
 # ── /slack/events ─────────────────────────────────────────────────────────
 class TestSlackEvents:
     def _make_sig(self, body: bytes, ts: int) -> str:
-        import hashlib, hmac, os
+        import hashlib
+        import hmac
+        import os
+
         secret = os.environ.get("SLACK_SIGNING_SECRET", "test-slack-signing-secret")
         base = b"v0:" + str(ts).encode() + b":" + body
         digest = hmac.new(secret.encode(), base, hashlib.sha256).hexdigest()
@@ -322,6 +345,7 @@ class TestSlackEvents:
 
     def _headers(self, body: bytes) -> dict:
         import time
+
         ts = int(time.time())
         return {
             "X-Slack-Signature": self._make_sig(body, ts),
@@ -329,10 +353,12 @@ class TestSlackEvents:
         }
 
     def test_url_verification_challenge(self, client):
-        body = json.dumps({
-            "type": "url_verification",
-            "challenge": "test-challenge-xyz",
-        }).encode()
+        body = json.dumps(
+            {
+                "type": "url_verification",
+                "challenge": "test-challenge-xyz",
+            }
+        ).encode()
         r = client.post("/slack/events", content=body, headers=self._headers(body))
         assert r.status_code == 200
         assert "test-challenge-xyz" in r.text
@@ -340,6 +366,7 @@ class TestSlackEvents:
     def test_invalid_signature_returns_401(self, client):
         body = b'{"type":"event_callback"}'
         import time
+
         r = client.post(
             "/slack/events",
             content=body,
@@ -351,11 +378,13 @@ class TestSlackEvents:
         assert r.status_code == 401
 
     def test_event_callback_acks_200(self, client):
-        payload = json.dumps({
-            "type": "event_callback",
-            "event_id": "Ev_unique_test_1",
-            "event": {"type": "message", "text": "hello", "channel": "C123"},
-        }).encode()
+        payload = json.dumps(
+            {
+                "type": "event_callback",
+                "event_id": "Ev_unique_test_1",
+                "event": {"type": "message", "text": "hello", "channel": "C123"},
+            }
+        ).encode()
         with patch("realtime_ingest.process_slack_event"):
             r = client.post(
                 "/slack/events",
@@ -367,11 +396,13 @@ class TestSlackEvents:
 
     def test_duplicate_event_id_acks_without_reprocessing(self, client):
         """Second delivery of same event_id should be ack'd but not re-ingested."""
-        payload = json.dumps({
-            "type": "event_callback",
-            "event_id": "Ev_duplicate_test",
-            "event": {"type": "message", "text": "hello", "channel": "C123"},
-        }).encode()
+        payload = json.dumps(
+            {
+                "type": "event_callback",
+                "event_id": "Ev_duplicate_test",
+                "event": {"type": "message", "text": "hello", "channel": "C123"},
+            }
+        ).encode()
         with patch("realtime_ingest.process_slack_event") as mock_proc:
             # Send twice
             for _ in range(2):
@@ -395,9 +426,12 @@ class TestSlackEvents:
     def test_invalid_json_body_returns_400(self, client):
         body = b"not valid json {"
         import time
+
         ts = int(time.time())
         secret = os.environ.get("SLACK_SIGNING_SECRET", "test-slack-signing-secret")
-        import hashlib, hmac as _hmac
+        import hashlib
+        import hmac as _hmac
+
         base = b"v0:" + str(ts).encode() + b":" + body
         digest = _hmac.new(secret.encode(), base, hashlib.sha256).hexdigest()
         r = client.post(

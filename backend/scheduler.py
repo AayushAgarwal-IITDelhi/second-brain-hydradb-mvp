@@ -49,6 +49,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from gmail_oauth import run_workspace_gmail_ingest
 from logging_config import get_logger
+from retry import RetryExhausted, retry
 from slack_oauth import run_workspace_ingest
 from supabase_client import (
     list_active_workspaces_with_gmail,
@@ -63,15 +64,11 @@ JOB_ID = "second-brain-ingestion"
 
 
 def auto_ingest_enabled() -> bool:
-    return os.getenv("AUTO_INGEST", "").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
+    return os.getenv("AUTO_INGEST", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def run_on_startup_enabled() -> bool:
-    return os.getenv("AUTO_INGEST_RUN_ON_STARTUP", "").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
+    return os.getenv("AUTO_INGEST_RUN_ON_STARTUP", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def interval_minutes() -> int:
@@ -95,10 +92,10 @@ def _slack_sweep() -> Dict[str, Any]:
     """
     workspaces = list_active_workspaces_with_slack()
     summary: Dict[str, Any] = {
-        "workspaces_total":   len(workspaces),
-        "workspaces_run":     0,
+        "workspaces_total": len(workspaces),
+        "workspaces_run": 0,
         "workspaces_skipped": 0,
-        "workspaces_failed":  0,
+        "workspaces_failed": 0,
     }
     if not workspaces:
         logger.info("scheduler_no_workspaces")
@@ -144,7 +141,7 @@ def _slack_sweep() -> Dict[str, Any]:
                 "scheduler_workspace_failed",
                 extra={
                     "workspace_id": workspace_id,
-                    "error":        type(e).__name__,
+                    "error": type(e).__name__,
                 },
                 exc_info=True,
             )
@@ -180,14 +177,14 @@ def _gmail_sweep() -> Dict[str, Any]:
     """
     rows = list_active_workspaces_with_gmail()
     summary: Dict[str, Any] = {
-        "connections_total":      len(rows),
-        "connections_run":        0,
-        "connections_failed":     0,
-        "messages_uploaded":      0,
+        "connections_total": len(rows),
+        "connections_run": 0,
+        "connections_failed": 0,
+        "messages_uploaded": 0,
         "incremental_label_count": 0,
-        "full_label_count":       0,
-        "invalidations":          0,
-        "refresh_tokens_used":    0,
+        "full_label_count": 0,
+        "invalidations": 0,
+        "refresh_tokens_used": 0,
     }
     if not rows:
         logger.info("scheduler_no_gmail_connections")
@@ -219,9 +216,9 @@ def _gmail_sweep() -> Dict[str, Any]:
             logger.error(
                 "scheduler_gmail_connection_failed",
                 extra={
-                    "workspace_id":  workspace_id,
+                    "workspace_id": workspace_id,
                     "connection_id": connection_id,
-                    "error":         type(e).__name__,
+                    "error": type(e).__name__,
                 },
                 exc_info=True,
             )
@@ -240,19 +237,19 @@ def _gmail_sweep() -> Dict[str, Any]:
         logger.info(
             "scheduler_gmail_connection_complete",
             extra={
-                "workspace_id":             workspace_id,
-                "connection_id":            connection_id,
-                "sync_mode_requested":      result.get("sync_mode_requested"),
-                "duration_ms":              result.get("duration_ms"),
-                "labels_processed":         result.get("labels_processed"),
-                "labels_skipped":           result.get("labels_skipped"),
-                "labels_failed":            result.get("labels_failed"),
-                "messages_uploaded":        result.get("messages_uploaded"),
-                "messages_failed":          result.get("messages_failed"),
-                "incremental_label_count":  result.get("incremental_label_count"),
-                "full_label_count":         result.get("full_label_count"),
-                "invalidations":            result.get("invalidations"),
-                "refresh_token_used":       result.get("refresh_token_used"),
+                "workspace_id": workspace_id,
+                "connection_id": connection_id,
+                "sync_mode_requested": result.get("sync_mode_requested"),
+                "duration_ms": result.get("duration_ms"),
+                "labels_processed": result.get("labels_processed"),
+                "labels_skipped": result.get("labels_skipped"),
+                "labels_failed": result.get("labels_failed"),
+                "messages_uploaded": result.get("messages_uploaded"),
+                "messages_failed": result.get("messages_failed"),
+                "incremental_label_count": result.get("incremental_label_count"),
+                "full_label_count": result.get("full_label_count"),
+                "invalidations": result.get("invalidations"),
+                "refresh_token_used": result.get("refresh_token_used"),
             },
         )
 
@@ -292,6 +289,8 @@ def _job_wrapper() -> None:
     try:
         run_all_workspaces_once()
         logger.info("scheduler_job_finished")
+    except RetryExhausted as e:
+        logger.error('scheduler_job_retry_exhausted', extra={'error': str(e)})
     except Exception as e:  # noqa: BLE001
         logger.error(
             "scheduler_job_failed",
@@ -321,8 +320,8 @@ def start_scheduler() -> None:
         trigger="interval",
         minutes=minutes,
         id=JOB_ID,
-        max_instances=1,        # never run two ingestions in parallel
-        coalesce=True,          # if we fall behind, run once not N times
+        max_instances=1,  # never run two ingestions in parallel
+        coalesce=True,  # if we fall behind, run once not N times
         replace_existing=True,
     )
     _scheduler.start()

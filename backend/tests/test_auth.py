@@ -62,15 +62,18 @@ class TestRequireApiKey:
 class TestAuthHelpers:
     def test_expected_api_key_returns_none_when_unset(self):
         from auth import _expected_api_key
+
         with patch.dict(os.environ, {"APP_API_KEY": ""}):
             assert _expected_api_key() is None
 
     def test_expected_api_key_strips_whitespace(self):
         from auth import _expected_api_key
+
         with patch.dict(os.environ, {"APP_API_KEY": "  mykey  "}):
             assert _expected_api_key() == "mykey"
 
     def test_expected_api_key_returns_value(self):
         from auth import _expected_api_key
+
         with patch.dict(os.environ, {"APP_API_KEY": "supersecret"}):
             assert _expected_api_key() == "supersecret"

@@ -27,6 +27,7 @@ Conversation history note:
 import os
 from typing import Any, List, Optional
 
+import openai
 from openai import APITimeoutError, OpenAI
 
 from errors import LLMError, UpstreamTimeoutError
@@ -35,6 +36,25 @@ from prompts import (
     format_conversation_history,
     system_prompt_for_mode,
 )
+from retry import RetryExhausted, retry
+
+
+@retry(
+    service="llm",
+    max_attempts=3,
+    initial_delay=1.0,
+    retryable_exceptions=(
+        openai.APITimeoutError,
+        openai.APIConnectionError,
+        openai.InternalServerError,
+        openai.RateLimitError,
+    ),
+    # 401/403 are in NON_RETRYABLE_STATUS_CODES; the retry decorator will
+    # also block them via status-code inspection even without listing them here.
+)
+def _create_completion(client: OpenAI, **kwargs):  # type: ignore[return]
+    """Thin wrapper so the retry decorator operates below the exception translator."""
+    return client.chat.completions.create(**kwargs)
 
 
 def _build_client() -> OpenAI:
@@ -112,18 +132,24 @@ def generate_grounded_answer(
 
     try:
         client = _build_client()
-        response = client.chat.completions.create(
+        response = _create_completion(
+            client,
             model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_message},
+                {"role": "user", "content": user_message},
             ],
             temperature=0.1,
             max_tokens=max_tokens,
         )
     except APITimeoutError as e:
-        raise UpstreamTimeoutError(
-            log_context=f"LLM timeout: {type(e).__name__}"
+        raise UpstreamTimeoutError(log_context=f"LLM timeout: {type(e).__name__}")
+    except RetryExhausted as e:
+        # Retries exhausted — preserve the timeout signal if that was the root cause.
+        if isinstance(e.__cause__, APITimeoutError):
+            raise UpstreamTimeoutError(log_context=f"LLM timeout after retries: {type(e.__cause__).__name__}") from e
+        raise LLMError(
+            log_context=f"LLM call failed after retries: {type(e.__cause__).__name__ if e.__cause__ else type(e).__name__}"
         )
     except Exception as e:  # noqa: BLE001 -- surface any SDK error to the API
         # Log only the exception class name — never the API key, prompt,
@@ -175,16 +201,14 @@ def stream_grounded_answer(
             model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_message},
+                {"role": "user", "content": user_message},
             ],
             temperature=0.1,
             max_tokens=max_tokens,
             stream=True,
         )
     except APITimeoutError as e:
-        raise UpstreamTimeoutError(
-            log_context=f"LLM stream timeout: {type(e).__name__}"
-        )
+        raise UpstreamTimeoutError(log_context=f"LLM stream timeout: {type(e).__name__}")
     except Exception as e:  # noqa: BLE001
         raise LLMError(log_context=f"LLM stream open failed: {type(e).__name__}")
 
@@ -198,8 +222,6 @@ def stream_grounded_answer(
             if piece:
                 yield piece
     except APITimeoutError as e:
-        raise UpstreamTimeoutError(
-            log_context=f"LLM stream timeout: {type(e).__name__}"
-        )
+        raise UpstreamTimeoutError(log_context=f"LLM stream timeout: {type(e).__name__}")
     except Exception as e:  # noqa: BLE001
         raise LLMError(log_context=f"LLM stream iter failed: {type(e).__name__}")

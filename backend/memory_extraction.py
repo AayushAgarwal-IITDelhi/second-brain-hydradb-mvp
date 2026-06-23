@@ -86,11 +86,13 @@ def extract_all(
     out.extend(extract_entities(body, source_kind=source_kind))
     summary = summarize(body)
     if summary:
-        out.append(_record(
-            kind="summary",
-            content=summary,
-            metadata={"sentence_count": summary.count(". ") + 1},
-        ))
+        out.append(
+            _record(
+                kind="summary",
+                content=summary,
+                metadata={"sentence_count": summary.count(". ") + 1},
+            )
+        )
     return out
 
 
@@ -102,7 +104,7 @@ def extract_all(
 # line never produces a false action item.
 
 _SLACK_HEADING_RE = re.compile(r"^#\s*Slack\s+(?:Message|Thread)\b", re.IGNORECASE | re.MULTILINE)
-_GMAIL_HEADING_RE = re.compile(r"^#\s*Email\b",                      re.IGNORECASE | re.MULTILINE)
+_GMAIL_HEADING_RE = re.compile(r"^#\s*Email\b", re.IGNORECASE | re.MULTILINE)
 
 # Header-style lines (`Key: value` immediately under the heading)
 # that we always drop.
@@ -131,7 +133,7 @@ def strip_markdown_header(text: str) -> str:
     for i, line in enumerate(lines):
         stripped = line.strip()
         # Heading line opens the header section.
-        if (_SLACK_HEADING_RE.match(stripped) or _GMAIL_HEADING_RE.match(stripped)):
+        if _SLACK_HEADING_RE.match(stripped) or _GMAIL_HEADING_RE.match(stripped):
             in_header = True
             continue
         if in_header:
@@ -185,8 +187,7 @@ _ACTION_REQUEST_RE = re.compile(
 
 # Pattern 4: assignment style -- "Assigned to X:" / "Owner: X"
 _ACTION_ASSIGNED_RE = re.compile(
-    r"\b(?:assigned to|owner|assignee)\s*[:\-]?\s*"
-    r"([A-Z][a-zA-Z][a-zA-Z\-']{1,28})\s*[:\-]?\s*(.{6,200})",
+    r"\b(?:assigned to|owner|assignee)\s*[:\-]?\s*" r"([A-Z][a-zA-Z][a-zA-Z\-']{1,28})\s*[:\-]?\s*(.{6,200})",
     re.IGNORECASE,
 )
 
@@ -219,12 +220,14 @@ def extract_action_items(
         if key in seen:
             return
         seen.add(key)
-        out.append(_record(
-            kind="action_item",
-            content=task,
-            owner=(owner or default_owner or None),
-            metadata={"pattern": pattern},
-        ))
+        out.append(
+            _record(
+                kind="action_item",
+                content=task,
+                owner=(owner or default_owner or None),
+                metadata={"pattern": pattern},
+            )
+        )
 
     # 1. Explicit markers.
     for m in _ACTION_MARKER_RE.finditer(body):
@@ -236,12 +239,14 @@ def extract_action_items(
         # Stitch the verb back into the action so "Rahul will deploy
         # Friday" becomes content "deploy Friday" instead of just
         # "Friday".
-        verb_span = body[m.start(): m.start(2)]
+        verb_span = body[m.start() : m.start(2)]
         verb_only = verb_span.split(owner_candidate, 1)[-1].strip()
         # Drop the leading auxiliary ("will" / "to" / "should" / ...).
         verb_only = re.sub(
             r"^(?:will|is going to|plans? to|needs? to|should|to)\s+",
-            "", verb_only.strip(), flags=re.IGNORECASE,
+            "",
+            verb_only.strip(),
+            flags=re.IGNORECASE,
         )
         full = (verb_only + " " + action_phrase).strip()
         _emit(full, owner_candidate, "owner_verb")
@@ -304,11 +309,13 @@ def extract_decisions(text: str) -> List[Dict[str, Any]]:
             if key in seen:
                 continue
             seen.add(key)
-            out.append(_record(
-                kind="decision",
-                content=phrase,
-                metadata={"pattern_id": _DECISION_PATTERNS.index(pat)},
-            ))
+            out.append(
+                _record(
+                    kind="decision",
+                    content=phrase,
+                    metadata={"pattern_id": _DECISION_PATTERNS.index(pat)},
+                )
+            )
     return out
 
 
@@ -323,37 +330,114 @@ def extract_decisions(text: str) -> List[Dict[str, Any]]:
 #   - PascalCase / known_service_keywords -> service
 #   - everything else capitalized -> project
 
-_AT_MENTION_RE   = re.compile(r"<@([A-Z][A-Z0-9]+)>|@([A-Za-z][A-Za-z0-9_\-\.]{1,30})")
+_AT_MENTION_RE = re.compile(r"<@([A-Z][A-Z0-9]+)>|@([A-Za-z][A-Za-z0-9_\-\.]{1,30})")
 _HASH_CHANNEL_RE = re.compile(r"<#[A-Z][A-Z0-9]+\|([a-z0-9_\-]+)>|#([a-z][a-z0-9_\-]{1,40})")
-_CODE_TERM_RE    = re.compile(r"`([a-zA-Z][a-zA-Z0-9_/\-\.]{1,40})`")
+_CODE_TERM_RE = re.compile(r"`([a-zA-Z][a-zA-Z0-9_/\-\.]{1,40})`")
 # Two-or-more capitalized words in a row, OR a single PascalCase token.
-_PROPER_NOUN_RE  = re.compile(
+_PROPER_NOUN_RE = re.compile(
     r"\b("
-    r"(?:[A-Z][a-z]+(?:[\-\s][A-Z][a-z]+){0,3})"        # "Kafka", "Project Apollo"
-    r"|[A-Z]{2,}(?:[A-Z][a-z]+)?"                       # "AWS", "PostgreSQL"
+    r"(?:[A-Z][a-z]+(?:[\-\s][A-Z][a-z]+){0,3})"  # "Kafka", "Project Apollo"
+    r"|[A-Z]{2,}(?:[A-Z][a-z]+)?"  # "AWS", "PostgreSQL"
     r")\b"
 )
 
 # Words to exclude from "project" classification because they're
 # almost always grammatical noise -- the start of a sentence.
-_NOUN_BLOCKLIST = frozenset({
-    "I", "We", "The", "This", "That", "These", "Those", "Our", "Your",
-    "It", "He", "She", "They", "But", "And", "Or", "If", "When", "Where",
-    "Who", "What", "Why", "How", "Yes", "No", "OK", "Okay", "Hi", "Hey",
-    "Hello", "Thanks", "Today", "Tomorrow", "Yesterday", "Monday",
-    "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
-    "TODO", "ACTION", "TASK", "FYI", "BTW", "PR", "PRs",
-})
+_NOUN_BLOCKLIST = frozenset(
+    {
+        "I",
+        "We",
+        "The",
+        "This",
+        "That",
+        "These",
+        "Those",
+        "Our",
+        "Your",
+        "It",
+        "He",
+        "She",
+        "They",
+        "But",
+        "And",
+        "Or",
+        "If",
+        "When",
+        "Where",
+        "Who",
+        "What",
+        "Why",
+        "How",
+        "Yes",
+        "No",
+        "OK",
+        "Okay",
+        "Hi",
+        "Hey",
+        "Hello",
+        "Thanks",
+        "Today",
+        "Tomorrow",
+        "Yesterday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+        "TODO",
+        "ACTION",
+        "TASK",
+        "FYI",
+        "BTW",
+        "PR",
+        "PRs",
+    }
+)
 
 # Hints for "service" classification when we see PascalCase.
-_SERVICE_HINT_TERMS = frozenset({
-    "kafka", "redis", "postgres", "postgresql", "mysql", "snowflake",
-    "kubernetes", "k8s", "docker", "elasticsearch", "rabbitmq", "nginx",
-    "stripe", "twilio", "sendgrid", "datadog", "sentry", "cloudflare",
-    "vercel", "railway", "render", "fly", "aws", "gcp", "azure",
-    "github", "gitlab", "supabase", "hydradb", "openai", "anthropic",
-    "slack", "gmail", "notion", "linear", "asana", "jira",
-})
+_SERVICE_HINT_TERMS = frozenset(
+    {
+        "kafka",
+        "redis",
+        "postgres",
+        "postgresql",
+        "mysql",
+        "snowflake",
+        "kubernetes",
+        "k8s",
+        "docker",
+        "elasticsearch",
+        "rabbitmq",
+        "nginx",
+        "stripe",
+        "twilio",
+        "sendgrid",
+        "datadog",
+        "sentry",
+        "cloudflare",
+        "vercel",
+        "railway",
+        "render",
+        "fly",
+        "aws",
+        "gcp",
+        "azure",
+        "github",
+        "gitlab",
+        "supabase",
+        "hydradb",
+        "openai",
+        "anthropic",
+        "slack",
+        "gmail",
+        "notion",
+        "linear",
+        "asana",
+        "jira",
+    }
+)
 
 
 def extract_entities(
@@ -381,11 +465,13 @@ def extract_entities(
         if key in seen:
             return
         seen.add(key)
-        out.append(_record(
-            kind="entity",
-            content=content,
-            entity_type=etype,
-        ))
+        out.append(
+            _record(
+                kind="entity",
+                content=content,
+                entity_type=etype,
+            )
+        )
 
     # People: Slack U-id mentions and @name mentions.
     for m in _AT_MENTION_RE.finditer(body):
@@ -454,7 +540,7 @@ def summarize(text: str) -> Optional[str]:
     pieces: List[str] = []
     total = 0
     for s in sentences[:_SUMMARY_MAX_SENTENCES]:
-        s = " ".join(s.split())   # collapse internal whitespace
+        s = " ".join(s.split())  # collapse internal whitespace
         if not s:
             continue
         if total + len(s) + 1 > _SUMMARY_MAX_CHARS:
@@ -519,10 +605,10 @@ def _record(
 ) -> Dict[str, Any]:
     """Build the persistence-layer-ready record shape."""
     return {
-        "kind":         kind,
-        "content":      content,
+        "kind": kind,
+        "content": content,
         "content_hash": _content_hash(content),
-        "owner":        owner,
-        "entity_type":  entity_type,
-        "metadata":     dict(metadata or {}),
+        "owner": owner,
+        "entity_type": entity_type,
+        "metadata": dict(metadata or {}),
     }

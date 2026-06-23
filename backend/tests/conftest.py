@@ -49,7 +49,7 @@ os.environ.setdefault(
 # Gmail Connect (Phase 8) — placeholder OAuth credentials. Separate
 # state secret so tests can prove the Gmail flow doesn't accept tokens
 # signed by the Slack secret (and vice versa).
-os.environ.setdefault("GMAIL_CLIENT_ID",     "test-gmail-client-id")
+os.environ.setdefault("GMAIL_CLIENT_ID", "test-gmail-client-id")
 os.environ.setdefault("GMAIL_CLIENT_SECRET", "test-gmail-client-secret")
 os.environ.setdefault(
     "GMAIL_REDIRECT_URI",
@@ -104,8 +104,9 @@ def _patched_app():
         patch("scheduler.start_scheduler"),
         patch("scheduler.stop_scheduler"),
     ):
-        import main as _main  # noqa: PLC0415
         from fastapi import Header, HTTPException, status  # noqa: PLC0415
+
+        import main as _main  # noqa: PLC0415
         from auth_supabase import (  # noqa: PLC0415
             SupabaseUser,
             WorkspaceContext,
@@ -116,16 +117,10 @@ def _patched_app():
         _TEST_USER = SupabaseUser(id=TEST_USER_ID, email=TEST_USER_EMAIL)
 
         def _override_require_user(
-            authorization: Optional[str] = Header(
-                default=None, alias="Authorization"
-            ),
-            x_api_key: Optional[str] = Header(
-                default=None, alias="X-API-Key"
-            ),
+            authorization: Optional[str] = Header(default=None, alias="Authorization"),
+            x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
         ) -> SupabaseUser:
-            if (authorization and authorization.strip()) or (
-                x_api_key and x_api_key.strip()
-            ):
+            if (authorization and authorization.strip()) or (x_api_key and x_api_key.strip()):
                 return _TEST_USER
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -133,22 +128,15 @@ def _patched_app():
             )
 
         def _override_require_workspace(
-            authorization: Optional[str] = Header(
-                default=None, alias="Authorization"
-            ),
-            x_api_key: Optional[str] = Header(
-                default=None, alias="X-API-Key"
-            ),
-            x_workspace_id: Optional[str] = Header(
-                default=None, alias="X-Workspace-Id"
-            ),
+            authorization: Optional[str] = Header(default=None, alias="Authorization"),
+            x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+            x_workspace_id: Optional[str] = Header(default=None, alias="X-Workspace-Id"),
         ) -> WorkspaceContext:
             user = _override_require_user(
-                authorization=authorization, x_api_key=x_api_key,
+                authorization=authorization,
+                x_api_key=x_api_key,
             )
-            workspace_id = (
-                (x_workspace_id or "").strip() or TEST_WORKSPACE_ID
-            )
+            workspace_id = (x_workspace_id or "").strip() or TEST_WORKSPACE_ID
             return WorkspaceContext(
                 user=user,
                 workspace_id=workspace_id,
@@ -156,9 +144,7 @@ def _patched_app():
             )
 
         _main.app.dependency_overrides[require_user] = _override_require_user
-        _main.app.dependency_overrides[require_workspace] = (
-            _override_require_workspace
-        )
+        _main.app.dependency_overrides[require_workspace] = _override_require_workspace
 
         return _main.app
 

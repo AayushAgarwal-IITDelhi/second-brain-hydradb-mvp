@@ -24,7 +24,6 @@ from typing import Optional
 
 from fastapi import Header, HTTPException, status
 
-
 API_KEY_HEADER_NAME = "X-API-Key"
 
 

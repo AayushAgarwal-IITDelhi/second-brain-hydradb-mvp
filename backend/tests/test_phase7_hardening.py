@@ -27,6 +27,7 @@ class TestSentryHooks:
     def test_init_sentry_no_dsn_returns_false(self, monkeypatch):
         # Reset the module-level cache so a previous test can't leak in.
         import observability
+
         observability._sentry_enabled = False
         monkeypatch.setenv("SENTRY_DSN", "")
         assert observability.init_sentry() is False
@@ -35,16 +36,19 @@ class TestSentryHooks:
     def test_capture_exception_is_noop_when_disabled(self):
         # Plain function call; the no-op path must never raise.
         import observability
+
         observability._sentry_enabled = False
         observability.capture_exception(RuntimeError("ignored"))
 
     def test_init_sentry_handles_missing_sdk(self, monkeypatch):
         import observability
+
         observability._sentry_enabled = False
         monkeypatch.setenv("SENTRY_DSN", "https://fake@example.com/1")
         # Simulate sentry-sdk not being installed by making the import
         # itself raise.
         import builtins
+
         real_import = builtins.__import__
 
         def _broken_import(name, *args, **kwargs):
@@ -62,7 +66,9 @@ class TestSentryHooks:
 class TestDeadLetter:
     def test_emit_dead_letter_logs_with_stable_event_name(self, caplog):
         import logging
+
         from observability import emit_dead_letter
+
         with caplog.at_level(logging.ERROR, logger="observability"):
             emit_dead_letter(
                 kind="slack_ingest_channel",
@@ -83,6 +89,7 @@ class TestDeadLetter:
 
     def test_emit_dead_letter_forwards_to_sentry_when_enabled(self):
         import observability
+
         observability._sentry_enabled = True
         captured = {}
 
@@ -104,7 +111,7 @@ class TestDeadLetter:
                 )
             assert captured["err"] is err
             assert captured["tags"] == {
-                "dead_letter":  "realtime_event",
+                "dead_letter": "realtime_event",
                 "workspace_id": "ws-2",
             }
             # Context fields land in `extra` for Sentry's debug view.
@@ -121,24 +128,27 @@ class TestDependencyChecks:
     def test_all_healthy_returns_ok_true(self):
         # All three checks succeed -> overall ok=True.
         import observability
+
         good_resp = MagicMock()
         good_resp.status_code = 200
-        with patch("observability.requests.get",     return_value=good_resp), \
-             patch("observability.requests.options", return_value=good_resp), \
-             patch("observability.requests.head",    return_value=good_resp):
+        with patch("observability.requests.get", return_value=good_resp), patch(
+            "observability.requests.options", return_value=good_resp
+        ), patch("observability.requests.head", return_value=good_resp):
             result = observability.check_dependencies()
         assert result["ok"] is True
         names = sorted(c["name"] for c in result["checks"])
         assert names == ["hydradb", "openai", "supabase"]
 
     def test_one_unhealthy_dep_fails_overall(self):
-        import observability, requests
+        import requests
+
+        import observability
+
         good_resp = MagicMock()
         good_resp.status_code = 200
-        with patch("observability.requests.get",
-                   side_effect=requests.ConnectionError("dns")), \
-             patch("observability.requests.options", return_value=good_resp), \
-             patch("observability.requests.head",    return_value=good_resp):
+        with patch("observability.requests.get", side_effect=requests.ConnectionError("dns")), patch(
+            "observability.requests.options", return_value=good_resp
+        ), patch("observability.requests.head", return_value=good_resp):
             result = observability.check_dependencies()
         assert result["ok"] is False
         supa = next(c for c in result["checks"] if c["name"] == "supabase")
@@ -148,15 +158,15 @@ class TestDependencyChecks:
 
     def test_openai_check_skipped_via_env(self, monkeypatch):
         import observability
+
         monkeypatch.setenv("DISABLE_OPENAI_READINESS", "true")
         good_resp = MagicMock()
         good_resp.status_code = 200
-        with patch("observability.requests.get",     return_value=good_resp), \
-             patch("observability.requests.options", return_value=good_resp):
+        with patch("observability.requests.get", return_value=good_resp), patch(
+            "observability.requests.options", return_value=good_resp
+        ):
             result = observability.check_dependencies()
-        openai_check = next(
-            c for c in result["checks"] if c["name"] == "openai"
-        )
+        openai_check = next(c for c in result["checks"] if c["name"] == "openai")
         assert openai_check["ok"] is True
         assert openai_check.get("skipped") is True
 
@@ -167,6 +177,7 @@ class TestDependencyChecks:
 class TestRetry:
     def test_succeeds_on_first_attempt(self):
         from retry import retry_with_backoff
+
         calls = []
 
         def fn():
@@ -178,6 +189,7 @@ class TestRetry:
 
     def test_retries_then_succeeds(self):
         from retry import retry_with_backoff
+
         attempts = {"n": 0}
 
         def fn():
@@ -188,13 +200,18 @@ class TestRetry:
 
         # Use initial_delay=0 so the test stays fast.
         result = retry_with_backoff(
-            fn, attempts=5, initial_delay=0, max_delay=0, op_name="test",
+            fn,
+            attempts=5,
+            initial_delay=0,
+            max_delay=0,
+            op_name="test",
         )
         assert result == "finally"
         assert attempts["n"] == 3
 
     def test_gives_up_after_attempts(self):
         from retry import retry_with_backoff
+
         attempts = {"n": 0}
 
         def fn():
@@ -203,12 +220,16 @@ class TestRetry:
 
         with pytest.raises(RuntimeError):
             retry_with_backoff(
-                fn, attempts=3, initial_delay=0, max_delay=0,
+                fn,
+                attempts=3,
+                initial_delay=0,
+                max_delay=0,
             )
         assert attempts["n"] == 3
 
     def test_on_giveup_callback_fires(self):
         from retry import retry_with_backoff
+
         captured = {}
 
         def fn():
@@ -219,13 +240,17 @@ class TestRetry:
 
         with pytest.raises(ValueError):
             retry_with_backoff(
-                fn, attempts=2, initial_delay=0, max_delay=0,
+                fn,
+                attempts=2,
+                initial_delay=0,
+                max_delay=0,
                 on_giveup=on_giveup,
             )
         assert isinstance(captured["err"], ValueError)
 
     def test_non_listed_exception_propagates_immediately(self):
         from retry import retry_with_backoff
+
         attempts = {"n": 0}
 
         def fn():
@@ -235,7 +260,9 @@ class TestRetry:
 
         with pytest.raises(TypeError):
             retry_with_backoff(
-                fn, attempts=5, initial_delay=0,
+                fn,
+                attempts=5,
+                initial_delay=0,
                 retry_on=(RuntimeError,),  # TypeError not included
             )
         assert attempts["n"] == 1
@@ -244,6 +271,7 @@ class TestRetry:
         """A real (small) sleep between attempts confirms we're not
         firing all retries instantly."""
         from retry import retry_with_backoff
+
         attempts = {"n": 0}
 
         def fn():
@@ -254,7 +282,11 @@ class TestRetry:
 
         started = time.monotonic()
         retry_with_backoff(
-            fn, attempts=3, initial_delay=0.05, max_delay=0.1, jitter=0,
+            fn,
+            attempts=3,
+            initial_delay=0.05,
+            max_delay=0.1,
+            jitter=0,
         )
         elapsed = time.monotonic() - started
         # One retry => slept at least ~0.05s (minus jitter floor).
@@ -269,6 +301,7 @@ class TestPerBucketLimits:
     def _reset(self):
         from logging_config import bind_user_context
         from rate_limit import _limiter
+
         bind_user_context(None, None)
         with _limiter._lock:
             _limiter._buckets.clear()
@@ -280,6 +313,7 @@ class TestPerBucketLimits:
     def test_buckets_are_independent(self):
         from errors import RateLimitedError
         from rate_limit import make_rate_limit_dependency
+
         req = MagicMock()
         req.headers = {"x-api-key": "isolate"}
         req.client = MagicMock(host="1.1.1.1")
@@ -319,8 +353,8 @@ class TestReadyEndpoint:
                 "ok": False,
                 "checks": [
                     {"name": "supabase", "ok": False, "reason": "ConnectionError"},
-                    {"name": "hydradb",  "ok": True},
-                    {"name": "openai",   "ok": True},
+                    {"name": "hydradb", "ok": True},
+                    {"name": "openai", "ok": True},
                 ],
             },
         ):
@@ -352,22 +386,29 @@ class TestProductionValidation:
         """Set every REQUIRED_ENV_VAR to a non-blank, non-placeholder
         value so the production check runs against the new guard only."""
         for name in (
-            "APP_API_KEY", "HYDRADB_API_KEY", "HYDRADB_TENANT_ID",
-            "OPENAI_API_KEY", "SUPABASE_URL", "SUPABASE_JWT_SECRET",
-            "SUPABASE_SERVICE_ROLE_KEY", "SLACK_CLIENT_ID",
-            "SLACK_CLIENT_SECRET", "SLACK_REDIRECT_URI",
-            "SLACK_OAUTH_STATE_SECRET", "SLACK_SIGNING_SECRET",
+            "APP_API_KEY",
+            "HYDRADB_API_KEY",
+            "HYDRADB_TENANT_ID",
+            "OPENAI_API_KEY",
+            "SUPABASE_URL",
+            "SUPABASE_JWT_SECRET",
+            "SUPABASE_SERVICE_ROLE_KEY",
+            "SLACK_CLIENT_ID",
+            "SLACK_CLIENT_SECRET",
+            "SLACK_REDIRECT_URI",
+            "SLACK_OAUTH_STATE_SECRET",
+            "SLACK_SIGNING_SECRET",
         ):
             monkeypatch.setenv(name, f"real_value_for_{name}")
         # Production guards expect HTTPS redirect + non-localhost CORS +
         # FRONTEND_BASE_URL set.
-        monkeypatch.setenv("SLACK_REDIRECT_URI",
-                           "https://api.example.com/api/slack/oauth/callback")
+        monkeypatch.setenv("SLACK_REDIRECT_URI", "https://api.example.com/api/slack/oauth/callback")
         monkeypatch.setenv("CORS_ORIGINS", "https://app.example.com")
         monkeypatch.setenv("FRONTEND_BASE_URL", "https://app.example.com")
 
     def test_non_production_does_not_run_extra_checks(self, monkeypatch):
         from startup import validate_required_env
+
         self._populate_valid_env(monkeypatch)
         # CORS pointing at localhost would FAIL prod check; in non-prod
         # mode it's allowed.
@@ -377,7 +418,8 @@ class TestProductionValidation:
         validate_required_env()
 
     def test_production_rejects_localhost_cors(self, monkeypatch):
-        from startup import validate_required_env, StartupConfigError
+        from startup import StartupConfigError, validate_required_env
+
         self._populate_valid_env(monkeypatch)
         monkeypatch.setenv("CORS_ORIGINS", "http://localhost:5173")
         monkeypatch.setenv("ENVIRONMENT", "production")
@@ -386,7 +428,8 @@ class TestProductionValidation:
         assert "CORS_ORIGINS" in str(exc.value)
 
     def test_production_rejects_missing_frontend_base_url(self, monkeypatch):
-        from startup import validate_required_env, StartupConfigError
+        from startup import StartupConfigError, validate_required_env
+
         self._populate_valid_env(monkeypatch)
         monkeypatch.delenv("FRONTEND_BASE_URL", raising=False)
         monkeypatch.setenv("ENVIRONMENT", "production")
@@ -395,17 +438,18 @@ class TestProductionValidation:
         assert "FRONTEND_BASE_URL" in str(exc.value)
 
     def test_production_rejects_http_slack_redirect(self, monkeypatch):
-        from startup import validate_required_env, StartupConfigError
+        from startup import StartupConfigError, validate_required_env
+
         self._populate_valid_env(monkeypatch)
-        monkeypatch.setenv("SLACK_REDIRECT_URI",
-                           "http://api.example.com/api/slack/oauth/callback")
+        monkeypatch.setenv("SLACK_REDIRECT_URI", "http://api.example.com/api/slack/oauth/callback")
         monkeypatch.setenv("ENVIRONMENT", "production")
         with pytest.raises(StartupConfigError) as exc:
             validate_required_env()
         assert "HTTPS" in str(exc.value) or "https" in str(exc.value).lower()
 
     def test_production_rejects_placeholder_secret(self, monkeypatch):
-        from startup import validate_required_env, StartupConfigError
+        from startup import StartupConfigError, validate_required_env
+
         self._populate_valid_env(monkeypatch)
         # A common .env.example placeholder.
         monkeypatch.setenv("APP_API_KEY", "replace-with-a-long-random-string")
@@ -416,6 +460,7 @@ class TestProductionValidation:
 
     def test_production_accepts_clean_config(self, monkeypatch):
         from startup import validate_required_env
+
         self._populate_valid_env(monkeypatch)
         monkeypatch.setenv("ENVIRONMENT", "production")
         # No raise.
@@ -425,6 +470,7 @@ class TestProductionValidation:
 class TestSecretsAudit:
     def test_audit_logs_redacted_summary(self, caplog, monkeypatch):
         import logging
+
         from startup import _audit_secrets
 
         monkeypatch.setenv("APP_API_KEY", "abcd1234efgh5678")
@@ -452,25 +498,26 @@ class TestSecretsAudit:
 class TestClaimSlackEventId:
     def test_first_claim_returns_true(self):
         from supabase_client import claim_slack_event_id
+
         mock_client = MagicMock()
         # supabase insert with returning='representation' yields .data
         # = [the inserted row] on the FIRST claim.
-        mock_client.table.return_value.insert.return_value.execute \
-            .return_value.data = [{"event_id": "Ev_1"}]
+        mock_client.table.return_value.insert.return_value.execute.return_value.data = [{"event_id": "Ev_1"}]
         with patch("supabase_client.get_supabase", return_value=mock_client):
             assert claim_slack_event_id(event_id="Ev_1") is True
 
     def test_duplicate_returns_false(self):
         from supabase_client import claim_slack_event_id
+
         mock_client = MagicMock()
         # When the row already exists, ignore_duplicates returns empty .data.
-        mock_client.table.return_value.insert.return_value.execute \
-            .return_value.data = []
+        mock_client.table.return_value.insert.return_value.execute.return_value.data = []
         with patch("supabase_client.get_supabase", return_value=mock_client):
             assert claim_slack_event_id(event_id="Ev_dup") is False
 
     def test_blank_event_id_returns_false(self):
         from supabase_client import claim_slack_event_id
+
         # Defensive: a blank id shouldn't make a DB round trip.
         with patch("supabase_client.get_supabase") as mock_get:
             assert claim_slack_event_id(event_id="") is False
@@ -478,13 +525,13 @@ class TestClaimSlackEventId:
 
     def test_duplicate_error_returns_false(self):
         from supabase_client import claim_slack_event_id
+
         mock_client = MagicMock()
         # Simulate the supabase client raising a unique-constraint
         # error directly (different client versions behave differently).
-        mock_client.table.return_value.insert.return_value.execute \
-            .side_effect = RuntimeError(
-                "duplicate key value violates unique constraint"
-            )
+        mock_client.table.return_value.insert.return_value.execute.side_effect = RuntimeError(
+            "duplicate key value violates unique constraint"
+        )
         with patch("supabase_client.get_supabase", return_value=mock_client):
             assert claim_slack_event_id(event_id="Ev_2") is False
 
@@ -494,9 +541,9 @@ class TestClaimSlackEventId:
         # process the occasional duplicate during an outage than to
         # drop every webhook delivery.
         from supabase_client import claim_slack_event_id
+
         mock_client = MagicMock()
-        mock_client.table.return_value.insert.return_value.execute \
-            .side_effect = RuntimeError("network timeout")
+        mock_client.table.return_value.insert.return_value.execute.side_effect = RuntimeError("network timeout")
         with patch("supabase_client.get_supabase", return_value=mock_client):
             assert claim_slack_event_id(event_id="Ev_3") is True
 
@@ -508,6 +555,7 @@ class TestTwoTierDedupe:
     @pytest.fixture(autouse=True)
     def _reset(self):
         import realtime_ingest as r
+
         r._seen_event_ids.clear()
         yield
         r._seen_event_ids.clear()
@@ -516,9 +564,11 @@ class TestTwoTierDedupe:
         # If the in-memory cache has the event, we should NOT call
         # the supabase claim function at all.
         from realtime_ingest import _event_already_seen
+
         # First call -> not seen, will fall through to claim.
         with patch(
-            "supabase_client.claim_slack_event_id", return_value=True,
+            "supabase_client.claim_slack_event_id",
+            return_value=True,
         ) as mock_claim:
             assert _event_already_seen("Ev_X") is False
             # Second call should be served by the in-memory cache.
@@ -527,9 +577,11 @@ class TestTwoTierDedupe:
 
     def test_durable_claim_says_dup_marks_in_memory(self):
         from realtime_ingest import _event_already_seen, _seen_event_ids
+
         # Supabase says we lost the race.
         with patch(
-            "supabase_client.claim_slack_event_id", return_value=False,
+            "supabase_client.claim_slack_event_id",
+            return_value=False,
         ):
             assert _event_already_seen("Ev_Y") is True
         # Subsequent calls short-circuit on the in-memory cache.
@@ -547,6 +599,7 @@ class TestLogContextBinding:
     @pytest.fixture(autouse=True)
     def _reset(self):
         from logging_config import bind_user_context
+
         bind_user_context(None, None)
         yield
         bind_user_context(None, None)
@@ -555,14 +608,16 @@ class TestLogContextBinding:
         # Build a real bearer token that decodes to a known user id,
         # then call require_user as a plain function (no FastAPI plumbing).
         import jwt as pyjwt
-        from auth_supabase import require_user, SUPABASE_JWT_ALGORITHM
+
+        from auth_supabase import SUPABASE_JWT_ALGORITHM, require_user
         from logging_config import _user_id, _workspace_id
+
         token = pyjwt.encode(
             {
-                "sub":   "user-from-token",
+                "sub": "user-from-token",
                 "email": "x@example.com",
-                "aud":   "authenticated",
-                "exp":   int(time.time()) + 60,
+                "aud": "authenticated",
+                "exp": int(time.time()) + 60,
             },
             os.environ["SUPABASE_JWT_SECRET"],
             algorithm=SUPABASE_JWT_ALGORITHM,

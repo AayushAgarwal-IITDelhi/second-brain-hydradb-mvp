@@ -26,7 +26,6 @@ import os
 import time
 from typing import Optional
 
-
 # Slack recommends rejecting timestamps more than 5 minutes off.
 SIGNATURE_MAX_AGE_SECONDS = 60 * 5
 

@@ -92,13 +92,13 @@ def persist_memories(
         if kind not in _VALID_KINDS or not content or not content_hash:
             continue
         row: Dict[str, Any] = {
-            "workspace_id":      workspace_id,
-            "kind":              kind,
-            "content":           content,
-            "content_hash":      content_hash,
-            "source_kind":       source_kind,
+            "workspace_id": workspace_id,
+            "kind": kind,
+            "content": content,
+            "content_hash": content_hash,
+            "source_kind": source_kind,
             "source_stable_key": source_stable_key,
-            "metadata":          m.get("metadata") or {},
+            "metadata": m.get("metadata") or {},
         }
         if source_timestamp:
             row["source_timestamp"] = source_timestamp
@@ -126,9 +126,9 @@ def persist_memories(
         # see the cause without leaking row values.
         err_extra: Dict[str, Any] = {
             "workspace_id": workspace_id,
-            "source_kind":  source_kind,
-            "rows":         len(rows),
-            "error":        type(e).__name__,
+            "source_kind": source_kind,
+            "rows": len(rows),
+            "error": type(e).__name__,
         }
         body = None
         try:
@@ -173,8 +173,7 @@ def list_memories(
         q = (
             client.table("extracted_memories")
             .select(
-                "id, kind, content, owner, entity_type, source_kind, "
-                "source_stable_key, source_timestamp, metadata"
+                "id, kind, content, owner, entity_type, source_kind, " "source_stable_key, source_timestamp, metadata"
             )
             .eq("workspace_id", workspace_id)
         )
@@ -189,15 +188,21 @@ def list_memories(
             q = q.ilike("content", f"%{query.strip()}%")
         # Newest sources first; falls back to created_at when a row's
         # source_timestamp is null.
-        resp = q.order(
-            "source_timestamp", desc=True, nullsfirst=False,
-        ).limit(safe_limit).execute()
+        resp = (
+            q.order(
+                "source_timestamp",
+                desc=True,
+                nullsfirst=False,
+            )
+            .limit(safe_limit)
+            .execute()
+        )
     except Exception as e:  # noqa: BLE001
         logger.warning(
             "memory_list_failed",
             extra={
                 "workspace_id": workspace_id,
-                "error":        type(e).__name__,
+                "error": type(e).__name__,
             },
         )
         return []
@@ -206,7 +211,9 @@ def list_memories(
 
 
 def delete_memories_by_source(
-    *, workspace_id: str, source_stable_key: str,
+    *,
+    workspace_id: str,
+    source_stable_key: str,
 ) -> bool:
     """
     Drop every memory row for one source. Used when a source is
@@ -220,14 +227,15 @@ def delete_memories_by_source(
     try:
         client = get_supabase()
         client.table("extracted_memories").delete().eq(
-            "workspace_id", workspace_id,
+            "workspace_id",
+            workspace_id,
         ).eq("source_stable_key", source_stable_key).execute()
     except Exception as e:  # noqa: BLE001
         logger.warning(
             "memory_delete_failed",
             extra={
                 "workspace_id": workspace_id,
-                "error":        type(e).__name__,
+                "error": type(e).__name__,
             },
         )
         return False
@@ -263,16 +271,19 @@ def extract_and_persist(
         # Local import keeps the persistence layer importable even
         # when the extractor is being mocked at test time.
         from memory_extraction import extract_all  # noqa: PLC0415
+
         memories = extract_all(
-            text, default_owner=default_owner, source_kind=source_kind,
+            text,
+            default_owner=default_owner,
+            source_kind=source_kind,
         )
     except Exception as e:  # noqa: BLE001
         logger.warning(
             "memory_extract_failed",
             extra={
-                "workspace_id":      workspace_id,
+                "workspace_id": workspace_id,
                 "source_stable_key": source_stable_key,
-                "error":             type(e).__name__,
+                "error": type(e).__name__,
             },
         )
         return 0

@@ -12,7 +12,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
 TEST_WS_ID = "00000000-0000-0000-0000-00000000aaaa"
 
 
@@ -24,28 +23,28 @@ class TestDeriveSubTenantId:
 
     def test_format_matches_sql_helper(self):
         from supabase_client import _derived_sub_tenant_id
+
         # Same input as smoke-test in phase4_hydradb_workspace_isolation.sql
-        result = _derived_sub_tenant_id(
-            "11111111-aaaa-bbbb-cccc-000000000001"
-        )
+        result = _derived_sub_tenant_id("11111111-aaaa-bbbb-cccc-000000000001")
         assert result == "ws_11111111aaaa"
 
     def test_blank_workspace_id_returns_empty_string(self):
         from supabase_client import _derived_sub_tenant_id
+
         assert _derived_sub_tenant_id("") == ""
 
     def test_strips_dashes_and_takes_first_12_hex(self):
         from supabase_client import _derived_sub_tenant_id
+
         # All dashes stripped, only the first 12 hex chars used.
-        result = _derived_sub_tenant_id(
-            "abcdef01-2345-6789-0000-000000000000"
-        )
+        result = _derived_sub_tenant_id("abcdef01-2345-6789-0000-000000000000")
         assert result == "ws_abcdef012345"
 
 
 class TestEnsureWorkspaceSubTenant:
     def test_returns_existing_value_when_present(self):
         from supabase_client import ensure_workspace_sub_tenant
+
         with patch(
             "supabase_client.get_workspace_sub_tenant_id",
             return_value="ws_existing1234",
@@ -55,12 +54,14 @@ class TestEnsureWorkspaceSubTenant:
 
     def test_writes_derived_value_when_missing(self):
         from supabase_client import ensure_workspace_sub_tenant
+
         mock_client = MagicMock()
         with patch(
             "supabase_client.get_workspace_sub_tenant_id",
             return_value=None,
         ), patch(
-            "supabase_client.get_supabase", return_value=mock_client,
+            "supabase_client.get_supabase",
+            return_value=mock_client,
         ):
             result = ensure_workspace_sub_tenant(workspace_id=TEST_WS_ID)
         # Derived from TEST_WS_ID (first 12 hex chars after dashes
@@ -71,15 +72,16 @@ class TestEnsureWorkspaceSubTenant:
 
     def test_returns_none_when_db_write_fails(self):
         from supabase_client import ensure_workspace_sub_tenant
+
         mock_client = MagicMock()
         # Make the .update().eq().execute() chain raise.
-        mock_client.table.return_value.update.return_value.eq \
-            .return_value.execute.side_effect = RuntimeError("db down")
+        mock_client.table.return_value.update.return_value.eq.return_value.execute.side_effect = RuntimeError("db down")
         with patch(
             "supabase_client.get_workspace_sub_tenant_id",
             return_value=None,
         ), patch(
-            "supabase_client.get_supabase", return_value=mock_client,
+            "supabase_client.get_supabase",
+            return_value=mock_client,
         ):
             result = ensure_workspace_sub_tenant(workspace_id=TEST_WS_ID)
         assert result is None
@@ -95,6 +97,7 @@ class TestRecallUsesWorkspaceSubTenant:
         instantiated with that sub_tenant_id (not the env default).
         """
         from recall import prepare_recall_context
+
         # Patch HydraDBClient to a MagicMock so we can inspect ctor args.
         with patch("recall.HydraDBClient") as mock_client_cls:
             instance = mock_client_cls.return_value
@@ -115,6 +118,7 @@ class TestRecallUsesWorkspaceSubTenant:
         # pass a sub-tenant get the env-default HydraDBClient. The
         # client is constructed WITHOUT explicit sub_tenant_id kwargs.
         from recall import prepare_recall_context
+
         with patch("recall.HydraDBClient") as mock_client_cls:
             instance = mock_client_cls.return_value
             instance.full_recall.return_value = {"results": []}
@@ -125,6 +129,7 @@ class TestRecallUsesWorkspaceSubTenant:
         """answer_question must thread its hydradb_sub_tenant_id arg
         into prepare_recall_context."""
         from recall import answer_question
+
         captured = {}
 
         def fake_prepare(**kwargs):
@@ -145,7 +150,9 @@ class TestRecallUsesWorkspaceSubTenant:
 # =====================================================================
 class TestApiQueryUsesWorkspaceSubTenant:
     def test_api_query_calls_answer_question_with_sub_tenant(
-        self, client, jwt_auth_headers,
+        self,
+        client,
+        jwt_auth_headers,
     ):
         """End-to-end: POST /api/query must call answer_question with
         the workspace's resolved sub_tenant_id, NOT the env default."""
@@ -168,7 +175,9 @@ class TestApiQueryUsesWorkspaceSubTenant:
         assert kwargs["hydradb_sub_tenant_id"] == "ws_resolved_abc"
 
     def test_api_query_stream_calls_prepare_recall_with_sub_tenant(
-        self, client, jwt_auth_headers,
+        self,
+        client,
+        jwt_auth_headers,
     ):
         """Same contract for the SSE streaming route."""
         # The streaming route exits early when prepare_recall_context
@@ -198,17 +207,19 @@ class TestRunWorkspaceIngestUsesSubTenant:
         """run_workspace_ingest must build HydraDBClient(sub_tenant_id=X)
         when X is provided."""
         from slack_oauth import run_workspace_ingest
+
         # Patch every primitive the runner reaches for; we only care
         # about the HydraDBClient construction kwargs.
-        with patch("slack_oauth.WebClient"), \
-             patch("hydradb_client.HydraDBClient") as mock_hydra_cls, \
-             patch("ingestion.slack_client.SlackClientWrapper"), \
-             patch("ingestion.ingest_slack.process_channel",
-                   return_value={"files": [], "newest_ts_seen": None,
-                                 "channel_id": "C1", "skipped_count": 0}), \
-             patch("ingestion.ingest_slack.upload_in_batches",
-                   return_value={"successes": 0, "failures": 0}), \
-             patch("ingestion.ingestion_state.IngestionState"):
+        with patch("slack_oauth.WebClient"), patch("hydradb_client.HydraDBClient") as mock_hydra_cls, patch(
+            "ingestion.slack_client.SlackClientWrapper"
+        ), patch(
+            "ingestion.ingest_slack.process_channel",
+            return_value={"files": [], "newest_ts_seen": None, "channel_id": "C1", "skipped_count": 0},
+        ), patch(
+            "ingestion.ingest_slack.upload_in_batches", return_value={"successes": 0, "failures": 0}
+        ), patch(
+            "ingestion.ingestion_state.IngestionState"
+        ):
             run_workspace_ingest(
                 workspace_id=TEST_WS_ID,
                 bot_token="xoxb-test",
@@ -225,15 +236,17 @@ class TestRunWorkspaceIngestUsesSubTenant:
         exists for legacy CLI compatibility; the scheduler + API
         callers never hit it."""
         from slack_oauth import run_workspace_ingest
-        with patch("slack_oauth.WebClient"), \
-             patch("hydradb_client.HydraDBClient") as mock_hydra_cls, \
-             patch("ingestion.slack_client.SlackClientWrapper"), \
-             patch("ingestion.ingest_slack.process_channel",
-                   return_value={"files": [], "newest_ts_seen": None,
-                                 "channel_id": "C1", "skipped_count": 0}), \
-             patch("ingestion.ingest_slack.upload_in_batches",
-                   return_value={"successes": 0, "failures": 0}), \
-             patch("ingestion.ingestion_state.IngestionState"):
+
+        with patch("slack_oauth.WebClient"), patch("hydradb_client.HydraDBClient") as mock_hydra_cls, patch(
+            "ingestion.slack_client.SlackClientWrapper"
+        ), patch(
+            "ingestion.ingest_slack.process_channel",
+            return_value={"files": [], "newest_ts_seen": None, "channel_id": "C1", "skipped_count": 0},
+        ), patch(
+            "ingestion.ingest_slack.upload_in_batches", return_value={"successes": 0, "failures": 0}
+        ), patch(
+            "ingestion.ingestion_state.IngestionState"
+        ):
             run_workspace_ingest(
                 workspace_id=TEST_WS_ID,
                 bot_token="xoxb-test",
@@ -245,6 +258,7 @@ class TestRunWorkspaceIngestUsesSubTenant:
     def test_short_circuits_when_no_channels(self):
         """No channel_ids -> no HydraDB client construction at all."""
         from slack_oauth import run_workspace_ingest
+
         with patch("hydradb_client.HydraDBClient") as mock_hydra_cls:
             result = run_workspace_ingest(
                 workspace_id=TEST_WS_ID,
@@ -277,9 +291,11 @@ class TestCrossWorkspaceIsolation:
         # lazy-create distinct values.
         mock_client = MagicMock()
         with patch(
-            "supabase_client.get_workspace_sub_tenant_id", return_value=None,
+            "supabase_client.get_workspace_sub_tenant_id",
+            return_value=None,
         ), patch(
-            "supabase_client.get_supabase", return_value=mock_client,
+            "supabase_client.get_supabase",
+            return_value=mock_client,
         ):
             tenant_a = ensure_workspace_sub_tenant(workspace_id=ws_a)
             tenant_b = ensure_workspace_sub_tenant(workspace_id=ws_b)
@@ -301,15 +317,11 @@ class TestListActiveWorkspacesWithSlack:
         def fake_table(name):
             tbl = MagicMock()
             if name == "workspaces":
-                tbl.select.return_value.eq.return_value.execute.return_value \
-                    .data = [
-                        {"id": "ws-1", "hydradb_sub_tenant_id": "ws_aaaaaa1",
-                         "hydradb_status": "active"},
-                        {"id": "ws-2", "hydradb_sub_tenant_id": "ws_bbbbbb2",
-                         "hydradb_status": "active"},
-                        {"id": "ws-3", "hydradb_sub_tenant_id": "ws_cccccc3",
-                         "hydradb_status": "active"},
-                    ]
+                tbl.select.return_value.eq.return_value.execute.return_value.data = [
+                    {"id": "ws-1", "hydradb_sub_tenant_id": "ws_aaaaaa1", "hydradb_status": "active"},
+                    {"id": "ws-2", "hydradb_sub_tenant_id": "ws_bbbbbb2", "hydradb_status": "active"},
+                    {"id": "ws-3", "hydradb_sub_tenant_id": "ws_cccccc3", "hydradb_status": "active"},
+                ]
             elif name == "slack_installations":
                 tbl.select.return_value.execute.return_value.data = [
                     {"workspace_id": "ws-1", "bot_token": "xoxb-1"},
@@ -317,12 +329,11 @@ class TestListActiveWorkspacesWithSlack:
                     {"workspace_id": "ws-3", "bot_token": "xoxb-3"},
                 ]
             elif name == "slack_channels":
-                tbl.select.return_value.eq.return_value.execute.return_value \
-                    .data = [
-                        {"workspace_id": "ws-1", "slack_channel_id": "C1"},
-                        {"workspace_id": "ws-1", "slack_channel_id": "C2"},
-                        {"workspace_id": "ws-3", "slack_channel_id": "C9"},
-                    ]
+                tbl.select.return_value.eq.return_value.execute.return_value.data = [
+                    {"workspace_id": "ws-1", "slack_channel_id": "C1"},
+                    {"workspace_id": "ws-1", "slack_channel_id": "C2"},
+                    {"workspace_id": "ws-3", "slack_channel_id": "C9"},
+                ]
             return tbl
 
         mock_client.table.side_effect = fake_table
@@ -342,6 +353,7 @@ class TestListActiveWorkspacesWithSlack:
 
     def test_swallows_supabase_errors(self):
         from supabase_client import list_active_workspaces_with_slack
+
         mock_client = MagicMock()
         mock_client.table.side_effect = RuntimeError("supabase down")
         with patch("supabase_client.get_supabase", return_value=mock_client):

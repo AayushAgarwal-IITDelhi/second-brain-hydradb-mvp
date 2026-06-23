@@ -18,7 +18,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
 TEST_WS_ID = "00000000-0000-0000-0000-00000000aaaa"
 
 
@@ -28,6 +27,7 @@ def _reset_rate_limit_state():
     same process. Without resetting them, later tests hit the
     /api/gmail/ingest 5/5min limit and get 429 instead of 4xx."""
     from rate_limit import _limiter
+
     with _limiter._lock:
         _limiter._buckets.clear()
     yield
@@ -47,7 +47,10 @@ class TestConnectUrl:
         assert "client_id=test-gmail-client-id" in body["url"]
 
     def test_returns_503_when_oauth_disabled(
-        self, client, jwt_auth_headers, monkeypatch,
+        self,
+        client,
+        jwt_auth_headers,
+        monkeypatch,
     ):
         monkeypatch.setenv("GMAIL_CLIENT_ID", "")
         r = client.get("/api/gmail/connect-url", headers=jwt_auth_headers)
@@ -64,6 +67,7 @@ class TestConnectUrl:
 class TestOauthCallback:
     def _good_state(self) -> str:
         from gmail_oauth import make_oauth_state
+
         return make_oauth_state(TEST_WS_ID, "test-user-id")
 
     def test_happy_path_redirects_ok(self, client):
@@ -71,18 +75,17 @@ class TestOauthCallback:
         with patch(
             "main.gmail_exchange_code",
             return_value={
-                "access_token":  "at-1",
+                "access_token": "at-1",
                 "refresh_token": "rt-1",
-                "expires_in":    3600,
-                "scope":         "openid email profile",
+                "expires_in": 3600,
+                "scope": "openid email profile",
             },
         ), patch(
             "main.gmail_fetch_user_info",
             return_value={"sub": "google-id-1", "email": "u@example.com"},
         ), patch(
             "main.upsert_gmail_connection",
-            return_value={"id": "conn-1", "email": "u@example.com",
-                          "google_user_id": "google-id-1"},
+            return_value={"id": "conn-1", "email": "u@example.com", "google_user_id": "google-id-1"},
         ):
             r = client.get(
                 "/api/gmail/oauth/callback",
@@ -135,7 +138,8 @@ class TestOauthCallback:
             "main.gmail_exchange_code",
             return_value={"access_token": "at", "expires_in": 3600},
         ), patch(
-            "main.gmail_fetch_user_info", return_value=None,
+            "main.gmail_fetch_user_info",
+            return_value=None,
         ):
             r = client.get(
                 "/api/gmail/oauth/callback",
@@ -148,13 +152,13 @@ class TestOauthCallback:
     def test_persist_failure_redirects_error(self, client):
         with patch(
             "main.gmail_exchange_code",
-            return_value={"access_token": "at", "refresh_token": "rt",
-                          "expires_in": 3600},
+            return_value={"access_token": "at", "refresh_token": "rt", "expires_in": 3600},
         ), patch(
             "main.gmail_fetch_user_info",
             return_value={"sub": "g-1", "email": "u@x.com"},
         ), patch(
-            "main.upsert_gmail_connection", return_value=None,
+            "main.upsert_gmail_connection",
+            return_value=None,
         ):
             r = client.get(
                 "/api/gmail/oauth/callback",
@@ -187,33 +191,36 @@ class TestOauthCallback:
 # ──────────────────────────────────────────────────────────────────────
 class TestListConnections:
     def test_returns_public_projection_no_tokens(
-        self, client, jwt_auth_headers,
+        self,
+        client,
+        jwt_auth_headers,
     ):
         with patch(
             "main.list_gmail_connections_public",
             return_value=[
                 {
-                    "id":             "conn-1",
-                    "workspace_id":   TEST_WS_ID,
+                    "id": "conn-1",
+                    "workspace_id": TEST_WS_ID,
                     "google_user_id": "google-id-1",
-                    "email":          "u@example.com",
-                    "scopes":         "openid email",
-                    "status":         "active",
-                    "connected_at":   "2025-01-01T00:00:00Z",
-                    "created_at":     "2025-01-01T00:00:00Z",
-                    "updated_at":     "2025-01-01T00:00:00Z",
-                    "token_expiry":   None,
+                    "email": "u@example.com",
+                    "scopes": "openid email",
+                    "status": "active",
+                    "connected_at": "2025-01-01T00:00:00Z",
+                    "created_at": "2025-01-01T00:00:00Z",
+                    "updated_at": "2025-01-01T00:00:00Z",
+                    "token_expiry": None,
                 },
             ],
         ), patch(
             "main.get_gmail_connection_sync_summary",
             return_value={
                 "last_synced_at": "2025-02-01T12:00:00Z",
-                "labels_synced":  2,
+                "labels_synced": 2,
             },
         ):
             r = client.get(
-                "/api/gmail/connections", headers=jwt_auth_headers,
+                "/api/gmail/connections",
+                headers=jwt_auth_headers,
             )
         assert r.status_code == 200
         body = r.json()
@@ -226,14 +233,16 @@ class TestListConnections:
         # Phase 11: sync_summary enrichment is present and shape-stable.
         sync = body["connections"][0]["sync_summary"]
         assert sync["last_synced_at"] == "2025-02-01T12:00:00Z"
-        assert sync["labels_synced"]  == 2
+        assert sync["labels_synced"] == 2
 
     def test_empty_list_when_none(self, client, jwt_auth_headers):
         with patch(
-            "main.list_gmail_connections_public", return_value=[],
+            "main.list_gmail_connections_public",
+            return_value=[],
         ):
             r = client.get(
-                "/api/gmail/connections", headers=jwt_auth_headers,
+                "/api/gmail/connections",
+                headers=jwt_auth_headers,
             )
         assert r.status_code == 200
         assert r.json()["connections"] == []
@@ -250,7 +259,8 @@ class TestDeleteConnection:
     def test_deletes_existing(self, client, jwt_auth_headers):
         with patch("main.delete_gmail_connection", return_value=True):
             r = client.delete(
-                "/api/gmail/connections/conn-1", headers=jwt_auth_headers,
+                "/api/gmail/connections/conn-1",
+                headers=jwt_auth_headers,
             )
         assert r.status_code == 200
         assert r.json()["deleted"] is True
@@ -258,7 +268,8 @@ class TestDeleteConnection:
     def test_unknown_returns_404(self, client, jwt_auth_headers):
         with patch("main.delete_gmail_connection", return_value=False):
             r = client.delete(
-                "/api/gmail/connections/unknown", headers=jwt_auth_headers,
+                "/api/gmail/connections/unknown",
+                headers=jwt_auth_headers,
             )
         assert r.status_code == 404
 
@@ -289,27 +300,26 @@ class TestListLabels:
         with patch(
             "main.get_gmail_connection",
             return_value={
-                "id":             "conn-1",
-                "workspace_id":   TEST_WS_ID,
-                "email":          "u@example.com",
-                "access_token":   "at",
-                "refresh_token":  "rt",
+                "id": "conn-1",
+                "workspace_id": TEST_WS_ID,
+                "email": "u@example.com",
+                "access_token": "at",
+                "refresh_token": "rt",
             },
         ), patch(
             "main.list_gmail_labels_from_api",
             return_value=[
-                {"label_id": "INBOX",   "name": "Inbox", "type": "system"},
-                {"label_id": "Label_5", "name": "News",  "type": "user"},
+                {"label_id": "INBOX", "name": "Inbox", "type": "system"},
+                {"label_id": "Label_5", "name": "News", "type": "user"},
             ],
         ), patch(
-            "main.upsert_gmail_labels", return_value=2,
+            "main.upsert_gmail_labels",
+            return_value=2,
         ), patch(
             "main.list_gmail_labels",
             return_value=[
-                {"label_id": "INBOX",   "name": "Inbox", "type": "system",
-                 "is_selected": False},
-                {"label_id": "Label_5", "name": "News",  "type": "user",
-                 "is_selected": True},
+                {"label_id": "INBOX", "name": "Inbox", "type": "system", "is_selected": False},
+                {"label_id": "Label_5", "name": "News", "type": "user", "is_selected": True},
             ],
         ):
             r = client.get(
@@ -338,13 +348,14 @@ class TestSaveLabels:
             "main.get_gmail_connection_public",
             return_value={"id": "conn-1", "email": "u@x.com"},
         ), patch(
-            "main.set_selected_gmail_labels", return_value=True,
+            "main.set_selected_gmail_labels",
+            return_value=True,
         ) as mock_save:
             r = client.post(
                 "/api/gmail/labels",
                 headers=jwt_auth_headers,
                 json={
-                    "connection_id":      "conn-1",
+                    "connection_id": "conn-1",
                     "selected_label_ids": ["INBOX", "Label_5"],
                 },
             )
@@ -360,7 +371,8 @@ class TestSaveLabels:
             "main.get_gmail_connection_public",
             return_value={"id": "conn-1", "email": "u@x.com"},
         ), patch(
-            "main.set_selected_gmail_labels", return_value=True,
+            "main.set_selected_gmail_labels",
+            return_value=True,
         ):
             r = client.post(
                 "/api/gmail/labels",
@@ -373,7 +385,8 @@ class TestSaveLabels:
         # Phase 8 multi-tenant safety: cannot write labels for a
         # connection that doesn't belong to this workspace.
         with patch(
-            "main.get_gmail_connection_public", return_value=None,
+            "main.get_gmail_connection_public",
+            return_value=None,
         ), patch(
             "main.set_selected_gmail_labels",
         ) as mock_save:
@@ -381,7 +394,7 @@ class TestSaveLabels:
                 "/api/gmail/labels",
                 headers=jwt_auth_headers,
                 json={
-                    "connection_id":      "foreign-or-unknown",
+                    "connection_id": "foreign-or-unknown",
                     "selected_label_ids": ["INBOX"],
                 },
             )
@@ -393,7 +406,8 @@ class TestSaveLabels:
             "main.get_gmail_connection_public",
             return_value={"id": "conn-1", "email": "u@x.com"},
         ), patch(
-            "main.set_selected_gmail_labels", return_value=False,
+            "main.set_selected_gmail_labels",
+            return_value=False,
         ):
             r = client.post(
                 "/api/gmail/labels",
@@ -407,9 +421,9 @@ class TestSaveLabels:
             "/api/gmail/labels",
             headers=jwt_auth_headers,
             json={
-                "connection_id":      "conn-1",
+                "connection_id": "conn-1",
                 "selected_label_ids": [],
-                "rogue_field":        "x",
+                "rogue_field": "x",
             },
         )
         assert r.status_code == 422
@@ -428,21 +442,24 @@ class TestSaveLabels:
 class TestRunIngest:
     def test_kicks_off_background_ingest(self, client, jwt_auth_headers):
         connection = {
-            "id":             "conn-1",
-            "workspace_id":   TEST_WS_ID,
-            "email":          "u@example.com",
-            "access_token":   "at",
-            "refresh_token":  "rt",
+            "id": "conn-1",
+            "workspace_id": TEST_WS_ID,
+            "email": "u@example.com",
+            "access_token": "at",
+            "refresh_token": "rt",
         }
         with patch(
-            "main.get_gmail_connection", return_value=connection,
+            "main.get_gmail_connection",
+            return_value=connection,
         ), patch(
             "main.list_selected_gmail_label_ids",
             return_value=["INBOX", "Label_5"],
         ), patch(
-            "main.ensure_workspace_sub_tenant", return_value="ws_test_abc",
+            "main.ensure_workspace_sub_tenant",
+            return_value="ws_test_abc",
         ), patch(
-            "main.run_workspace_gmail_ingest", return_value={},
+            "main.run_workspace_gmail_ingest",
+            return_value={},
         ) as mock_runner:
             r = client.post(
                 "/api/gmail/ingest",
@@ -471,9 +488,11 @@ class TestRunIngest:
 
     def test_no_labels_returns_400(self, client, jwt_auth_headers):
         with patch(
-            "main.get_gmail_connection", return_value={"id": "conn-1"},
+            "main.get_gmail_connection",
+            return_value={"id": "conn-1"},
         ), patch(
-            "main.list_selected_gmail_label_ids", return_value=[],
+            "main.list_selected_gmail_label_ids",
+            return_value=[],
         ):
             r = client.post(
                 "/api/gmail/ingest",
@@ -483,14 +502,19 @@ class TestRunIngest:
         assert r.status_code == 400
 
     def test_sub_tenant_lookup_failure_returns_502(
-        self, client, jwt_auth_headers,
+        self,
+        client,
+        jwt_auth_headers,
     ):
         with patch(
-            "main.get_gmail_connection", return_value={"id": "conn-1"},
+            "main.get_gmail_connection",
+            return_value={"id": "conn-1"},
         ), patch(
-            "main.list_selected_gmail_label_ids", return_value=["INBOX"],
+            "main.list_selected_gmail_label_ids",
+            return_value=["INBOX"],
         ), patch(
-            "main.ensure_workspace_sub_tenant", return_value=None,
+            "main.ensure_workspace_sub_tenant",
+            return_value=None,
         ), patch(
             "main.run_workspace_gmail_ingest",
         ) as mock_runner:

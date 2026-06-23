@@ -20,6 +20,7 @@ import pytest
 class TestOAuthState:
     def test_round_trip_valid(self):
         from gmail_oauth import make_oauth_state, verify_oauth_state
+
         token = make_oauth_state("ws-1", "user-1")
         payload = verify_oauth_state(token)
         assert payload is not None
@@ -28,25 +29,31 @@ class TestOAuthState:
 
     def test_two_tokens_differ_due_to_nonce(self):
         from gmail_oauth import make_oauth_state
+
         a = make_oauth_state("ws-1", "u-1")
         b = make_oauth_state("ws-1", "u-1")
         assert a != b
 
     def test_empty_string_rejected(self):
         from gmail_oauth import verify_oauth_state
+
         assert verify_oauth_state("") is None
 
     def test_garbage_rejected(self):
         from gmail_oauth import verify_oauth_state
+
         assert verify_oauth_state("not.a.real.state") is None
 
     def test_missing_dot_rejected(self):
         from gmail_oauth import verify_oauth_state
+
         assert verify_oauth_state("no-separator-here") is None
 
     def test_tampered_signature_rejected(self):
         import base64
+
         from gmail_oauth import make_oauth_state, verify_oauth_state
+
         token = make_oauth_state("ws-1", "u-1")
         payload_b64, sig_b64 = token.split(".", 1)
         # Decode -> mutate a real byte -> re-encode. Flipping just the
@@ -62,6 +69,7 @@ class TestOAuthState:
 
     def test_tampered_payload_rejected(self):
         from gmail_oauth import make_oauth_state, verify_oauth_state
+
         token = make_oauth_state("ws-1", "u-1")
         payload_b64, sig_b64 = token.split(".", 1)
         # Replace the payload with something different but well-formed.
@@ -70,24 +78,28 @@ class TestOAuthState:
 
     def test_wrong_secret_rejects_token(self, monkeypatch):
         from gmail_oauth import make_oauth_state, verify_oauth_state
+
         token = make_oauth_state("ws-1", "u-1")
         monkeypatch.setenv("GMAIL_OAUTH_STATE_SECRET", "completely-different-key")
         assert verify_oauth_state(token) is None
 
     def test_missing_secret_refuses_to_mint(self, monkeypatch):
         from gmail_oauth import make_oauth_state
+
         monkeypatch.setenv("GMAIL_OAUTH_STATE_SECRET", "")
         with pytest.raises(RuntimeError):
             make_oauth_state("ws-1", "u-1")
 
     def test_missing_secret_rejects_verify(self, monkeypatch):
         from gmail_oauth import make_oauth_state, verify_oauth_state
+
         token = make_oauth_state("ws-1", "u-1")
         monkeypatch.setenv("GMAIL_OAUTH_STATE_SECRET", "")
         assert verify_oauth_state(token) is None
 
     def test_expired_token_rejected(self, monkeypatch):
         from gmail_oauth import make_oauth_state, verify_oauth_state
+
         token = make_oauth_state("ws-1", "u-1")
         # time.time() is called inside oauth_common now, so patch it there.
         with patch("oauth_common.time.time", return_value=time.time() + 10_000):
@@ -100,6 +112,7 @@ class TestOAuthState:
 class TestBuildConnectUrl:
     def test_url_contains_required_params(self):
         from gmail_oauth import build_connect_url
+
         url = build_connect_url(workspace_id="ws-1", user_id="user-1")
         assert "accounts.google.com" in url
         assert "/o/oauth2/v2/auth" in url
@@ -117,7 +130,9 @@ class TestBuildConnectUrl:
 
     def test_state_in_url_is_verifiable(self):
         from urllib.parse import parse_qs, urlparse
+
         from gmail_oauth import build_connect_url, verify_oauth_state
+
         url = build_connect_url(workspace_id="ws-7", user_id="u-7")
         qs = parse_qs(urlparse(url).query)
         state = qs["state"][0]
@@ -140,12 +155,13 @@ class TestExchangeCode:
 
     def test_happy_path(self):
         from gmail_oauth import exchange_code
+
         body = {
-            "access_token":  "at-1",
+            "access_token": "at-1",
             "refresh_token": "rt-1",
-            "expires_in":    3600,
-            "scope":         "openid email profile",
-            "token_type":    "Bearer",
+            "expires_in": 3600,
+            "scope": "openid email profile",
+            "token_type": "Bearer",
         }
         with patch(
             "gmail_oauth.requests.post",
@@ -158,6 +174,7 @@ class TestExchangeCode:
 
     def test_http_error_returns_none(self):
         from gmail_oauth import exchange_code
+
         with patch(
             "gmail_oauth.requests.post",
             return_value=self._build_mock_response(ok=False, status_code=400),
@@ -166,6 +183,7 @@ class TestExchangeCode:
 
     def test_non_json_returns_none(self):
         from gmail_oauth import exchange_code
+
         resp = MagicMock()
         resp.ok = True
         resp.status_code = 200
@@ -175,6 +193,7 @@ class TestExchangeCode:
 
     def test_missing_access_token_returns_none(self):
         from gmail_oauth import exchange_code
+
         with patch(
             "gmail_oauth.requests.post",
             return_value=self._build_mock_response(body={"foo": "bar"}),
@@ -183,7 +202,9 @@ class TestExchangeCode:
 
     def test_request_exception_returns_none(self):
         import requests
+
         from gmail_oauth import exchange_code
+
         with patch(
             "gmail_oauth.requests.post",
             side_effect=requests.ConnectionError("dns"),
@@ -197,6 +218,7 @@ class TestExchangeCode:
 class TestRefreshAccessToken:
     def test_success(self):
         from gmail_oauth import refresh_access_token
+
         resp = MagicMock(ok=True, status_code=200)
         resp.json.return_value = {"access_token": "new-at", "expires_in": 3600}
         with patch("gmail_oauth.requests.post", return_value=resp):
@@ -205,12 +227,14 @@ class TestRefreshAccessToken:
 
     def test_blank_returns_none(self):
         from gmail_oauth import refresh_access_token
+
         with patch("gmail_oauth.requests.post") as mock_post:
             assert refresh_access_token("") is None
         mock_post.assert_not_called()
 
     def test_http_error_returns_none(self):
         from gmail_oauth import refresh_access_token
+
         resp = MagicMock(ok=False, status_code=400)
         with patch("gmail_oauth.requests.post", return_value=resp):
             assert refresh_access_token("rt") is None
@@ -222,6 +246,7 @@ class TestRefreshAccessToken:
 class TestFetchUserInfo:
     def test_success(self):
         from gmail_oauth import fetch_user_info
+
         resp = MagicMock(ok=True, status_code=200)
         resp.json.return_value = {"sub": "google-123", "email": "u@example.com"}
         with patch("gmail_oauth.requests.get", return_value=resp):
@@ -231,12 +256,14 @@ class TestFetchUserInfo:
 
     def test_http_error_returns_none(self):
         from gmail_oauth import fetch_user_info
+
         resp = MagicMock(ok=False, status_code=401)
         with patch("gmail_oauth.requests.get", return_value=resp):
             assert fetch_user_info("bad") is None
 
     def test_blank_returns_none(self):
         from gmail_oauth import fetch_user_info
+
         with patch("gmail_oauth.requests.get") as mock_get:
             assert fetch_user_info("") is None
         mock_get.assert_not_called()
@@ -248,11 +275,12 @@ class TestFetchUserInfo:
 class TestInstallationProjection:
     def test_happy_path_projects_fields(self):
         from gmail_oauth import installation_from_token_response
+
         token = {
-            "access_token":  "at-1",
+            "access_token": "at-1",
             "refresh_token": "rt-1",
-            "expires_in":    3600,
-            "scope":         "openid email profile https://www.googleapis.com/auth/gmail.readonly",
+            "expires_in": 3600,
+            "scope": "openid email profile https://www.googleapis.com/auth/gmail.readonly",
         }
         info = {"sub": "google-123", "email": "u@example.com"}
         out = installation_from_token_response(token, info)
@@ -265,6 +293,7 @@ class TestInstallationProjection:
 
     def test_missing_fields_collapse_to_empty(self):
         from gmail_oauth import installation_from_token_response
+
         out = installation_from_token_response({}, {})
         assert out["google_user_id"] == ""
         assert out["email"] == ""
@@ -281,21 +310,22 @@ class TestBuildEmailDocument:
     def _sample_message(self, **overrides):
         # text/plain payload, base64url-encoded.
         import base64
-        plain_body = base64.urlsafe_b64encode(
-            b"Hello team,\nQuarterly review on Friday.\n--Alice"
-        ).rstrip(b"=").decode("ascii")
+
+        plain_body = (
+            base64.urlsafe_b64encode(b"Hello team,\nQuarterly review on Friday.\n--Alice").rstrip(b"=").decode("ascii")
+        )
         msg = {
-            "id":       "msg-abc-123",
-            "snippet":  "Hello team, Quarterly review on Friday...",
+            "id": "msg-abc-123",
+            "snippet": "Hello team, Quarterly review on Friday...",
             "labelIds": ["INBOX", "Label_5"],
             "payload": {
                 "mimeType": "text/plain",
-                "body":     {"data": plain_body, "size": 50},
-                "headers":  [
+                "body": {"data": plain_body, "size": 50},
+                "headers": [
                     {"name": "Subject", "value": "Quarterly review"},
-                    {"name": "From",    "value": "Alice <alice@example.com>"},
-                    {"name": "To",      "value": "team@example.com"},
-                    {"name": "Date",    "value": "Mon, 5 May 2025 10:00:00 +0000"},
+                    {"name": "From", "value": "Alice <alice@example.com>"},
+                    {"name": "To", "value": "team@example.com"},
+                    {"name": "Date", "value": "Mon, 5 May 2025 10:00:00 +0000"},
                 ],
             },
         }
@@ -304,6 +334,7 @@ class TestBuildEmailDocument:
 
     def test_extracts_text_plain_body(self):
         from gmail_oauth import build_email_document
+
         doc = build_email_document(self._sample_message(), "owner@example.com")
         assert doc is not None
         assert "Quarterly review on Friday." in doc["content"]
@@ -317,22 +348,24 @@ class TestBuildEmailDocument:
 
     def test_cc_header_included_when_present(self):
         import base64
+
         from gmail_oauth import build_email_document
+
         # Construct a message that includes a Cc header.
         body = base64.urlsafe_b64encode(b"body text").rstrip(b"=").decode("ascii")
         msg = {
-            "id":       "msg-with-cc",
-            "snippet":  "x",
+            "id": "msg-with-cc",
+            "snippet": "x",
             "labelIds": ["INBOX"],
             "payload": {
                 "mimeType": "text/plain",
-                "body":     {"data": body},
+                "body": {"data": body},
                 "headers": [
                     {"name": "Subject", "value": "team update"},
-                    {"name": "From",    "value": "a@example.com"},
-                    {"name": "To",      "value": "b@example.com"},
-                    {"name": "Cc",      "value": "manager@example.com, eng@example.com"},
-                    {"name": "Date",    "value": "Mon, 5 May 2025 10:00:00 +0000"},
+                    {"name": "From", "value": "a@example.com"},
+                    {"name": "To", "value": "b@example.com"},
+                    {"name": "Cc", "value": "manager@example.com, eng@example.com"},
+                    {"name": "Date", "value": "Mon, 5 May 2025 10:00:00 +0000"},
                 ],
             },
         }
@@ -344,6 +377,7 @@ class TestBuildEmailDocument:
     def test_cc_header_omitted_when_missing(self):
         # When Cc is absent we don't emit an empty "Cc: " line.
         from gmail_oauth import build_email_document
+
         doc = build_email_document(self._sample_message(), "owner@example.com")
         # _sample_message has no Cc; resulting doc should not contain
         # a "Cc:" line at all.
@@ -351,18 +385,22 @@ class TestBuildEmailDocument:
 
     def test_falls_back_to_html_when_no_text_plain(self):
         import base64
+
         from gmail_oauth import build_email_document
-        html_body = base64.urlsafe_b64encode(
-            b"<p>Hello <b>team</b></p><p>See you <i>Friday</i>.</p>"
-        ).rstrip(b"=").decode("ascii")
+
+        html_body = (
+            base64.urlsafe_b64encode(b"<p>Hello <b>team</b></p><p>See you <i>Friday</i>.</p>")
+            .rstrip(b"=")
+            .decode("ascii")
+        )
         msg = {
-            "id":      "msg-html",
+            "id": "msg-html",
             "snippet": "Hello team",
             "labelIds": ["INBOX"],
             "payload": {
                 "mimeType": "text/html",
-                "body":     {"data": html_body},
-                "headers":  [{"name": "Subject", "value": "hi"}],
+                "body": {"data": html_body},
+                "headers": [{"name": "Subject", "value": "hi"}],
             },
         }
         doc = build_email_document(msg, "owner@example.com")
@@ -373,26 +411,26 @@ class TestBuildEmailDocument:
 
     def test_walks_multipart_for_text_plain(self):
         import base64
+
         from gmail_oauth import build_email_document
-        text_body = base64.urlsafe_b64encode(
-            b"Plain part wins."
-        ).rstrip(b"=").decode("ascii")
+
+        text_body = base64.urlsafe_b64encode(b"Plain part wins.").rstrip(b"=").decode("ascii")
         msg = {
-            "id":       "msg-multi",
-            "snippet":  "",
+            "id": "msg-multi",
+            "snippet": "",
             "labelIds": ["INBOX"],
             "payload": {
                 "mimeType": "multipart/alternative",
-                "body":     {"size": 0},
-                "headers":  [{"name": "Subject", "value": "mixed"}],
+                "body": {"size": 0},
+                "headers": [{"name": "Subject", "value": "mixed"}],
                 "parts": [
                     {
                         "mimeType": "text/html",
-                        "body":     {"data": "PHA+SFRNTDwvcD4="},
+                        "body": {"data": "PHA+SFRNTDwvcD4="},
                     },
                     {
                         "mimeType": "text/plain",
-                        "body":     {"data": text_body},
+                        "body": {"data": text_body},
                     },
                 ],
             },
@@ -403,27 +441,31 @@ class TestBuildEmailDocument:
 
     def test_stable_key_uses_message_id(self):
         from gmail_oauth import build_email_document
+
         doc = build_email_document(self._sample_message(), "owner@example.com")
         assert doc["stable_key"] == "gmail:msg:msg-abc-123"
 
     def test_permalink_present(self):
         from gmail_oauth import build_email_document
+
         doc = build_email_document(self._sample_message(), "owner@example.com")
         assert doc["permalink"] == "https://mail.google.com/mail/u/0/#all/msg-abc-123"
 
     def test_body_capped_at_32k(self):
         import base64
+
         from gmail_oauth import build_email_document
+
         huge = ("x" * 40_000).encode()
         body = base64.urlsafe_b64encode(huge).rstrip(b"=").decode("ascii")
         msg = {
-            "id":      "msg-huge",
+            "id": "msg-huge",
             "snippet": "",
             "labelIds": ["INBOX"],
             "payload": {
                 "mimeType": "text/plain",
-                "body":     {"data": body},
-                "headers":  [{"name": "Subject", "value": "big"}],
+                "body": {"data": body},
+                "headers": [{"name": "Subject", "value": "big"}],
             },
         }
         doc = build_email_document(msg, "owner@example.com")
@@ -433,14 +475,15 @@ class TestBuildEmailDocument:
 
     def test_empty_body_and_no_snippet_returns_none(self):
         from gmail_oauth import build_email_document
+
         msg = {
-            "id":      "msg-empty",
+            "id": "msg-empty",
             "snippet": "",
             "labelIds": ["INBOX"],
             "payload": {
                 "mimeType": "text/plain",
-                "body":     {"data": ""},
-                "headers":  [{"name": "Subject", "value": "blank"}],
+                "body": {"data": ""},
+                "headers": [{"name": "Subject", "value": "blank"}],
             },
         }
         assert build_email_document(msg, "owner@example.com") is None
@@ -450,6 +493,7 @@ class TestBuildEmailDocument:
         permalink as metadata -- the subject and body live ONLY inside
         `content`. A leak of the state.json shouldn't expose subjects."""
         from gmail_oauth import build_email_document
+
         doc = build_email_document(self._sample_message(), "owner@example.com")
         assert "subject" not in doc
         assert "body" not in doc
@@ -463,23 +507,26 @@ class TestBuildEmailDocument:
 class TestRunWorkspaceGmailIngest:
     def _connection(self, **overrides):
         c = {
-            "id":             "conn-1",
-            "workspace_id":   "ws-1",
-            "email":          "owner@example.com",
-            "access_token":   "at-1",
-            "refresh_token":  "rt-1",
+            "id": "conn-1",
+            "workspace_id": "ws-1",
+            "email": "owner@example.com",
+            "access_token": "at-1",
+            "refresh_token": "rt-1",
         }
         c.update(overrides)
         return c
 
     def test_constructs_hydradb_client_with_sub_tenant(self):
         from gmail_oauth import run_workspace_gmail_ingest
+
         with patch(
-            "gmail_oauth.list_message_ids_for_label", return_value=[],
+            "gmail_oauth.list_message_ids_for_label",
+            return_value=[],
         ), patch(
             "hydradb_client.HydraDBClient",
         ) as mock_hydra, patch(
-            "supabase_client.upsert_gmail_ingestion_state", return_value=True,
+            "supabase_client.upsert_gmail_ingestion_state",
+            return_value=True,
         ):
             run_workspace_gmail_ingest(
                 workspace_id="ws-1",
@@ -491,12 +538,15 @@ class TestRunWorkspaceGmailIngest:
 
     def test_missing_sub_tenant_falls_back_to_default(self):
         from gmail_oauth import run_workspace_gmail_ingest
+
         with patch(
-            "gmail_oauth.list_message_ids_for_label", return_value=[],
+            "gmail_oauth.list_message_ids_for_label",
+            return_value=[],
         ), patch(
             "hydradb_client.HydraDBClient",
         ) as mock_hydra, patch(
-            "supabase_client.upsert_gmail_ingestion_state", return_value=True,
+            "supabase_client.upsert_gmail_ingestion_state",
+            return_value=True,
         ):
             run_workspace_gmail_ingest(
                 workspace_id="ws-1",
@@ -507,6 +557,7 @@ class TestRunWorkspaceGmailIngest:
 
     def test_no_labels_returns_zero_counts(self):
         from gmail_oauth import run_workspace_gmail_ingest
+
         with patch("hydradb_client.HydraDBClient") as mock_hydra:
             stats = run_workspace_gmail_ingest(
                 workspace_id="ws-1",
@@ -519,6 +570,7 @@ class TestRunWorkspaceGmailIngest:
 
     def test_missing_refresh_token_dead_letters(self):
         from gmail_oauth import run_workspace_gmail_ingest
+
         with patch(
             "gmail_oauth.emit_dead_letter",
         ) as mock_dl, patch(
@@ -537,12 +589,14 @@ class TestRunWorkspaceGmailIngest:
 
     def test_spam_and_trash_blocked_by_default(self):
         from gmail_oauth import run_workspace_gmail_ingest
+
         with patch(
             "gmail_oauth.list_message_ids_for_label",
         ) as mock_list, patch(
             "hydradb_client.HydraDBClient",
         ), patch(
-            "supabase_client.upsert_gmail_ingestion_state", return_value=True,
+            "supabase_client.upsert_gmail_ingestion_state",
+            return_value=True,
         ):
             stats = run_workspace_gmail_ingest(
                 workspace_id="ws-1",
@@ -556,13 +610,16 @@ class TestRunWorkspaceGmailIngest:
 
     def test_spam_trash_allowed_via_env(self, monkeypatch):
         from gmail_oauth import run_workspace_gmail_ingest
+
         monkeypatch.setenv("GMAIL_ALLOW_SPAM_TRASH", "true")
         with patch(
-            "gmail_oauth.list_message_ids_for_label", return_value=[],
+            "gmail_oauth.list_message_ids_for_label",
+            return_value=[],
         ) as mock_list, patch(
             "hydradb_client.HydraDBClient",
         ), patch(
-            "supabase_client.upsert_gmail_ingestion_state", return_value=True,
+            "supabase_client.upsert_gmail_ingestion_state",
+            return_value=True,
         ):
             stats = run_workspace_gmail_ingest(
                 workspace_id="ws-1",
@@ -577,30 +634,36 @@ class TestRunWorkspaceGmailIngest:
     def test_max_messages_cap_respected(self):
         # Cap at 2 even if Gmail returns 5 IDs.
         from gmail_oauth import run_workspace_gmail_ingest
+
         msg = {
-            "id":      "m1",
+            "id": "m1",
             "snippet": "hi",
             "labelIds": ["INBOX"],
             "payload": {
                 "mimeType": "text/plain",
-                "body":     {"data": ""},
-                "headers":  [{"name": "Subject", "value": "x"}],
+                "body": {"data": ""},
+                "headers": [{"name": "Subject", "value": "x"}],
             },
         }
 
         mock_hydra_instance = MagicMock()
         mock_hydra_instance.upload_knowledge.return_value = {
-            "success": True, "success_count": 2, "failed_count": 0,
+            "success": True,
+            "success_count": 2,
+            "failed_count": 0,
         }
         with patch(
             "gmail_oauth.list_message_ids_for_label",
             return_value=["m1", "m2", "m3", "m4", "m5"],
         ), patch(
-            "gmail_oauth.fetch_message", return_value=msg,
+            "gmail_oauth.fetch_message",
+            return_value=msg,
         ) as mock_fetch, patch(
-            "hydradb_client.HydraDBClient", return_value=mock_hydra_instance,
+            "hydradb_client.HydraDBClient",
+            return_value=mock_hydra_instance,
         ), patch(
-            "supabase_client.upsert_gmail_ingestion_state", return_value=True,
+            "supabase_client.upsert_gmail_ingestion_state",
+            return_value=True,
         ):
             stats = run_workspace_gmail_ingest(
                 workspace_id="ws-1",
@@ -615,12 +678,15 @@ class TestRunWorkspaceGmailIngest:
 
     def test_returns_stats_shape(self):
         from gmail_oauth import run_workspace_gmail_ingest
+
         with patch(
-            "gmail_oauth.list_message_ids_for_label", return_value=[],
+            "gmail_oauth.list_message_ids_for_label",
+            return_value=[],
         ), patch(
             "hydradb_client.HydraDBClient",
         ), patch(
-            "supabase_client.upsert_gmail_ingestion_state", return_value=True,
+            "supabase_client.upsert_gmail_ingestion_state",
+            return_value=True,
         ):
             stats = run_workspace_gmail_ingest(
                 workspace_id="ws-1",
@@ -629,8 +695,12 @@ class TestRunWorkspaceGmailIngest:
                 hydradb_sub_tenant_id="ws_x",
             )
         for key in (
-            "labels_processed", "labels_skipped", "labels_failed",
-            "messages_fetched", "messages_uploaded", "messages_failed",
+            "labels_processed",
+            "labels_skipped",
+            "labels_failed",
+            "messages_fetched",
+            "messages_uploaded",
+            "messages_failed",
             "messages_skipped",
         ):
             assert key in stats

@@ -33,23 +33,24 @@ _BACKEND_DIR = _THIS_DIR.parent
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
+import logging  # noqa: E402
+
 from dotenv import load_dotenv  # noqa: E402
 from slack_sdk.errors import SlackApiError  # noqa: E402
 
-from ingestion.slack_client import SlackClientWrapper  # noqa: E402
-from ingestion.normalize import (  # noqa: E402
-    is_noise,
-    is_thread_parent,
-    is_thread_reply,
-)
+from hydradb_client import HydraDBClient, summarize_upload_response  # noqa: E402
 from ingestion.ingestion_state import (  # noqa: E402
     IngestionState,
     stable_key_for_message,
     stable_key_for_thread,
 )
-from hydradb_client import HydraDBClient, summarize_upload_response  # noqa: E402
+from ingestion.normalize import (  # noqa: E402
+    is_noise,
+    is_thread_parent,
+    is_thread_reply,
+)
+from ingestion.slack_client import SlackClientWrapper  # noqa: E402
 
-import logging  # noqa: E402
 logger = logging.getLogger(__name__)
 
 
@@ -70,9 +71,7 @@ def parse_channel_ids() -> List[str]:
 
 
 def force_reingest_enabled() -> bool:
-    return os.getenv("FORCE_REINGEST", "").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
+    return os.getenv("FORCE_REINGEST", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def fetch_channel_name(slack: SlackClientWrapper, channel_id: str) -> str:
@@ -153,10 +152,7 @@ def build_message_file(
 
     content = "\n".join(header_lines + ["", text])
 
-    filename = (
-        f"slack_{_safe_filename_part(channel_name)}_"
-        f"msg_{_ts_for_filename(ts)}.md"
-    )
+    filename = f"slack_{_safe_filename_part(channel_name)}_" f"msg_{_ts_for_filename(ts)}.md"
     return {
         "filename": filename,
         "content": content,
@@ -183,22 +179,16 @@ def build_thread_file(
 ) -> Dict[str, Any]:
     """Build a single .md file combining a thread parent and its replies."""
     thread_ts = parent_message.get("ts", "")
-    parent_user_id = (
-        parent_message.get("user") or parent_message.get("bot_id") or "unknown"
-    )
+    parent_user_id = parent_message.get("user") or parent_message.get("bot_id") or "unknown"
     parent_text = (parent_message.get("text") or "").strip()
     stable_key = stable_key_for_thread(channel_id, thread_ts)
 
-    parent_user_name = (
-        slack.resolve_user_name(parent_message.get("user")) or parent_user_id
-    )
+    parent_user_name = slack.resolve_user_name(parent_message.get("user")) or parent_user_id
     permalink = slack.get_permalink(channel_id, thread_ts) if thread_ts else None
     snippet = _make_snippet(parent_text)
 
     # Slack returns the parent as the first reply; drop it + any noise.
-    real_replies = [
-        m for m in replies if m.get("ts") != thread_ts and not is_noise(m)
-    ]
+    real_replies = [m for m in replies if m.get("ts") != thread_ts and not is_noise(m)]
 
     header_lines = [
         "# Slack Thread",
@@ -222,19 +212,13 @@ def build_thread_file(
         for reply in real_replies:
             r_ts = reply.get("ts", "")
             r_user_name = (
-                slack.resolve_user_name(reply.get("user"))
-                or reply.get("user")
-                or reply.get("bot_id")
-                or "unknown"
+                slack.resolve_user_name(reply.get("user")) or reply.get("user") or reply.get("bot_id") or "unknown"
             )
             r_text = (reply.get("text") or "").strip()
             lines.append(f"[{r_ts}] {r_user_name}: {r_text}")
 
     content = "\n".join(lines)
-    filename = (
-        f"slack_{_safe_filename_part(channel_name)}_"
-        f"thread_{_ts_for_filename(thread_ts)}.md"
-    )
+    filename = f"slack_{_safe_filename_part(channel_name)}_" f"thread_{_ts_for_filename(thread_ts)}.md"
     return {
         "filename": filename,
         "content": content,
@@ -275,20 +259,26 @@ def process_channel(
     channel_name = fetch_channel_name(slack, channel_id)
 
     oldest = None if force else state.get_last_synced_ts(channel_id)
-    logger.info('ingest_channel_start', extra={
-        'channel_id': channel_id,
-        'incremental': bool(oldest),
-    })
+    logger.info(
+        'ingest_channel_start',
+        extra={
+            'channel_id': channel_id,
+            'incremental': bool(oldest),
+        },
+    )
 
     raw_messages = slack.fetch_channel_messages(
         channel_id=channel_id,
         limit_per_channel=MESSAGES_PER_CHANNEL,
         oldest=oldest,
     )
-    logger.info('ingest_channel_messages_fetched', extra={
-        'channel_id': channel_id,
-        'count': len(raw_messages),
-    })
+    logger.info(
+        'ingest_channel_messages_fetched',
+        extra={
+            'channel_id': channel_id,
+            'count': len(raw_messages),
+        },
+    )
 
     files_to_upload: List[Dict[str, Any]] = []
     skipped_count = 0
@@ -320,9 +310,7 @@ def process_channel(
                 thread_ts=thread_ts,
             )
             threads_fetched += 1
-            files_to_upload.append(
-                build_thread_file(message, replies, channel_id, channel_name, slack)
-            )
+            files_to_upload.append(build_thread_file(message, replies, channel_id, channel_name, slack))
             continue
 
         # Skip thread replies surfaced in conversations.history; their
@@ -337,9 +325,7 @@ def process_channel(
             skipped_count += 1
             continue
 
-        files_to_upload.append(
-            build_message_file(message, channel_id, channel_name, slack)
-        )
+        files_to_upload.append(build_message_file(message, channel_id, channel_name, slack))
 
     return {
         "channel_id": channel_id,
@@ -452,11 +438,14 @@ def upload_in_batches(
     failures = 0
 
     for start in range(0, len(files), UPLOAD_BATCH_SIZE):
-        batch = files[start:start + UPLOAD_BATCH_SIZE]
-        logger.info('ingest_upload_batch_start', extra={
-            'batch_start': start,
-            'batch_size': len(batch),
-        })
+        batch = files[start : start + UPLOAD_BATCH_SIZE]
+        logger.info(
+            'ingest_upload_batch_start',
+            extra={
+                'batch_start': start,
+                'batch_size': len(batch),
+            },
+        )
 
         # The HydraDB client expects {filename, content} dicts; our prepared
         # files carry extra metadata fields too — those are harmless extras.
@@ -500,10 +489,13 @@ def main() -> None:
     slack = SlackClientWrapper()
     hydra = HydraDBClient()
     state = IngestionState(STATE_PATH)
-    logger.info('ingest_state_loaded', extra={
-        'entry_count': len(state.entries),
-        'channel_count': len(state.channels),
-    })
+    logger.info(
+        'ingest_state_loaded',
+        extra={
+            'entry_count': len(state.entries),
+            'channel_count': len(state.channels),
+        },
+    )
 
     total_raw_messages = 0
     total_threads = 0
@@ -522,9 +514,13 @@ def main() -> None:
         try:
             result = process_channel(slack, channel_id, state, force=force)
         except Exception as e:  # noqa: BLE001 -- keep going on bad channels
-            logger.error('ingest_channel_error', extra={
-                'channel_id': channel_id, 'error': type(e).__name__,
-            })
+            logger.error(
+                'ingest_channel_error',
+                extra={
+                    'channel_id': channel_id,
+                    'error': type(e).__name__,
+                },
+            )
             continue
 
         total_raw_messages += result["raw_count"]
@@ -537,11 +533,14 @@ def main() -> None:
             if newest:
                 state.set_last_synced_ts(result["channel_id"], newest)
                 state.save_locked()
-                logger.info('ingest_channel_watermark_advanced', extra={
-                    'channel_id': result['channel_id'],
-                    'newest_ts': newest,
-                    'reason': 'nothing_new',
-                })
+                logger.info(
+                    'ingest_channel_watermark_advanced',
+                    extra={
+                        'channel_id': result['channel_id'],
+                        'newest_ts': newest,
+                        'reason': 'nothing_new',
+                    },
+                )
             continue
 
         stats = upload_in_batches(hydra, result["files"], state)
@@ -556,27 +555,36 @@ def main() -> None:
         if newest and stats["failures"] == 0:
             state.set_last_synced_ts(result["channel_id"], newest)
             state.save_locked()
-            logger.info('ingest_channel_watermark_advanced', extra={
-                'channel_id': result['channel_id'],
-                'newest_ts': newest,
-                'reason': 'upload_ok',
-            })
+            logger.info(
+                'ingest_channel_watermark_advanced',
+                extra={
+                    'channel_id': result['channel_id'],
+                    'newest_ts': newest,
+                    'reason': 'upload_ok',
+                },
+            )
         elif stats["failures"] > 0:
-            logger.warning('ingest_channel_upload_failures', extra={
-                'channel_id': result['channel_id'],
-                'failure_count': stats['failures'],
-            })
+            logger.warning(
+                'ingest_channel_upload_failures',
+                extra={
+                    'channel_id': result['channel_id'],
+                    'failure_count': stats['failures'],
+                },
+            )
 
-    logger.info('ingest_run_complete', extra={
-        'channels_processed': len(channel_ids),
-        'raw_messages': total_raw_messages,
-        'threads': total_threads,
-        'files_prepared': total_files_prepared,
-        'skipped': total_skipped,
-        'successes': total_successes,
-        'failures': total_failures,
-        'state_entries': len(state.entries),
-    })
+    logger.info(
+        'ingest_run_complete',
+        extra={
+            'channels_processed': len(channel_ids),
+            'raw_messages': total_raw_messages,
+            'threads': total_threads,
+            'files_prepared': total_files_prepared,
+            'skipped': total_skipped,
+            'successes': total_successes,
+            'failures': total_failures,
+            'state_entries': len(state.entries),
+        },
+    )
 
 
 if __name__ == "__main__":

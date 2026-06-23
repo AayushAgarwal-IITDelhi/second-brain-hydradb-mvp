@@ -5,6 +5,7 @@ import pytest
 
 def _rewrite(question, explicit_channel=None, explicit_user=None):
     from query_rewriter import rewrite_query
+
     return rewrite_query(
         question,
         explicit_channel=explicit_channel,
@@ -32,20 +33,23 @@ class TestEmptyInput:
 
 # ── Strong person patterns ─────────────────────────────────────────────────
 class TestStrongPersonInference:
-    @pytest.mark.parametrize("question,expected_name", [
-        ("What did Alice say about the roadmap?", "Alice"),
-        ("did Bob mention the API changes?", "Bob"),
-        ("messages from Praveer Nema last week", "Praveer Nema"),
-        ("according to Charlie the meeting is cancelled", "Charlie"),
-        ("Alice said the deadline is Friday", "Alice"),
-        ("what was Diana saying about the sprint?", "Diana"),
-        ("written by Eve in the general channel", "Eve"),
-    ])
+    @pytest.mark.parametrize(
+        "question,expected_name",
+        [
+            ("What did Alice say about the roadmap?", "Alice"),
+            ("did Bob mention the API changes?", "Bob"),
+            ("messages from Praveer Nema last week", "Praveer Nema"),
+            ("according to Charlie the meeting is cancelled", "Charlie"),
+            ("Alice said the deadline is Friday", "Alice"),
+            ("what was Diana saying about the sprint?", "Diana"),
+            ("written by Eve in the general channel", "Eve"),
+        ],
+    )
     def test_strong_person_patterns(self, question, expected_name):
         r = _rewrite(question)
-        assert r["inferred_person"] == expected_name, (
-            f"Expected {expected_name!r} from {question!r}, got {r['inferred_person']!r}"
-        )
+        assert (
+            r["inferred_person"] == expected_name
+        ), f"Expected {expected_name!r} from {question!r}, got {r['inferred_person']!r}"
         assert r["person_confidence"] == "strong"
 
     def test_strong_inference_appears_in_biases(self):
@@ -55,10 +59,13 @@ class TestStrongPersonInference:
 
 # ── Weak person patterns ───────────────────────────────────────────────────
 class TestWeakPersonInference:
-    @pytest.mark.parametrize("question", [
-        "What is Alice's opinion on this?",
-        "What is Bob's view on the migration?",
-    ])
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "What is Alice's opinion on this?",
+            "What is Bob's view on the migration?",
+        ],
+    )
     def test_weak_person_patterns(self, question):
         r = _rewrite(question)
         assert r["inferred_person"] is not None
@@ -71,18 +78,19 @@ class TestWeakPersonInference:
 
 # ── Person blocklist ───────────────────────────────────────────────────────
 class TestPersonBlocklist:
-    @pytest.mark.parametrize("question", [
-        "What did the team say about it?",
-        "What did Slack say in the announcement?",
-        "Did Monday get mentioned?",
-        "What did January bring?",
-        "What did anyone say about the deadline?",
-    ])
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "What did the team say about it?",
+            "What did Slack say in the announcement?",
+            "Did Monday get mentioned?",
+            "What did January bring?",
+            "What did anyone say about the deadline?",
+        ],
+    )
     def test_blocklist_prevents_false_positives(self, question):
         r = _rewrite(question)
-        assert r["inferred_person"] is None, (
-            f"Got unexpected person={r['inferred_person']!r} from {question!r}"
-        )
+        assert r["inferred_person"] is None, f"Got unexpected person={r['inferred_person']!r} from {question!r}"
 
     def test_product_name_not_inferred_as_person(self):
         r = _rewrite("What did OpenAI say about GPT?")
@@ -96,18 +104,21 @@ class TestPersonBlocklist:
 
 # ── Strong channel patterns ────────────────────────────────────────────────
 class TestStrongChannelInference:
-    @pytest.mark.parametrize("question,expected_channel", [
-        ("What happened in #product?", "product"),
-        ("What happened in #all-second-brain last week?", "all-second-brain"),
-        ("discussions in engineering yesterday", "engineering"),
-        ("the sales channel this week", "sales"),
-        ("what happened in design?", "design"),
-    ])
+    @pytest.mark.parametrize(
+        "question,expected_channel",
+        [
+            ("What happened in #product?", "product"),
+            ("What happened in #all-second-brain last week?", "all-second-brain"),
+            ("discussions in engineering yesterday", "engineering"),
+            ("the sales channel this week", "sales"),
+            ("what happened in design?", "design"),
+        ],
+    )
     def test_strong_channel_patterns(self, question, expected_channel):
         r = _rewrite(question)
-        assert r["inferred_channel"] == expected_channel, (
-            f"Expected {expected_channel!r} from {question!r}, got {r['inferred_channel']!r}"
-        )
+        assert (
+            r["inferred_channel"] == expected_channel
+        ), f"Expected {expected_channel!r} from {question!r}, got {r['inferred_channel']!r}"
         assert r["channel_confidence"] == "strong"
 
     def test_hash_prefix_stripped_from_channel(self):
@@ -117,17 +128,18 @@ class TestStrongChannelInference:
 
 # ── Channel blocklist ──────────────────────────────────────────────────────
 class TestChannelBlocklist:
-    @pytest.mark.parametrize("question", [
-        "What happened in the meeting?",
-        "What happened in the discussion?",
-        "What happened in a thread?",
-        "discussed in last week",
-    ])
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "What happened in the meeting?",
+            "What happened in the discussion?",
+            "What happened in a thread?",
+            "discussed in last week",
+        ],
+    )
     def test_blocklist_prevents_false_channel_positives(self, question):
         r = _rewrite(question)
-        assert r["inferred_channel"] is None, (
-            f"Got unexpected channel={r['inferred_channel']!r} from {question!r}"
-        )
+        assert r["inferred_channel"] is None, f"Got unexpected channel={r['inferred_channel']!r} from {question!r}"
 
 
 # ── Explicit overrides suppress inference ─────────────────────────────────
@@ -160,8 +172,10 @@ class TestExplicitOverrides:
 class TestReturnStructure:
     def test_always_returns_required_keys(self):
         required = {
-            "inferred_person", "inferred_channel",
-            "person_confidence", "channel_confidence",
+            "inferred_person",
+            "inferred_channel",
+            "person_confidence",
+            "channel_confidence",
             "retrieval_biases_applied",
         }
         r = _rewrite("what did Alice say in #sales?")

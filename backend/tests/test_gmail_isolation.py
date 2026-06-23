@@ -30,7 +30,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
 # The conftest's jwt_auth_headers fixture authenticates as
 # TEST_WS_ID below ("workspace A"). The tests then probe what happens
 # when the requested connection / labels belong to a DIFFERENT
@@ -44,6 +43,7 @@ def _reset_rate_limit_state():
     """Clear bucketed rate-limit state per-test so the ingest tests in
     this file don't trip the 5/5min limit on each other."""
     from rate_limit import _limiter
+
     with _limiter._lock:
         _limiter._buckets.clear()
     yield
@@ -56,15 +56,19 @@ def _reset_rate_limit_state():
 # =====================================================================
 class TestConnectionIsolation:
     def test_list_connections_only_returns_caller_workspace(
-        self, client, jwt_auth_headers,
+        self,
+        client,
+        jwt_auth_headers,
     ):
         """list_gmail_connections_public is called with the CALLER's
         workspace_id -- it cannot leak rows from another workspace."""
         with patch(
-            "main.list_gmail_connections_public", return_value=[],
+            "main.list_gmail_connections_public",
+            return_value=[],
         ) as mock_list:
             r = client.get(
-                "/api/gmail/connections", headers=jwt_auth_headers,
+                "/api/gmail/connections",
+                headers=jwt_auth_headers,
             )
         assert r.status_code == 200
         kwargs = mock_list.call_args.kwargs
@@ -73,13 +77,16 @@ class TestConnectionIsolation:
         assert kwargs["workspace_id"] == WORKSPACE_A
 
     def test_delete_foreign_connection_returns_404(
-        self, client, jwt_auth_headers,
+        self,
+        client,
+        jwt_auth_headers,
     ):
         """If the connection lives in workspace B, the workspace-A
         scoped DELETE returns 0 rows -- the helper returns False ->
         the route returns 404. No leak; no UI confusion."""
         with patch(
-            "main.delete_gmail_connection", return_value=False,
+            "main.delete_gmail_connection",
+            return_value=False,
         ) as mock_delete:
             r = client.delete(
                 "/api/gmail/connections/foreign-conn",
@@ -91,13 +98,16 @@ class TestConnectionIsolation:
         assert kwargs["workspace_id"] == WORKSPACE_A
 
     def test_get_foreign_connection_for_ingest_returns_400(
-        self, client, jwt_auth_headers,
+        self,
+        client,
+        jwt_auth_headers,
     ):
         """A bogus or foreign connection_id passed to /api/gmail/ingest
         returns 400 -- get_gmail_connection's workspace_id filter
         means the lookup returns None."""
         with patch(
-            "main.get_gmail_connection", return_value=None,
+            "main.get_gmail_connection",
+            return_value=None,
         ), patch(
             "main.run_workspace_gmail_ingest",
         ) as mock_runner:
@@ -110,13 +120,16 @@ class TestConnectionIsolation:
         mock_runner.assert_not_called()
 
     def test_save_labels_for_foreign_connection_returns_404(
-        self, client, jwt_auth_headers,
+        self,
+        client,
+        jwt_auth_headers,
     ):
         """Save-labels guards against silently no-op'ing on a foreign
         connection. The 404 also prevents probing for the existence of
         another workspace's connection IDs."""
         with patch(
-            "main.get_gmail_connection_public", return_value=None,
+            "main.get_gmail_connection_public",
+            return_value=None,
         ), patch(
             "main.set_selected_gmail_labels",
         ) as mock_save:
@@ -124,7 +137,7 @@ class TestConnectionIsolation:
                 "/api/gmail/labels",
                 headers=jwt_auth_headers,
                 json={
-                    "connection_id":      "foreign-conn",
+                    "connection_id": "foreign-conn",
                     "selected_label_ids": ["INBOX"],
                 },
             )
@@ -137,26 +150,32 @@ class TestConnectionIsolation:
 # =====================================================================
 class TestSubTenantRouting:
     def test_ingest_uses_workspace_sub_tenant(
-        self, client, jwt_auth_headers,
+        self,
+        client,
+        jwt_auth_headers,
     ):
         """The route MUST resolve THIS workspace's sub-tenant id and
         forward it to the ingest runner. A global default would mix
         workspaces in HydraDB."""
         connection = {
-            "id":            "conn-1",
-            "workspace_id":  WORKSPACE_A,
-            "email":         "owner@example.com",
-            "access_token":  "at",
+            "id": "conn-1",
+            "workspace_id": WORKSPACE_A,
+            "email": "owner@example.com",
+            "access_token": "at",
             "refresh_token": "rt",
         }
         with patch(
-            "main.get_gmail_connection", return_value=connection,
+            "main.get_gmail_connection",
+            return_value=connection,
         ), patch(
-            "main.list_selected_gmail_label_ids", return_value=["INBOX"],
+            "main.list_selected_gmail_label_ids",
+            return_value=["INBOX"],
         ), patch(
-            "main.ensure_workspace_sub_tenant", return_value="ws_aaaaaaaaaaaa",
+            "main.ensure_workspace_sub_tenant",
+            return_value="ws_aaaaaaaaaaaa",
         ) as mock_ensure, patch(
-            "main.run_workspace_gmail_ingest", return_value={},
+            "main.run_workspace_gmail_ingest",
+            return_value={},
         ) as mock_runner:
             r = client.post(
                 "/api/gmail/ingest",
@@ -170,24 +189,25 @@ class TestSubTenantRouting:
         # workspace).
         assert mock_ensure.call_args.kwargs["workspace_id"] == WORKSPACE_A
         # The runner receives that workspace's sub-tenant.
-        assert mock_runner.call_args.kwargs["hydradb_sub_tenant_id"] == (
-            "ws_aaaaaaaaaaaa"
-        )
+        assert mock_runner.call_args.kwargs["hydradb_sub_tenant_id"] == ("ws_aaaaaaaaaaaa")
 
     def test_missing_sub_tenant_502_blocks_ingest(
-        self, client, jwt_auth_headers,
+        self,
+        client,
+        jwt_auth_headers,
     ):
         """If we can't resolve the workspace's sub-tenant, we refuse
         the ingest with 502 -- we MUST NOT fall back to the env-default
         sub-tenant, which would leak emails into the shared bucket."""
         with patch(
             "main.get_gmail_connection",
-            return_value={"id": "conn-1", "workspace_id": WORKSPACE_A,
-                          "refresh_token": "rt"},
+            return_value={"id": "conn-1", "workspace_id": WORKSPACE_A, "refresh_token": "rt"},
         ), patch(
-            "main.list_selected_gmail_label_ids", return_value=["INBOX"],
+            "main.list_selected_gmail_label_ids",
+            return_value=["INBOX"],
         ), patch(
-            "main.ensure_workspace_sub_tenant", return_value=None,
+            "main.ensure_workspace_sub_tenant",
+            return_value=None,
         ), patch(
             "main.run_workspace_gmail_ingest",
         ) as mock_runner:
@@ -204,18 +224,21 @@ class TestSubTenantRouting:
         be constructed with the workspace's sub_tenant_id (not the
         env default) whenever one is passed."""
         from gmail_oauth import run_workspace_gmail_ingest
+
         connection = {
-            "id":            "conn-1",
-            "email":         "u@example.com",
-            "access_token":  "at",
+            "id": "conn-1",
+            "email": "u@example.com",
+            "access_token": "at",
             "refresh_token": "rt",
         }
         with patch(
-            "gmail_oauth.list_message_ids_for_label", return_value=[],
+            "gmail_oauth.list_message_ids_for_label",
+            return_value=[],
         ), patch(
             "hydradb_client.HydraDBClient",
         ) as mock_cls, patch(
-            "supabase_client.upsert_gmail_ingestion_state", return_value=True,
+            "supabase_client.upsert_gmail_ingestion_state",
+            return_value=True,
         ):
             run_workspace_gmail_ingest(
                 workspace_id=WORKSPACE_A,
@@ -236,6 +259,7 @@ class TestOAuthStateIsolation:
         """State minted for workspace A must verify with workspace A's
         workspace_id and no other."""
         from gmail_oauth import make_oauth_state, verify_oauth_state
+
         token = make_oauth_state(WORKSPACE_A, "user-a")
         payload = verify_oauth_state(token)
         assert payload is not None
@@ -248,6 +272,7 @@ class TestOAuthStateIsolation:
         rejects the tampered state."""
         import base64
         import json
+
         from gmail_oauth import make_oauth_state, verify_oauth_state
 
         token = make_oauth_state(WORKSPACE_A, "user-a")
@@ -267,12 +292,14 @@ class TestOAuthStateIsolation:
         """A stolen state that survives past its 5-minute window must
         not be replayable, regardless of which workspace it claims."""
         from gmail_oauth import make_oauth_state, verify_oauth_state
+
         token = make_oauth_state(WORKSPACE_A, "user-a")
         with patch("oauth_common.time.time", return_value=time.time() + 10_000):
             assert verify_oauth_state(token) is None
 
     def test_callback_uses_state_workspace_not_caller_workspace(
-        self, client,
+        self,
+        client,
     ):
         """Critical safety: the OAuth callback has NO Authorization
         header (Google's redirect can't send one). It MUST infer the
@@ -280,18 +307,17 @@ class TestOAuthStateIsolation:
         header an attacker could spoof. We verify the upsert receives
         the state's workspace_id."""
         from gmail_oauth import make_oauth_state
+
         state = make_oauth_state(WORKSPACE_B, "user-b")  # state for B
         with patch(
             "main.gmail_exchange_code",
-            return_value={"access_token": "at", "refresh_token": "rt",
-                          "expires_in": 3600},
+            return_value={"access_token": "at", "refresh_token": "rt", "expires_in": 3600},
         ), patch(
             "main.gmail_fetch_user_info",
             return_value={"sub": "google-1", "email": "u@example.com"},
         ), patch(
             "main.upsert_gmail_connection",
-            return_value={"id": "conn-x", "email": "u@example.com",
-                          "google_user_id": "google-1"},
+            return_value={"id": "conn-x", "email": "u@example.com", "google_user_id": "google-1"},
         ) as mock_upsert:
             r = client.get(
                 "/api/gmail/oauth/callback",
@@ -313,7 +339,9 @@ class TestOAuthStateIsolation:
 # =====================================================================
 class TestTokenSecrecy:
     def test_connections_response_carries_no_token_fields(
-        self, client, jwt_auth_headers,
+        self,
+        client,
+        jwt_auth_headers,
     ):
         """The public-projection helper strips tokens. We additionally
         scan the rendered response body for the substrings, so a future
@@ -323,21 +351,22 @@ class TestTokenSecrecy:
             "main.list_gmail_connections_public",
             return_value=[
                 {
-                    "id":             "conn-1",
-                    "workspace_id":   WORKSPACE_A,
+                    "id": "conn-1",
+                    "workspace_id": WORKSPACE_A,
                     "google_user_id": "google-1",
-                    "email":          "u@example.com",
-                    "scopes":         "openid email",
-                    "status":         "active",
-                    "connected_at":   "2025-01-01T00:00:00Z",
-                    "created_at":     "2025-01-01T00:00:00Z",
-                    "updated_at":     "2025-01-01T00:00:00Z",
-                    "token_expiry":   None,
+                    "email": "u@example.com",
+                    "scopes": "openid email",
+                    "status": "active",
+                    "connected_at": "2025-01-01T00:00:00Z",
+                    "created_at": "2025-01-01T00:00:00Z",
+                    "updated_at": "2025-01-01T00:00:00Z",
+                    "token_expiry": None,
                 },
             ],
         ):
             r = client.get(
-                "/api/gmail/connections", headers=jwt_auth_headers,
+                "/api/gmail/connections",
+                headers=jwt_auth_headers,
             )
         body_text = r.text
         # Even the FIELD NAMES "access_token" / "refresh_token" must
@@ -349,18 +378,19 @@ class TestTokenSecrecy:
         """Unit-level: the public projection helper omits token fields
         EVEN IF a buggy caller upstream forgets to."""
         from supabase_client import _gmail_public_projection
+
         row = {
-            "id":             "conn-1",
-            "workspace_id":   WORKSPACE_A,
+            "id": "conn-1",
+            "workspace_id": WORKSPACE_A,
             "google_user_id": "google-1",
-            "email":          "u@example.com",
-            "access_token":   "should-NEVER-leave",
-            "refresh_token":  "should-NEVER-leave",
-            "token_expiry":   "2025-01-01T00:00:00Z",
-            "scopes":         "openid email",
-            "status":         "active",
-            "created_at":     "2025-01-01T00:00:00Z",
-            "updated_at":     "2025-01-01T00:00:00Z",
+            "email": "u@example.com",
+            "access_token": "should-NEVER-leave",
+            "refresh_token": "should-NEVER-leave",
+            "token_expiry": "2025-01-01T00:00:00Z",
+            "scopes": "openid email",
+            "status": "active",
+            "created_at": "2025-01-01T00:00:00Z",
+            "updated_at": "2025-01-01T00:00:00Z",
         }
         public = _gmail_public_projection(row)
         assert "access_token" not in public
@@ -373,12 +403,16 @@ class TestTokenSecrecy:
         a buggy caller can't accidentally overwrite another
         workspace's tokens."""
         from supabase_client import update_gmail_connection_tokens
+
         # Blank workspace_id -> refuse the write entirely, return False.
-        assert update_gmail_connection_tokens(
-            connection_id="conn-1",
-            workspace_id="",
-            access_token="new-at",
-        ) is False
+        assert (
+            update_gmail_connection_tokens(
+                connection_id="conn-1",
+                workspace_id="",
+                access_token="new-at",
+            )
+            is False
+        )
 
 
 # =====================================================================
@@ -390,18 +424,20 @@ class TestSpamTrashProtection:
         ingest runner refuses to pull them unless GMAIL_ALLOW_SPAM_TRASH
         is explicitly set."""
         from gmail_oauth import run_workspace_gmail_ingest
+
         connection = {
-            "id":            "c",
-            "email":         "u@example.com",
+            "id": "c",
+            "email": "u@example.com",
             "refresh_token": "rt",
-            "access_token":  "at",
+            "access_token": "at",
         }
         with patch(
             "gmail_oauth.list_message_ids_for_label",
         ) as mock_list, patch(
             "hydradb_client.HydraDBClient",
         ), patch(
-            "supabase_client.upsert_gmail_ingestion_state", return_value=True,
+            "supabase_client.upsert_gmail_ingestion_state",
+            return_value=True,
         ):
             stats = run_workspace_gmail_ingest(
                 workspace_id=WORKSPACE_A,

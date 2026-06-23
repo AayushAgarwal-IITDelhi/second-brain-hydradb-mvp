@@ -20,6 +20,7 @@ USER_ID = "00000000-0000-0000-0000-000000000002"
 
 # ── Round-trip / happy path ───────────────────────────────────────────────
 
+
 class TestMakeAndVerify:
     def test_round_trip(self):
         token = make_oauth_state(SECRET, WS_ID, USER_ID)
@@ -45,6 +46,7 @@ class TestMakeAndVerify:
 
 
 # ── verify_oauth_state — rejection cases ────────────────────────────────
+
 
 class TestVerifyRejects:
     def test_empty_state(self):
@@ -81,19 +83,23 @@ class TestVerifyRejects:
         token = make_oauth_state(SECRET, WS_ID, USER_ID)
         real_time = time.time
         try:
-            time.time = lambda: real_time() + 3600   # jump 1 h ahead
+            time.time = lambda: real_time() + 3600  # jump 1 h ahead
             assert verify_oauth_state(SECRET, token) is None
         finally:
             time.time = real_time
 
     def test_missing_workspace_id_rejected(self):
         # Craft a token that is otherwise valid but omits workspace_id.
-        import base64, hashlib, hmac, json, secrets as _secrets
+        import base64
+        import hashlib
+        import hmac
+        import json
+        import secrets as _secrets
 
         payload = {
             "user_id": USER_ID,
-            "exp":     int(time.time()) + 300,
-            "nonce":   _secrets.token_urlsafe(8),
+            "exp": int(time.time()) + 300,
+            "nonce": _secrets.token_urlsafe(8),
         }
         raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
         sig = hmac.new(SECRET.encode(), raw, hashlib.sha256).digest()
@@ -103,12 +109,16 @@ class TestVerifyRejects:
         assert verify_oauth_state(SECRET, token) is None
 
     def test_missing_user_id_rejected(self):
-        import base64, hashlib, hmac, json, secrets as _secrets
+        import base64
+        import hashlib
+        import hmac
+        import json
+        import secrets as _secrets
 
         payload = {
             "workspace_id": WS_ID,
-            "exp":          int(time.time()) + 300,
-            "nonce":        _secrets.token_urlsafe(8),
+            "exp": int(time.time()) + 300,
+            "nonce": _secrets.token_urlsafe(8),
         }
         raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
         sig = hmac.new(SECRET.encode(), raw, hashlib.sha256).digest()
@@ -119,7 +129,9 @@ class TestVerifyRejects:
 
     def test_non_json_payload_rejected(self):
         # Payload that is valid base64 but not JSON.
-        import base64, hashlib, hmac
+        import base64
+        import hashlib
+        import hmac
 
         raw = b"this-is-not-json"
         sig = hmac.new(SECRET.encode(), raw, hashlib.sha256).digest()
@@ -129,7 +141,10 @@ class TestVerifyRejects:
 
     def test_json_array_rejected(self):
         # JSON but not a dict.
-        import base64, hashlib, hmac, json
+        import base64
+        import hashlib
+        import hmac
+        import json
 
         raw = json.dumps([1, 2, 3]).encode()
         sig = hmac.new(SECRET.encode(), raw, hashlib.sha256).digest()
@@ -139,6 +154,7 @@ class TestVerifyRejects:
 
 
 # ── Cross-connector isolation ────────────────────────────────────────────
+
 
 class TestCrossConnectorIsolation:
     """A token signed with the Slack secret must not verify with the Gmail secret."""

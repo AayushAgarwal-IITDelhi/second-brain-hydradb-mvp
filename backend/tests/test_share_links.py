@@ -22,16 +22,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
-TEST_WS_ID    = "00000000-0000-0000-0000-00000000aaaa"
-OTHER_WS_ID   = "00000000-0000-0000-0000-00000000bbbb"
-SAVED_ID      = "12121212-1212-1212-1212-121212121212"
-OTHER_SAVED   = "34343434-3434-3434-3434-343434343434"
+TEST_WS_ID = "00000000-0000-0000-0000-00000000aaaa"
+OTHER_WS_ID = "00000000-0000-0000-0000-00000000bbbb"
+SAVED_ID = "12121212-1212-1212-1212-121212121212"
+OTHER_SAVED = "34343434-3434-3434-3434-343434343434"
 
 
 @pytest.fixture(autouse=True)
 def _reset_rate_limit_state():
     from rate_limit import _limiter
+
     with _limiter._lock:
         _limiter._buckets.clear()
     yield
@@ -45,20 +45,21 @@ def _reset_rate_limit_state():
 class TestCreateShareLink:
     def test_creates_token_and_returns_url(self, client, jwt_auth_headers):
         saved_row = {
-            "id":           SAVED_ID,
+            "id": SAVED_ID,
             "workspace_id": TEST_WS_ID,
-            "question":     "q",
-            "answer":       "a",
-            "sources":      [],
-            "mode":         "default",
-            "created_at":   "2025-01-01T00:00:00Z",
+            "question": "q",
+            "answer": "a",
+            "sources": [],
+            "mode": "default",
+            "created_at": "2025-01-01T00:00:00Z",
         }
         with patch(
-            "main.get_saved_answer", return_value=saved_row,
+            "main.get_saved_answer",
+            return_value=saved_row,
         ), patch(
             "main.create_share_link",
             return_value={
-                "id":         "link-1",
+                "id": "link-1",
                 "created_at": "2025-02-01T00:00:00Z",
             },
         ) as mock_create:
@@ -72,15 +73,15 @@ class TestCreateShareLink:
         # Token is opaque + non-trivial.
         token = body["share_token"]
         assert isinstance(token, str)
-        assert len(token) >= 40       # 32 bytes urlsafe -> 43 chars
+        assert len(token) >= 40  # 32 bytes urlsafe -> 43 chars
         # URL is the form the frontend renders.
         assert body["url"].endswith(f"/shared/{token}")
         # The helper was called with the right workspace + user.
         kw = mock_create.call_args.kwargs
-        assert kw["workspace_id"]    == TEST_WS_ID
+        assert kw["workspace_id"] == TEST_WS_ID
         assert kw["saved_answer_id"] == SAVED_ID
-        assert kw["share_token"]     == token
-        assert kw["created_by"]            # the test user id
+        assert kw["share_token"] == token
+        assert kw["created_by"]  # the test user id
 
     def test_unknown_saved_id_returns_404(self, client, jwt_auth_headers):
         with patch("main.get_saved_answer", return_value=None):
@@ -91,16 +92,20 @@ class TestCreateShareLink:
         assert r.status_code == 404
 
     def test_cross_workspace_saved_id_returns_404(
-        self, client, jwt_auth_headers,
+        self,
+        client,
+        jwt_auth_headers,
     ):
         """Caller is in TEST_WS_ID but the saved answer lives in
         OTHER_WS_ID -- the workspace filter in get_saved_answer
         means we get None back, and the route 404s."""
+
         def fake_get(saved_id, workspace_id=None):
             # Only returns the row when the caller's workspace matches.
             if workspace_id == TEST_WS_ID:
                 return None
             return {"id": saved_id, "workspace_id": OTHER_WS_ID}
+
         with patch("main.get_saved_answer", side_effect=fake_get):
             r = client.post(
                 f"/api/saved-answers/{SAVED_ID}/share",
@@ -111,8 +116,7 @@ class TestCreateShareLink:
     def test_persistence_failure_returns_502(self, client, jwt_auth_headers):
         with patch(
             "main.get_saved_answer",
-            return_value={"id": SAVED_ID, "workspace_id": TEST_WS_ID,
-                          "question": "q", "answer": "a"},
+            return_value={"id": SAVED_ID, "workspace_id": TEST_WS_ID, "question": "q", "answer": "a"},
         ), patch("main.create_share_link", return_value=None):
             r = client.post(
                 f"/api/saved-answers/{SAVED_ID}/share",
@@ -133,13 +137,22 @@ class TestListShares:
         with patch(
             "main.list_share_links_for_workspace",
             return_value=[
-                {"id": "s1", "share_token": "tok-1",
-                 "created_at": "2025-01-01", "expires_at": None,
-                 "revoked_at": None, "created_by": "u1"},
-                {"id": "s2", "share_token": "tok-2",
-                 "created_at": "2025-01-02", "expires_at": None,
-                 "revoked_at": "2025-01-03",            # revoked
-                 "created_by": "u1"},
+                {
+                    "id": "s1",
+                    "share_token": "tok-1",
+                    "created_at": "2025-01-01",
+                    "expires_at": None,
+                    "revoked_at": None,
+                    "created_by": "u1",
+                },
+                {
+                    "id": "s2",
+                    "share_token": "tok-2",
+                    "created_at": "2025-01-02",
+                    "expires_at": None,
+                    "revoked_at": "2025-01-03",  # revoked
+                    "created_by": "u1",
+                },
             ],
         ):
             r = client.get(
@@ -150,11 +163,12 @@ class TestListShares:
         body = r.json()
         tokens = [s["share_token"] for s in body["shares"]]
         assert "tok-1" in tokens
-        assert "tok-2" not in tokens          # revoked one hidden
+        assert "tok-2" not in tokens  # revoked one hidden
 
     def test_empty_when_no_shares(self, client, jwt_auth_headers):
         with patch(
-            "main.list_share_links_for_workspace", return_value=[],
+            "main.list_share_links_for_workspace",
+            return_value=[],
         ):
             r = client.get(
                 f"/api/saved-answers/{SAVED_ID}/shares",
@@ -174,7 +188,8 @@ class TestListShares:
 class TestRevokeShare:
     def test_revoke_success(self, client, jwt_auth_headers):
         with patch(
-            "main.revoke_share_link", return_value=True,
+            "main.revoke_share_link",
+            return_value=True,
         ) as mock_rev:
             r = client.delete(
                 "/api/saved-answers/share/the-token",
@@ -184,12 +199,14 @@ class TestRevokeShare:
         assert r.json()["revoked"] is True
         kw = mock_rev.call_args.kwargs
         # Scoped to caller's workspace + user.
-        assert kw["share_token"]  == "the-token"
+        assert kw["share_token"] == "the-token"
         assert kw["workspace_id"] == TEST_WS_ID
-        assert kw["user_id"]                  # the test user id
+        assert kw["user_id"]  # the test user id
 
     def test_unknown_or_not_owned_returns_404(
-        self, client, jwt_auth_headers,
+        self,
+        client,
+        jwt_auth_headers,
     ):
         with patch("main.revoke_share_link", return_value=False):
             r = client.delete(
@@ -209,59 +226,60 @@ class TestRevokeShare:
 class TestPublicShareRead:
     def _link_row(self, **overrides):
         row = {
-            "id":              "link-1",
-            "share_token":     "the-token",
-            "workspace_id":    TEST_WS_ID,
+            "id": "link-1",
+            "share_token": "the-token",
+            "workspace_id": TEST_WS_ID,
             "saved_answer_id": SAVED_ID,
-            "created_by":      "user-1",
-            "expires_at":      None,
-            "revoked_at":      None,
+            "created_by": "user-1",
+            "expires_at": None,
+            "revoked_at": None,
         }
         row.update(overrides)
         return row
 
     def _saved_row(self, **overrides):
         row = {
-            "id":           SAVED_ID,
+            "id": SAVED_ID,
             "workspace_id": TEST_WS_ID,
-            "question":     "What did we decide?",
-            "answer":       "We agreed to use Railway.",
-            "sources":      [{"index": 1, "source": "s1"}],
-            "mode":         "default",
-            "user_id":      "user-1",
-            "debug":        {"internal": "secret"},
-            "created_at":   "2025-01-01T00:00:00Z",
+            "question": "What did we decide?",
+            "answer": "We agreed to use Railway.",
+            "sources": [{"index": 1, "source": "s1"}],
+            "mode": "default",
+            "user_id": "user-1",
+            "debug": {"internal": "secret"},
+            "created_at": "2025-01-01T00:00:00Z",
         }
         row.update(overrides)
         return row
 
     def test_unauth_read_succeeds(self, client):
         with patch(
-            "main.get_share_link_by_token", return_value=self._link_row(),
+            "main.get_share_link_by_token",
+            return_value=self._link_row(),
         ), patch(
-            "main.get_saved_answer", return_value=self._saved_row(),
+            "main.get_saved_answer",
+            return_value=self._saved_row(),
         ):
-            r = client.get("/api/shared/the-token")    # NO headers
+            r = client.get("/api/shared/the-token")  # NO headers
         assert r.status_code == 200
         body = r.json()
         # Allowed public fields are present.
         assert body["question"] == "What did we decide?"
-        assert body["answer"]   == "We agreed to use Railway."
+        assert body["answer"] == "We agreed to use Railway."
         assert body["sources"]
-        assert body["mode"]     == "default"
+        assert body["mode"] == "default"
         assert body["created_at"]
         # Sensitive fields MUST NOT leak.
-        for forbidden in ("workspace_id", "user_id", "debug",
-                          "created_by", "share_token"):
-            assert forbidden not in body, \
-                f"public response leaked {forbidden}"
+        for forbidden in ("workspace_id", "user_id", "debug", "created_by", "share_token"):
+            assert forbidden not in body, f"public response leaked {forbidden}"
         rendered = repr(body)
         assert TEST_WS_ID not in rendered
-        assert "secret"   not in rendered
+        assert "secret" not in rendered
 
     def test_missing_token_returns_404(self, client):
         with patch(
-            "main.get_share_link_by_token", return_value=None,
+            "main.get_share_link_by_token",
+            return_value=None,
         ):
             r = client.get("/api/shared/nope")
         assert r.status_code == 404
@@ -278,9 +296,11 @@ class TestPublicShareRead:
         """Token row exists but the saved answer was deleted. The
         route 404s instead of 500."""
         with patch(
-            "main.get_share_link_by_token", return_value=self._link_row(),
+            "main.get_share_link_by_token",
+            return_value=self._link_row(),
         ), patch(
-            "main.get_saved_answer", return_value=None,
+            "main.get_saved_answer",
+            return_value=None,
         ):
             r = client.get("/api/shared/the-token")
         assert r.status_code == 404
@@ -291,15 +311,17 @@ class TestPublicShareRead:
         the share link row -- so a forged saved_id in a foreign
         workspace can't be exfiltrated."""
         with patch(
-            "main.get_share_link_by_token", return_value=self._link_row(),
+            "main.get_share_link_by_token",
+            return_value=self._link_row(),
         ), patch(
-            "main.get_saved_answer", return_value=self._saved_row(),
+            "main.get_saved_answer",
+            return_value=self._saved_row(),
         ) as mock_get:
             client.get("/api/shared/the-token")
         kw = mock_get.call_args.kwargs
         # The route MUST pass workspace_id from the LINK row.
         assert kw["workspace_id"] == TEST_WS_ID
-        assert kw["saved_id"]     == SAVED_ID
+        assert kw["saved_id"] == SAVED_ID
 
 
 # ====================================================================== #
@@ -315,31 +337,34 @@ class TestWorkspaceIsolation:
         public response contains NO workspace identifier the caller
         could use to pivot."""
         link = {
-            "id":              "link-x",
-            "share_token":     "tok-x",
-            "workspace_id":    TEST_WS_ID,
+            "id": "link-x",
+            "share_token": "tok-x",
+            "workspace_id": TEST_WS_ID,
             "saved_answer_id": SAVED_ID,
-            "created_by":      "u1",
-            "expires_at":      None, "revoked_at": None,
+            "created_by": "u1",
+            "expires_at": None,
+            "revoked_at": None,
         }
         saved = {
-            "id":           SAVED_ID,
+            "id": SAVED_ID,
             "workspace_id": TEST_WS_ID,
-            "question":     "q",
-            "answer":       "a",
-            "sources":      [],
-            "mode":         "default",
-            "created_at":   "x",
+            "question": "q",
+            "answer": "a",
+            "sources": [],
+            "mode": "default",
+            "created_at": "x",
         }
         with patch(
-            "main.get_share_link_by_token", return_value=link,
+            "main.get_share_link_by_token",
+            return_value=link,
         ), patch(
-            "main.get_saved_answer", return_value=saved,
+            "main.get_saved_answer",
+            return_value=saved,
         ):
             r = client.get("/api/shared/tok-x")
         assert r.status_code == 200
         rendered = repr(r.json())
-        assert TEST_WS_ID  not in rendered
+        assert TEST_WS_ID not in rendered
         assert OTHER_WS_ID not in rendered
 
 
@@ -351,26 +376,30 @@ class TestWorkspaceStatus:
         """Nothing connected -> connectors report disconnected with
         zero counts. No exceptions on missing data."""
         with patch(
-            "main.get_slack_installation", return_value=None,
+            "main.get_slack_installation",
+            return_value=None,
         ), patch(
-            "main.list_selected_channel_ids", return_value=[],
+            "main.list_selected_channel_ids",
+            return_value=[],
         ), patch(
-            "main.list_gmail_connections_public", return_value=[],
+            "main.list_gmail_connections_public",
+            return_value=[],
         ), patch(
-            "main.auto_ingest_enabled", return_value=False,
+            "main.auto_ingest_enabled",
+            return_value=False,
         ):
             r = client.get("/api/workspace/status", headers=jwt_auth_headers)
         assert r.status_code == 200
         body = r.json()
         assert body["slack"] == {
-            "connected":         False,
+            "connected": False,
             "channels_selected": 0,
             "scheduler_enabled": False,
         }
         assert body["gmail"] == {
             "connection_count": 0,
-            "labels_selected":  0,
-            "last_synced_at":   None,
+            "labels_selected": 0,
+            "last_synced_at": None,
         }
 
     def test_connected_workspace_aggregates(self, client, jwt_auth_headers):
@@ -381,7 +410,8 @@ class TestWorkspaceStatus:
             "main.get_slack_installation",
             return_value={"id": "inst-1", "bot_token": "xoxb-x"},
         ), patch(
-            "main.list_selected_channel_ids", return_value=["C1", "C2"],
+            "main.list_selected_channel_ids",
+            return_value=["C1", "C2"],
         ), patch(
             "main.list_gmail_connections_public",
             return_value=[
@@ -398,29 +428,34 @@ class TestWorkspaceStatus:
             "main.list_selected_gmail_label_ids",
             side_effect=[["INBOX", "Label_1"], ["INBOX"]],
         ), patch(
-            "main.auto_ingest_enabled", return_value=True,
+            "main.auto_ingest_enabled",
+            return_value=True,
         ):
             r = client.get("/api/workspace/status", headers=jwt_auth_headers)
         body = r.json()
         # Slack
-        assert body["slack"]["connected"]         is True
+        assert body["slack"]["connected"] is True
         assert body["slack"]["channels_selected"] == 2
         assert body["slack"]["scheduler_enabled"] is True
         # Gmail
         assert body["gmail"]["connection_count"] == 2
-        assert body["gmail"]["labels_selected"]  == 3       # 2 + 1
+        assert body["gmail"]["labels_selected"] == 3  # 2 + 1
         # Max wins for last_synced_at.
         assert body["gmail"]["last_synced_at"] == "2025-09-15T08:00:00Z"
 
     def test_gmail_summary_failure_does_not_blow_up(
-        self, client, jwt_auth_headers,
+        self,
+        client,
+        jwt_auth_headers,
     ):
         """If get_gmail_connection_sync_summary raises, the workspace
         status route must still return 200 with degraded gmail counts."""
         with patch(
-            "main.get_slack_installation", return_value=None,
+            "main.get_slack_installation",
+            return_value=None,
         ), patch(
-            "main.list_selected_channel_ids", return_value=[],
+            "main.list_selected_channel_ids",
+            return_value=[],
         ), patch(
             "main.list_gmail_connections_public",
             return_value=[{"id": "conn-a", "email": "a@x"}],
@@ -428,9 +463,11 @@ class TestWorkspaceStatus:
             "main.get_gmail_connection_sync_summary",
             side_effect=RuntimeError("supabase down"),
         ), patch(
-            "main.list_selected_gmail_label_ids", side_effect=RuntimeError("x"),
+            "main.list_selected_gmail_label_ids",
+            side_effect=RuntimeError("x"),
         ), patch(
-            "main.auto_ingest_enabled", return_value=False,
+            "main.auto_ingest_enabled",
+            return_value=False,
         ):
             r = client.get("/api/workspace/status", headers=jwt_auth_headers)
         assert r.status_code == 200
@@ -448,18 +485,23 @@ class TestWorkspaceStatus:
 class TestGetShareLinkByToken:
     def _client_with_rows(self, rows):
         execute = MagicMock(return_value=MagicMock(data=rows))
-        limit   = MagicMock(return_value=MagicMock(execute=execute))
-        eq      = MagicMock(return_value=MagicMock(limit=limit))
-        select  = MagicMock(return_value=MagicMock(eq=eq))
-        table   = MagicMock(return_value=MagicMock(select=select))
+        limit = MagicMock(return_value=MagicMock(execute=execute))
+        eq = MagicMock(return_value=MagicMock(limit=limit))
+        select = MagicMock(return_value=MagicMock(eq=eq))
+        table = MagicMock(return_value=MagicMock(select=select))
         return MagicMock(table=table)
 
     def test_revoked_collapses_to_none(self):
         from supabase_client import get_share_link_by_token
+
         row = {
-            "id": "x", "share_token": "t", "workspace_id": TEST_WS_ID,
-            "saved_answer_id": SAVED_ID, "created_by": "u",
-            "expires_at": None, "revoked_at": "2025-01-01T00:00:00Z",
+            "id": "x",
+            "share_token": "t",
+            "workspace_id": TEST_WS_ID,
+            "saved_answer_id": SAVED_ID,
+            "created_by": "u",
+            "expires_at": None,
+            "revoked_at": "2025-01-01T00:00:00Z",
         }
         with patch(
             "supabase_client.get_supabase",
@@ -469,10 +511,14 @@ class TestGetShareLinkByToken:
 
     def test_expired_collapses_to_none(self):
         from supabase_client import get_share_link_by_token
+
         row = {
-            "id": "x", "share_token": "t", "workspace_id": TEST_WS_ID,
-            "saved_answer_id": SAVED_ID, "created_by": "u",
-            "expires_at": "2000-01-01T00:00:00+00:00",   # long ago
+            "id": "x",
+            "share_token": "t",
+            "workspace_id": TEST_WS_ID,
+            "saved_answer_id": SAVED_ID,
+            "created_by": "u",
+            "expires_at": "2000-01-01T00:00:00+00:00",  # long ago
             "revoked_at": None,
         }
         with patch(
@@ -483,10 +529,15 @@ class TestGetShareLinkByToken:
 
     def test_active_returns_row(self):
         from supabase_client import get_share_link_by_token
+
         row = {
-            "id": "x", "share_token": "t", "workspace_id": TEST_WS_ID,
-            "saved_answer_id": SAVED_ID, "created_by": "u",
-            "expires_at": None, "revoked_at": None,
+            "id": "x",
+            "share_token": "t",
+            "workspace_id": TEST_WS_ID,
+            "saved_answer_id": SAVED_ID,
+            "created_by": "u",
+            "expires_at": None,
+            "revoked_at": None,
         }
         with patch(
             "supabase_client.get_supabase",
@@ -498,10 +549,12 @@ class TestGetShareLinkByToken:
 
     def test_blank_token_returns_none(self):
         from supabase_client import get_share_link_by_token
+
         assert get_share_link_by_token(share_token="") is None
 
     def test_supabase_error_returns_none(self):
         from supabase_client import get_share_link_by_token
+
         with patch(
             "supabase_client.get_supabase",
             side_effect=RuntimeError("boom"),

@@ -9,7 +9,6 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 from slack_sdk.errors import SlackApiError
 
-
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
@@ -38,9 +37,7 @@ def _slack_error(error_code: str, status_code: int = 400) -> SlackApiError:
 def _history_page(messages, next_cursor=None):
     resp = MagicMock()
     meta = {"next_cursor": next_cursor} if next_cursor else {}
-    resp.get = lambda k, d=None: (
-        messages if k == "messages" else (meta if k == "response_metadata" else d)
-    )
+    resp.get = lambda k, d=None: (messages if k == "messages" else (meta if k == "response_metadata" else d))
     return resp
 
 
@@ -93,9 +90,7 @@ class TestFetchChannelMessages:
         wrapper.fetch_channel_messages("C123", oldest="100.0")
 
         _, kwargs = client.conversations_history.call_args
-        assert kwargs.get("oldest") == "100.0" or (
-            "oldest" in client.conversations_history.call_args[1]
-        )
+        assert kwargs.get("oldest") == "100.0" or ("oldest" in client.conversations_history.call_args[1])
 
     def test_rate_limit_retries(self):
         wrapper, client = _make_wrapper()
@@ -112,6 +107,20 @@ class TestFetchChannelMessages:
 
         assert result == msgs
         assert client.conversations_history.call_count == 2
+
+    def test_rate_limit_cap_gives_up_after_max_retries(self):
+        from ingestion.slack_client import MAX_RATE_LIMIT_RETRIES
+
+        wrapper, client = _make_wrapper()
+        rate_err = _slack_error("ratelimited", status_code=429)
+        # Always rate-limited — should stop after MAX_RATE_LIMIT_RETRIES retries.
+        client.conversations_history.side_effect = rate_err
+
+        with patch("ingestion.slack_client.time.sleep"):
+            result = wrapper.fetch_channel_messages("C123")
+
+        assert result == []
+        assert client.conversations_history.call_count == MAX_RATE_LIMIT_RETRIES + 1
 
     def test_non_rate_limit_error_breaks_loop(self):
         wrapper, client = _make_wrapper()
@@ -140,9 +149,7 @@ class TestFetchThreadReplies:
     def _replies_page(self, messages, next_cursor=None):
         resp = MagicMock()
         meta = {"next_cursor": next_cursor} if next_cursor else {}
-        resp.get = lambda k, d=None: (
-            messages if k == "messages" else (meta if k == "response_metadata" else d)
-        )
+        resp.get = lambda k, d=None: (messages if k == "messages" else (meta if k == "response_metadata" else d))
         return resp
 
     def test_single_page(self):
@@ -182,6 +189,19 @@ class TestFetchThreadReplies:
 
         assert result == msgs
 
+    def test_rate_limit_cap_gives_up_after_max_retries(self):
+        from ingestion.slack_client import MAX_RATE_LIMIT_RETRIES
+
+        wrapper, client = _make_wrapper()
+        rate_err = _slack_error("ratelimited", 429)
+        client.conversations_replies.side_effect = rate_err
+
+        with patch("ingestion.slack_client.time.sleep"):
+            result = wrapper.fetch_thread_replies("C123", "1.0")
+
+        assert result == []
+        assert client.conversations_replies.call_count == MAX_RATE_LIMIT_RETRIES + 1
+
     def test_non_rate_limit_error_returns_empty(self):
         wrapper, client = _make_wrapper()
         client.conversations_replies.side_effect = _slack_error("channel_not_found")
@@ -197,25 +217,19 @@ class TestFetchThreadReplies:
 class TestResolveUserName:
     def test_returns_real_name(self):
         wrapper, client = _make_wrapper()
-        client.users_info.return_value = {
-            "user": {"profile": {"real_name": "Alice Smith"}, "name": "alice"}
-        }
+        client.users_info.return_value = {"user": {"profile": {"real_name": "Alice Smith"}, "name": "alice"}}
 
         assert wrapper.resolve_user_name("U001") == "Alice Smith"
 
     def test_falls_back_to_display_name(self):
         wrapper, client = _make_wrapper()
-        client.users_info.return_value = {
-            "user": {"profile": {"real_name": "", "display_name": "alice_d"}}
-        }
+        client.users_info.return_value = {"user": {"profile": {"real_name": "", "display_name": "alice_d"}}}
 
         assert wrapper.resolve_user_name("U001") == "alice_d"
 
     def test_cache_hit_skips_api(self):
         wrapper, client = _make_wrapper()
-        client.users_info.return_value = {
-            "user": {"profile": {"real_name": "Bob"}}
-        }
+        client.users_info.return_value = {"user": {"profile": {"real_name": "Bob"}}}
 
         wrapper.resolve_user_name("U002")
         wrapper.resolve_user_name("U002")  # second call
@@ -342,6 +356,7 @@ class TestHelpers:
     def test_init_raises_when_no_token(self):
         """ValueError is raised when no token is provided and env var is absent."""
         import os
+
         from ingestion.slack_client import SlackClientWrapper
 
         with patch.dict(os.environ, {}, clear=True):

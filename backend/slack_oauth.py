@@ -28,10 +28,8 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 from logging_config import get_logger
-from oauth_common import (
-    make_oauth_state as _core_make_state,
-    verify_oauth_state as _core_verify_state,
-)
+from oauth_common import make_oauth_state as _core_make_state
+from oauth_common import verify_oauth_state as _core_verify_state
 
 logger = get_logger(__name__)
 
@@ -52,6 +50,7 @@ DEFAULT_SCOPES = (
 # Env access (helpers wrapped so tests can monkeypatch without import-
 # time evaluation freezing the values).
 # ---------------------------------------------------------------------- #
+
 
 def _env(name: str) -> str:
     return (os.getenv(name) or "").strip()
@@ -90,6 +89,7 @@ def slack_oauth_configured() -> bool:
 # a single fix applies to both Slack and Gmail; the connector-specific
 # secret lookup and fail-closed guard stay here.
 
+
 def make_oauth_state(workspace_id: str, user_id: str) -> str:
     """
     Build a tamper-evident state token binding this OAuth attempt to a
@@ -120,6 +120,7 @@ def verify_oauth_state(state: str) -> Optional[Dict[str, Any]]:
 # Building the Connect-Slack URL
 # ---------------------------------------------------------------------- #
 
+
 def build_connect_url(*, workspace_id: str, user_id: str) -> str:
     """
     Build the full Slack OAuth v2 authorize URL the frontend should
@@ -127,13 +128,15 @@ def build_connect_url(*, workspace_id: str, user_id: str) -> str:
     to the current workspace + user.
     """
     state = make_oauth_state(workspace_id, user_id)
-    qs = urlencode({
-        "client_id":    _client_id(),
-        "scope":        ",".join(DEFAULT_SCOPES),
-        "user_scope":   "",
-        "redirect_uri": _redirect_uri(),
-        "state":        state,
-    })
+    qs = urlencode(
+        {
+            "client_id": _client_id(),
+            "scope": ",".join(DEFAULT_SCOPES),
+            "user_scope": "",
+            "redirect_uri": _redirect_uri(),
+            "state": state,
+        }
+    )
     return f"https://slack.com/oauth/v2/authorize?{qs}"
 
 
@@ -161,28 +164,25 @@ def exchange_code(code: str) -> Optional[Dict[str, Any]]:
         resp = requests.post(
             "https://slack.com/api/oauth.v2.access",
             data={
-                "client_id":     _client_id(),
+                "client_id": _client_id(),
                 "client_secret": _client_secret(),
-                "code":          code,
-                "redirect_uri":  _redirect_uri(),
+                "code": code,
+                "redirect_uri": _redirect_uri(),
             },
             timeout=15,
         )
     except requests.RequestException as e:
-        logger.warning("slack_oauth_exchange_request_failed",
-                       extra={"error": type(e).__name__})
+        logger.warning("slack_oauth_exchange_request_failed", extra={"error": type(e).__name__})
         return None
     if not resp.ok:
-        logger.warning("slack_oauth_exchange_http_error",
-                       extra={"status": resp.status_code})
+        logger.warning("slack_oauth_exchange_http_error", extra={"status": resp.status_code})
         return None
     try:
         data = resp.json()
     except ValueError:
         return None
     if not isinstance(data, dict) or not data.get("ok"):
-        logger.warning("slack_oauth_exchange_not_ok",
-                       extra={"error": (data or {}).get("error")})
+        logger.warning("slack_oauth_exchange_not_ok", extra={"error": (data or {}).get("error")})
         return None
     return data
 
@@ -195,17 +195,18 @@ def installation_from_oauth_response(data: Dict[str, Any]) -> Dict[str, Any]:
     """
     team = data.get("team") or {}
     return {
-        "slack_team_id":   (team.get("id") or "").strip(),
+        "slack_team_id": (team.get("id") or "").strip(),
         "slack_team_name": (team.get("name") or "").strip(),
-        "bot_user_id":     (data.get("bot_user_id") or "").strip(),
-        "bot_token":       (data.get("access_token") or "").strip(),
-        "scopes":          (data.get("scope") or "").strip(),
+        "bot_user_id": (data.get("bot_user_id") or "").strip(),
+        "bot_token": (data.get("access_token") or "").strip(),
+        "scopes": (data.get("scope") or "").strip(),
     }
 
 
 # ---------------------------------------------------------------------- #
 # Listing channels from Slack (after Connect, so the picker can populate)
 # ---------------------------------------------------------------------- #
+
 
 def list_slack_channels(bot_token: str) -> List[Dict[str, Any]]:
     """
@@ -235,8 +236,8 @@ def list_slack_channels(bot_token: str) -> List[Dict[str, Any]]:
         while True:
             kwargs: Dict[str, Any] = {
                 "exclude_archived": False,
-                "limit":            1000,
-                "types":            "public_channel,private_channel",
+                "limit": 1000,
+                "types": "public_channel,private_channel",
             }
             if cursor:
                 kwargs["cursor"] = cursor
@@ -257,21 +258,17 @@ def list_slack_channels(bot_token: str) -> List[Dict[str, Any]]:
                     member_count = int(num_members) if num_members is not None else 0
                 except (TypeError, ValueError):
                     member_count = 0
-                out.append({
-                    "slack_channel_id": cid,
-                    "name": (ch.get("name") or "").strip(),
-                    "is_archived": bool(ch.get("is_archived")),
-                    "is_private": bool(ch.get("is_private")),
-                    "member_count": member_count,
-                    "topic": (
-                        (topic_obj.get("value") or "").strip()
-                        if isinstance(topic_obj, dict) else ""
-                    ),
-                    "purpose": (
-                        (purpose_obj.get("value") or "").strip()
-                        if isinstance(purpose_obj, dict) else ""
-                    ),
-                })
+                out.append(
+                    {
+                        "slack_channel_id": cid,
+                        "name": (ch.get("name") or "").strip(),
+                        "is_archived": bool(ch.get("is_archived")),
+                        "is_private": bool(ch.get("is_private")),
+                        "member_count": member_count,
+                        "topic": ((topic_obj.get("value") or "").strip() if isinstance(topic_obj, dict) else ""),
+                        "purpose": ((purpose_obj.get("value") or "").strip() if isinstance(purpose_obj, dict) else ""),
+                    }
+                )
             cursor = (resp.get("response_metadata") or {}).get("next_cursor") or ""
             pages += 1
             # Safety: Slack workspaces with >10k channels are exotic and
@@ -279,8 +276,7 @@ def list_slack_channels(bot_token: str) -> List[Dict[str, Any]]:
             if not cursor or pages >= 20:
                 break
     except SlackApiError as e:
-        logger.warning("slack_conversations_list_failed",
-                       extra={"error": str(e)})
+        logger.warning("slack_conversations_list_failed", extra={"error": str(e)})
         return out
     return out
 
@@ -296,7 +292,10 @@ def list_slack_channels(bot_token: str) -> List[Dict[str, Any]]:
 
 
 def run_workspace_ingest(
-    *, workspace_id: str, bot_token: str, channel_ids: List[str],
+    *,
+    workspace_id: str,
+    bot_token: str,
+    channel_ids: List[str],
     hydradb_sub_tenant_id: Optional[str] = None,
     force: bool = False,
 ) -> Dict[str, Any]:
@@ -319,20 +318,22 @@ def run_workspace_ingest(
     if not bot_token or not channel_ids:
         return {
             "channels_processed": 0,
-            "files_prepared":     0,
-            "successes":          0,
-            "failures":           0,
-            "skipped":            0,
+            "files_prepared": 0,
+            "successes": 0,
+            "failures": 0,
+            "skipped": 0,
         }
 
     # Lazy imports so a missing slack_sdk dep at startup doesn't tank
     # the whole module (and so the test suite can monkeypatch).
+    from hydradb_client import HydraDBClient
     from ingestion.ingest_slack import (
-        process_channel, upload_in_batches, STATE_PATH,
+        STATE_PATH,
+        process_channel,
+        upload_in_batches,
     )
     from ingestion.ingestion_state import IngestionState
     from ingestion.slack_client import SlackClientWrapper
-    from hydradb_client import HydraDBClient
 
     slack = SlackClientWrapper(token=bot_token)
     # Phase 4: route uploads to the workspace's HydraDB sub-tenant.
@@ -360,9 +361,10 @@ def run_workspace_ingest(
     # deserve a second attempt. Permanent failures emit dead_letter
     # so an operator can replay them later.
     from observability import emit_dead_letter  # noqa: PLC0415
-    from retry import retry_with_backoff       # noqa: PLC0415
+    from retry import retry_with_backoff  # noqa: PLC0415
 
     for channel_id in channel_ids:
+
         def _process_one() -> Dict[str, Any]:
             return process_channel(slack, channel_id, state, force=force)
 
@@ -373,7 +375,7 @@ def run_workspace_ingest(
                 error=err,
                 context={
                     "channel_id": _channel_id,
-                    "stage":      "process_channel",
+                    "stage": "process_channel",
                 },
             )
 
@@ -392,8 +394,8 @@ def run_workspace_ingest(
                 "workspace_ingest_channel_error",
                 extra={
                     "workspace_id": workspace_id,
-                    "channel_id":   channel_id,
-                    "error":        type(e).__name__,
+                    "channel_id": channel_id,
+                    "error": type(e).__name__,
                 },
             )
             total_failure += 1
@@ -432,6 +434,7 @@ def run_workspace_ingest(
         # source_stable_key the chunks already carry.
         try:
             from memory_store import extract_and_persist  # noqa: PLC0415
+
             for f in files:
                 stable_key = f.get("stable_key") or ""
                 if not stable_key:
@@ -443,9 +446,11 @@ def run_workspace_ingest(
                 try:
                     source_iso = (
                         datetime.fromtimestamp(
-                            float(ts), tz=timezone.utc,
+                            float(ts),
+                            tz=timezone.utc,
                         ).isoformat()
-                        if ts else None
+                        if ts
+                        else None
                     )
                 except (TypeError, ValueError):
                     source_iso = None
@@ -462,8 +467,8 @@ def run_workspace_ingest(
                 "slack_memory_extract_failed",
                 extra={
                     "workspace_id": workspace_id,
-                    "channel_id":   channel_id,
-                    "error":        type(e).__name__,
+                    "channel_id": channel_id,
+                    "error": type(e).__name__,
                 },
             )
         total_success += stats.get("successes", 0)
@@ -477,18 +482,19 @@ def run_workspace_ingest(
     logger.info(
         "workspace_ingest_complete",
         extra={
-            "workspace_id":       workspace_id,
+            "workspace_id": workspace_id,
             "channels_processed": processed,
-            "files_prepared":     total_files,
-            "successes":          total_success,
-            "failures":           total_failure,
-            "skipped":            total_skipped,
+            "files_prepared": total_files,
+            "successes": total_success,
+            "failures": total_failure,
+            "skipped": total_skipped,
         },
     )
 
     # Phase 15: emit analytics. Defensive.
     try:
-        from analytics_store import emit_event   # noqa: PLC0415
+        from analytics_store import emit_event  # noqa: PLC0415
+
         emit_event(
             workspace_id=workspace_id,
             kind="ingest_completed",
@@ -496,10 +502,10 @@ def run_workspace_ingest(
             success=total_failure == 0,
             payload={
                 "channels_processed": processed,
-                "files_prepared":     total_files,
-                "messages_uploaded":  total_success,
-                "failures":           total_failure,
-                "skipped":            total_skipped,
+                "files_prepared": total_files,
+                "messages_uploaded": total_success,
+                "failures": total_failure,
+                "skipped": total_skipped,
             },
         )
     except Exception:  # noqa: BLE001
@@ -507,8 +513,8 @@ def run_workspace_ingest(
 
     return {
         "channels_processed": processed,
-        "files_prepared":     total_files,
-        "successes":          total_success,
-        "failures":           total_failure,
-        "skipped":            total_skipped,
+        "files_prepared": total_files,
+        "successes": total_success,
+        "failures": total_failure,
+        "skipped": total_skipped,
     }

@@ -68,9 +68,7 @@ logger = get_logger(__name__)
 # Config
 # ---------------------------------------------------------------------- #
 def _realtime_enabled() -> bool:
-    return os.getenv("REALTIME_INGEST_ENABLED", "true").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
+    return os.getenv("REALTIME_INGEST_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
 
 
 # Path to the same state file the polling CLI uses.
@@ -104,8 +102,8 @@ STATE_PATH = _BACKEND_DIR / "data" / "ingestion_state.json"
 # during an outage we'd rather process the occasional duplicate than
 # drop every Slack event.
 # ---------------------------------------------------------------------- #
-_SEEN_EVENT_TTL = 60 * 60   # 1 hour matches Slack's retry window
-_SEEN_EVENT_MAX = 5000      # cap memory
+_SEEN_EVENT_TTL = 60 * 60  # 1 hour matches Slack's retry window
+_SEEN_EVENT_MAX = 5000  # cap memory
 _seen_event_ids: Dict[str, float] = {}
 _seen_lock = threading.Lock()
 
@@ -180,6 +178,7 @@ def _event_already_seen(event_id: str) -> bool:
 # hit thereafter) doesn't double-call Slack.
 _bot_user_id_by_token: Dict[str, str] = {}
 _bot_user_id_lock = threading.Lock()
+_BOT_USER_ID_CACHE_MAX = 256  # cap for multi-tenant deployments with many workspaces
 
 
 def _resolve_bot_user_id(slack: SlackClientWrapper, bot_token: str) -> Optional[str]:
@@ -192,6 +191,11 @@ def _resolve_bot_user_id(slack: SlackClientWrapper, bot_token: str) -> Optional[
         cached = _bot_user_id_by_token.get(bot_token)
         if cached is not None:
             return cached or None
+        # Evict oldest half when at capacity (dict is insertion-ordered).
+        if len(_bot_user_id_by_token) >= _BOT_USER_ID_CACHE_MAX:
+            evict = list(_bot_user_id_by_token)[: _BOT_USER_ID_CACHE_MAX // 2]
+            for k in evict:
+                _bot_user_id_by_token.pop(k, None)
         try:
             resp = slack.client.auth_test()
             uid = resp.get("user_id") or ""
@@ -211,6 +215,11 @@ def _resolve_bot_user_id(slack: SlackClientWrapper, bot_token: str) -> Optional[
 # Single shared lock around state read-modify-write for the realtime path
 # ---------------------------------------------------------------------- #
 _state_lock = threading.Lock()
+
+# Stable keys currently being uploaded — prevents two concurrent webhook
+# deliveries for the same message from both passing the has() check before
+# either one finishes writing to state. Protected by _state_lock.
+_in_flight: set = set()
 
 
 # ---------------------------------------------------------------------- #
@@ -242,11 +251,9 @@ def process_slack_event(payload: Dict[str, Any]) -> None:
     # the common cases. A permanent failure emits a dead_letter event
     # AND, if Sentry is configured, an exception capture.
     from observability import emit_dead_letter  # noqa: PLC0415
-    from retry import retry_with_backoff       # noqa: PLC0415
+    from retry import retry_with_backoff  # noqa: PLC0415
 
-    workspace_for_logs = (
-        payload.get("team_id") or _resolve_team_id(payload) or "unknown"
-    )
+    workspace_for_logs = payload.get("team_id") or _resolve_team_id(payload) or "unknown"
 
     def _on_giveup(err: BaseException) -> None:
         emit_dead_letter(
@@ -332,8 +339,7 @@ def _process_slack_payload_inner(payload: Dict[str, Any]) -> None:
     # anything ingestion.normalize flags as noise. This matches what
     # the polling path does in process_channel.
     subtype = event.get("subtype")
-    if subtype in ("message_changed", "message_deleted", "bot_message",
-                   "channel_join", "channel_leave"):
+    if subtype in ("message_changed", "message_deleted", "bot_message", "channel_join", "channel_leave"):
         logger.debug(
             'realtime_event_ignored',
             extra={'subtype': subtype},
@@ -374,9 +380,7 @@ def _process_slack_payload_inner(payload: Dict[str, Any]) -> None:
     if not workspace_id or not bot_token:
         logger.warning(
             'realtime_installation_incomplete',
-            extra={'team_id': team_id,
-                   'has_workspace_id': bool(workspace_id),
-                   'has_bot_token':    bool(bot_token)},
+            extra={'team_id': team_id, 'has_workspace_id': bool(workspace_id), 'has_bot_token': bool(bot_token)},
         )
         return
 
@@ -390,8 +394,7 @@ def _process_slack_payload_inner(payload: Dict[str, Any]) -> None:
     ):
         logger.debug(
             'realtime_channel_not_selected',
-            extra={'workspace_id': workspace_id,
-                   'channel_id':   channel_id},
+            extra={'workspace_id': workspace_id, 'channel_id': channel_id},
         )
         return
 
@@ -448,12 +451,21 @@ def _process_slack_payload_inner(payload: Dict[str, Any]) -> None:
 
     if is_reply:
         _ingest_thread(
-            slack, hydra, channel_id, channel_name, thread_ts, event,
+            slack,
+            hydra,
+            channel_id,
+            channel_name,
+            thread_ts,
+            event,
             workspace_id=workspace_id,
         )
     else:
         _ingest_standalone(
-            slack, hydra, channel_id, channel_name, event,
+            slack,
+            hydra,
+            channel_id,
+            channel_name,
+            event,
             workspace_id=workspace_id,
         )
 
@@ -476,56 +488,61 @@ def _ingest_standalone(
 
     with _state_lock:
         state = IngestionState(STATE_PATH)
-        if state.has(stable_key):
+        if state.has(stable_key) or stable_key in _in_flight:
             logger.debug(
                 'realtime_already_ingested',
                 extra={'stable_key': stable_key},
             )
             return
+        _in_flight.add(stable_key)
 
-    prepared = build_message_file(message, channel_id, channel_name, slack)
-    logger.info(
-        'realtime_uploading',
-        extra={'stable_key': stable_key, 'doc_type': 'message'},
-    )
-
-    response = hydra.upload_knowledge([prepared])
-    ok, _bad = summarize_upload_response(
-        response if isinstance(response, dict) else {},
-        batch_size=1,
-    )
-    if ok < 1:
-        logger.warning(
-            'realtime_upload_failed',
-            extra={'stable_key': stable_key},
+    try:
+        prepared = build_message_file(message, channel_id, channel_name, slack)
+        logger.info(
+            'realtime_uploading',
+            extra={'stable_key': stable_key, 'doc_type': 'message'},
         )
-        return
 
-    with _state_lock:
-        # IngestionState.locked() acquires an OS-level advisory lock, loads
-        # fresh state from disk (cross-process safe), applies mutations, then
-        # saves and releases automatically on exit.
-        with IngestionState.locked(STATE_PATH) as state:
-            _record_successful_uploads(state, [prepared], response or {})
-            # Advance the per-channel watermark so the next polling pass
-            # doesn't re-fetch this message just to skip it.
-            state.set_last_synced_ts(channel_id, ts)
-            state.touch_last_ingested()
-
-    # Phase 12: extract structured memory. Realtime path mirrors the
-    # batch ingest hook -- any failure here MUST NOT block ingestion.
-    if workspace_id:
-        try:
-            _extract_memory_from_prepared(workspace_id, prepared)
-        except Exception as e:  # noqa: BLE001
+        response = hydra.upload_knowledge([prepared])
+        ok, _bad = summarize_upload_response(
+            response if isinstance(response, dict) else {},
+            batch_size=1,
+        )
+        if ok < 1:
             logger.warning(
-                "realtime_memory_extract_failed",
-                extra={
-                    "workspace_id": workspace_id,
-                    "stable_key":   stable_key,
-                    "error":        type(e).__name__,
-                },
+                'realtime_upload_failed',
+                extra={'stable_key': stable_key},
             )
+            return
+
+        with _state_lock:
+            # IngestionState.locked() acquires an OS-level advisory lock, loads
+            # fresh state from disk (cross-process safe), applies mutations, then
+            # saves and releases automatically on exit.
+            with IngestionState.locked(STATE_PATH) as state:
+                _record_successful_uploads(state, [prepared], response or {})
+                # Advance the per-channel watermark so the next polling pass
+                # doesn't re-fetch this message just to skip it.
+                state.set_last_synced_ts(channel_id, ts)
+                state.touch_last_ingested()
+
+        # Phase 12: extract structured memory. Realtime path mirrors the
+        # batch ingest hook -- any failure here MUST NOT block ingestion.
+        if workspace_id:
+            try:
+                _extract_memory_from_prepared(workspace_id, prepared)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "realtime_memory_extract_failed",
+                    extra={
+                        "workspace_id": workspace_id,
+                        "stable_key": stable_key,
+                        "error": type(e).__name__,
+                    },
+                )
+    finally:
+        with _state_lock:
+            _in_flight.discard(stable_key)
 
 
 def _ingest_thread(
@@ -546,7 +563,8 @@ def _ingest_thread(
     """
     # Pull the full thread from Slack so the doc reflects current state.
     replies = slack.fetch_thread_replies(
-        channel_id=channel_id, thread_ts=thread_ts,
+        channel_id=channel_id,
+        thread_ts=thread_ts,
     )
     if not replies:
         logger.debug(
@@ -608,14 +626,15 @@ def _ingest_thread(
                 "realtime_memory_extract_failed",
                 extra={
                     "workspace_id": workspace_id,
-                    "stable_key":   stable_key,
-                    "error":        type(e).__name__,
+                    "stable_key": stable_key,
+                    "error": type(e).__name__,
                 },
             )
 
 
 def _extract_memory_from_prepared(
-    workspace_id: str, prepared: Dict[str, Any],
+    workspace_id: str,
+    prepared: Dict[str, Any],
 ) -> None:
     """
     Shared helper for the realtime path: pull out structured memory
@@ -623,18 +642,17 @@ def _extract_memory_from_prepared(
     unix-seconds string; convert to ISO so the timestamptz column
     accepts it.
     """
-    from datetime import datetime as _dt, timezone as _tz  # noqa: PLC0415
-    from memory_store import extract_and_persist            # noqa: PLC0415
+    from datetime import datetime as _dt  # noqa: PLC0415
+    from datetime import timezone as _tz
+
+    from memory_store import extract_and_persist  # noqa: PLC0415
 
     stable_key = prepared.get("stable_key") or ""
     if not stable_key:
         return
     ts = prepared.get("ts") or prepared.get("timestamp")
     try:
-        source_iso = (
-            _dt.fromtimestamp(float(ts), tz=_tz.utc).isoformat()
-            if ts else None
-        )
+        source_iso = _dt.fromtimestamp(float(ts), tz=_tz.utc).isoformat() if ts else None
     except (TypeError, ValueError):
         source_iso = None
     extract_and_persist(
@@ -658,10 +676,8 @@ def admin_status_snapshot(scheduler_enabled: bool) -> Dict[str, Any]:
     state = IngestionState(STATE_PATH)
     return {
         "realtime_ingest_enabled": _realtime_enabled(),
-        "scheduler_enabled":        scheduler_enabled,
-        "last_ingested_at":         state.get_last_ingested_at(),
-        "total_docs":               state.total_docs(),
-        "channels_tracked":         sum(
-            1 for k in state.channels.keys() if k != "_meta"
-        ),
+        "scheduler_enabled": scheduler_enabled,
+        "last_ingested_at": state.get_last_ingested_at(),
+        "total_docs": state.total_docs(),
+        "channels_tracked": sum(1 for k in state.channels.keys() if k != "_meta"),
     }

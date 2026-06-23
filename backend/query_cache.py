@@ -19,9 +19,7 @@ from cachetools import TTLCache
 
 
 def _enabled() -> bool:
-    return os.getenv("QUERY_CACHE_ENABLED", "true").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
+    return os.getenv("QUERY_CACHE_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _ttl_seconds() -> int:

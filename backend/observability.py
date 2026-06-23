@@ -89,10 +89,7 @@ def init_sentry() -> bool:
 
     environment = (os.getenv("ENVIRONMENT") or "local").strip()
     release = (
-        os.getenv("APP_VERSION")
-        or os.getenv("RENDER_GIT_COMMIT")
-        or os.getenv("RAILWAY_GIT_COMMIT_SHA")
-        or "dev"
+        os.getenv("APP_VERSION") or os.getenv("RENDER_GIT_COMMIT") or os.getenv("RAILWAY_GIT_COMMIT_SHA") or "dev"
     ).strip()
 
     # Sample rates: 100% errors (default), 10% traces. Tunable via env.
@@ -107,7 +104,7 @@ def init_sentry() -> bool:
             environment=environment,
             release=release,
             traces_sample_rate=traces_sample_rate,
-            send_default_pii=False,   # never auto-attach IPs / cookies
+            send_default_pii=False,  # never auto-attach IPs / cookies
             integrations=[
                 StarletteIntegration(transaction_style="endpoint"),
                 FastApiIntegration(transaction_style="endpoint"),
@@ -142,6 +139,7 @@ def capture_exception(
         return
     try:
         import sentry_sdk  # noqa: PLC0415
+
         with sentry_sdk.push_scope() as scope:
             for k, v in (tags or {}).items():
                 if v:
@@ -180,12 +178,14 @@ def emit_dead_letter(
     like a public log line.
     """
     payload = dict(context or {})
-    payload.update({
-        "kind":         kind,
-        "workspace_id": workspace_id,
-        "error":        type(error).__name__,
-        "error_msg":    str(error)[:300],   # truncate to keep logs bounded
-    })
+    payload.update(
+        {
+            "kind": kind,
+            "workspace_id": workspace_id,
+            "error": type(error).__name__,
+            "error_msg": str(error)[:300],  # truncate to keep logs bounded
+        }
+    )
     logger.error("dead_letter", extra=payload)
     capture_exception(
         error,
@@ -221,15 +221,15 @@ def _check_supabase() -> Dict[str, Any]:
         )
     except requests.RequestException as e:
         return {
-            "name":      "supabase",
-            "ok":        False,
-            "reason":    type(e).__name__,
+            "name": "supabase",
+            "ok": False,
+            "reason": type(e).__name__,
             "latency_ms": int((time.monotonic() - started) * 1000),
         }
     return {
-        "name":       "supabase",
-        "ok":         200 <= resp.status_code < 500,
-        "status":     resp.status_code,
+        "name": "supabase",
+        "ok": 200 <= resp.status_code < 500,
+        "status": resp.status_code,
         "latency_ms": int((time.monotonic() - started) * 1000),
     }
 
@@ -246,15 +246,15 @@ def _check_hydradb() -> Dict[str, Any]:
         resp = requests.options(base, timeout=_DEP_TIMEOUT_SECONDS)
     except requests.RequestException as e:
         return {
-            "name":       "hydradb",
-            "ok":         False,
-            "reason":     type(e).__name__,
+            "name": "hydradb",
+            "ok": False,
+            "reason": type(e).__name__,
             "latency_ms": int((time.monotonic() - started) * 1000),
         }
     return {
-        "name":       "hydradb",
-        "ok":         200 <= resp.status_code < 500,
-        "status":     resp.status_code,
+        "name": "hydradb",
+        "ok": 200 <= resp.status_code < 500,
+        "status": resp.status_code,
         "latency_ms": int((time.monotonic() - started) * 1000),
     }
 
@@ -270,7 +270,10 @@ def _check_openai() -> Dict[str, Any]:
     standard health route.
     """
     if (os.getenv("DISABLE_OPENAI_READINESS") or "").strip().lower() in (
-        "1", "true", "yes", "on",
+        "1",
+        "true",
+        "yes",
+        "on",
     ):
         return {"name": "openai", "ok": True, "skipped": True}
     base = (os.getenv("OPENAI_BASE_URL") or "https://api.openai.com").strip().rstrip("/")
@@ -279,17 +282,17 @@ def _check_openai() -> Dict[str, Any]:
         resp = requests.head(base, timeout=_DEP_TIMEOUT_SECONDS)
     except requests.RequestException as e:
         return {
-            "name":       "openai",
-            "ok":         False,
-            "reason":     type(e).__name__,
+            "name": "openai",
+            "ok": False,
+            "reason": type(e).__name__,
             "latency_ms": int((time.monotonic() - started) * 1000),
         }
     # OpenAI's API returns 405/421 on HEAD to the base URL; that's
     # still "reachable" for our purposes. Only timeouts and 5xx fail.
     return {
-        "name":       "openai",
-        "ok":         resp.status_code < 500,
-        "status":     resp.status_code,
+        "name": "openai",
+        "ok": resp.status_code < 500,
+        "status": resp.status_code,
         "latency_ms": int((time.monotonic() - started) * 1000),
     }
 

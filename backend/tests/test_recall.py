@@ -7,6 +7,7 @@ import pytest
 class TestExtractChunks:
     def _extract(self, payload):
         from recall import _extract_chunks
+
         return _extract_chunks(payload)
 
     def test_empty_dict_returns_empty(self):
@@ -45,6 +46,7 @@ class TestExtractChunks:
 class TestChunkText:
     def _text(self, chunk):
         from recall import _chunk_text
+
         return _chunk_text(chunk)
 
     def test_string_chunk_returned_directly(self):
@@ -81,6 +83,7 @@ class TestChunkText:
 class TestChunkSource:
     def _source(self, chunk, index=0):
         from recall import _chunk_source
+
         return _chunk_source(chunk, index)
 
     def test_source_id_key(self):
@@ -100,6 +103,7 @@ class TestChunkSource:
 class TestCoerceToUnixSeconds:
     def _coerce(self, value):
         from recall import _coerce_to_unix_seconds
+
         return _coerce_to_unix_seconds(value)
 
     def test_none_returns_none(self):
@@ -125,6 +129,7 @@ class TestCoerceToUnixSeconds:
 class TestSourcePassesFilters:
     def _passes(self, source_card, **kwargs):
         from recall import _source_passes_filters
+
         return _source_passes_filters(source_card, **kwargs)
 
     def _card(self, **kwargs):
@@ -156,22 +161,31 @@ class TestSourcePassesFilters:
     def test_timestamp_filter_in_range(self):
         assert self._passes(
             self._card(timestamp="1000000500.0"),
-            channel=None, user=None, document_type=None,
-            start_unix=1000000000.0, end_unix=1000001000.0,
+            channel=None,
+            user=None,
+            document_type=None,
+            start_unix=1000000000.0,
+            end_unix=1000001000.0,
         )
 
     def test_timestamp_filter_before_start(self):
         assert not self._passes(
             self._card(timestamp="999999999.0"),
-            channel=None, user=None, document_type=None,
-            start_unix=1000000000.0, end_unix=None,
+            channel=None,
+            user=None,
+            document_type=None,
+            start_unix=1000000000.0,
+            end_unix=None,
         )
 
     def test_timestamp_filter_after_end(self):
         assert not self._passes(
             self._card(timestamp="1000001001.0"),
-            channel=None, user=None, document_type=None,
-            start_unix=None, end_unix=1000001000.0,
+            channel=None,
+            user=None,
+            document_type=None,
+            start_unix=None,
+            end_unix=1000001000.0,
         )
 
     def test_card_without_timestamp_passes_date_filter(self):
@@ -184,6 +198,7 @@ class TestSourcePassesFilters:
 class TestStripInvalidCitations:
     def _strip(self, answer, allowed):
         from recall import _strip_invalid_citations
+
         return _strip_invalid_citations(answer, set(allowed))
 
     def test_valid_citation_kept(self):
@@ -240,16 +255,19 @@ class TestCleanSourcesForUI:
 
     def test_empty_list_returns_empty(self):
         from recall import _clean_sources_for_ui
+
         assert _clean_sources_for_ui([], top_k=5) == []
 
     def test_caps_at_top_k(self):
         from recall import _clean_sources_for_ui
+
         sources = [self._rich(i, stable_key=f"k{i}") for i in range(10)]
         result = _clean_sources_for_ui(sources, top_k=3)
         assert len(result) <= 3
 
     def test_rich_over_minimal(self):
         from recall import _clean_sources_for_ui
+
         sources = [self._minimal(1), self._rich(2)]
         result = _clean_sources_for_ui(sources, top_k=5)
         # Rich sources are preferred when at least one exists
@@ -257,6 +275,7 @@ class TestCleanSourcesForUI:
 
     def test_dedupe_by_stable_key(self):
         from recall import _clean_sources_for_ui
+
         sources = [
             self._rich(1, stable_key="same_key"),
             self._rich(2, stable_key="same_key"),
@@ -267,6 +286,7 @@ class TestCleanSourcesForUI:
 
     def test_fallback_to_minimal_when_all_minimal(self):
         from recall import _clean_sources_for_ui
+
         sources = [self._minimal(1), self._minimal(2)]
         result = _clean_sources_for_ui(sources, top_k=5)
         assert len(result) == 2
@@ -287,11 +307,13 @@ class TestFinalizeAnswer:
 
     def test_returns_required_keys(self):
         from recall import finalize_answer
+
         result = finalize_answer("answer [1].", [self._rich_source(1)], top_k=5)
         assert set(result.keys()) >= {"answer", "cleaned_sources", "sources_before", "sources_after"}
 
     def test_invalid_citation_stripped(self):
         from recall import finalize_answer
+
         sources = [self._rich_source(1)]
         result = finalize_answer("see [1] and [99]", sources, top_k=5)
         assert "[99]" not in result["answer"]
@@ -299,6 +321,7 @@ class TestFinalizeAnswer:
 
     def test_source_counts_reported(self):
         from recall import finalize_answer
+
         sources = [self._rich_source(i, stable_key=f"k{i}") for i in range(4)]
         result = finalize_answer("answer", sources, top_k=2)
         assert result["sources_before"] == 4

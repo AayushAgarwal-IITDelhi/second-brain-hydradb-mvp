@@ -14,19 +14,86 @@ unit-testable.
 import re
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
-
 # Words too common to be useful as exact-match terms. Short list — we don't
 # need NLP-grade stopword removal, just enough to stop noise like "the" or
 # "what" from dominating the ranking.
 STOPWORDS: Set[str] = {
-    "a", "an", "and", "are", "as", "at", "be", "by", "do", "did", "for",
-    "from", "had", "has", "have", "how", "i", "if", "in", "into", "is",
-    "it", "its", "just", "me", "my", "no", "not", "of", "on", "or", "our",
-    "out", "should", "so", "some", "than", "that", "the", "their", "them",
-    "then", "there", "these", "they", "this", "to", "too", "us", "was",
-    "we", "were", "what", "when", "where", "which", "who", "whom", "why",
-    "will", "with", "would", "you", "your", "about", "any", "been", "but",
-    "can", "could", "did", "does", "doing", "done", "go", "going",
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "do",
+    "did",
+    "for",
+    "from",
+    "had",
+    "has",
+    "have",
+    "how",
+    "i",
+    "if",
+    "in",
+    "into",
+    "is",
+    "it",
+    "its",
+    "just",
+    "me",
+    "my",
+    "no",
+    "not",
+    "of",
+    "on",
+    "or",
+    "our",
+    "out",
+    "should",
+    "so",
+    "some",
+    "than",
+    "that",
+    "the",
+    "their",
+    "them",
+    "then",
+    "there",
+    "these",
+    "they",
+    "this",
+    "to",
+    "too",
+    "us",
+    "was",
+    "we",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "whom",
+    "why",
+    "will",
+    "with",
+    "would",
+    "you",
+    "your",
+    "about",
+    "any",
+    "been",
+    "but",
+    "can",
+    "could",
+    "did",
+    "does",
+    "doing",
+    "done",
+    "go",
+    "going",
 }
 
 # Tokens are alphanumeric + underscore + hyphen.
@@ -145,12 +212,12 @@ def _ts_to_float(value: Any) -> Optional[float]:
 # signal: it acts as a tiebreaker, not a primary driver, outside
 # the dedicated recency-rerank mode (which uses its own pure
 # timestamp sort).
-W_KEYWORD_HIT     = 100
-W_SUBJECT_HIT     = 80
-W_CHANNEL_MATCH   = 50
-W_SENDER_MATCH    = 50
-W_LABEL_MATCH     = 30
-W_RECENCY         = 1.0
+W_KEYWORD_HIT = 100
+W_SUBJECT_HIT = 80
+W_CHANNEL_MATCH = 50
+W_SENDER_MATCH = 50
+W_LABEL_MATCH = 30
+W_RECENCY = 1.0
 
 
 def _string_match_ci(a: Any, b: Any) -> bool:
@@ -269,9 +336,7 @@ def rerank_chunks(
     # mode-specific sort keys below can use them. Also stash a
     # per-chunk debug breakdown so prepare_recall_context can surface
     # the ranking rationale in logs and the (private) debug payload.
-    max_ts = max(
-        (c.get("timestamp_float") or 0.0) for c in chunks_with_meta
-    ) or 1.0
+    max_ts = max((c.get("timestamp_float") or 0.0) for c in chunks_with_meta) or 1.0
     for chunk in chunks_with_meta:
         card = chunk.get("source_card", {}) or {}
         hits = count_keyword_hits(chunk.get("text", ""), terms)
@@ -282,10 +347,10 @@ def rerank_chunks(
         chunk["_subject_hits"] = subj_hits
         chunk["_bias"] = bias
         chunk["_debug_score"] = {
-            "keyword_hits":   hits,
-            "subject_hits":   subj_hits,
-            "metadata_bias":  bias,
-            "timestamp":      ts,
+            "keyword_hits": hits,
+            "subject_hits": subj_hits,
+            "metadata_bias": bias,
+            "timestamp": ts,
             "normalized_recency": (ts / max_ts) if max_ts else 0.0,
         }
     matched_count = sum(1 for c in chunks_with_meta if c["_hits"] > 0)
@@ -325,11 +390,12 @@ def rerank_chunks(
         def _hybrid_score(c: Dict[str, Any]) -> float:
             ts = c.get("timestamp_float") or 0.0
             return (
-                c["_hits"]         * W_KEYWORD_HIT
+                c["_hits"] * W_KEYWORD_HIT
                 + c["_subject_hits"] * W_SUBJECT_HIT
-                + c["_bias"]         * W_CHANNEL_MATCH  # generic bias-magnitude
-                + (ts / max_ts)      * W_RECENCY
+                + c["_bias"] * W_CHANNEL_MATCH  # generic bias-magnitude
+                + (ts / max_ts) * W_RECENCY
             )
+
         for c in chunks_with_meta:
             c["_debug_score"]["hybrid_score"] = _hybrid_score(c)
         ranked = sorted(

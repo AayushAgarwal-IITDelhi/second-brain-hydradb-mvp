@@ -90,9 +90,13 @@ class IngestionState:
             with self.path.open("r", encoding="utf-8") as f:
                 raw = json.load(f)
         except (OSError, json.JSONDecodeError) as e:
-            logger.warning('ingestion_state_load_failed', extra={
-                'path': str(self.path), 'error': type(e).__name__,
-            })
+            logger.warning(
+                'ingestion_state_load_failed',
+                extra={
+                    'path': str(self.path),
+                    'error': type(e).__name__,
+                },
+            )
             return
 
         if not isinstance(raw, dict):
@@ -109,6 +113,10 @@ class IngestionState:
             self.channels = channels
 
     def save(self) -> None:
+        """Atomically write the state file (write to .tmp, then rename)."""
+        self._save()
+
+    def _save(self) -> None:
         """Atomically write the state file (write to .tmp, then rename)."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -143,20 +151,20 @@ class IngestionState:
     ) -> None:
         """Record a successful upload. Caller still needs to call save()."""
         self.entries[stable_key] = {
-            "stable_key":     stable_key,
-            "filename":       filename,
-            "source_id":      source_id,
-            "channel_id":     channel_id,
-            "channel_name":   channel_name,
-            "ts":             ts,
-            "thread_ts":      thread_ts,
-            "uploaded_at":    datetime.now(timezone.utc).isoformat(),
+            "stable_key": stable_key,
+            "filename": filename,
+            "source_id": source_id,
+            "channel_id": channel_id,
+            "channel_name": channel_name,
+            "ts": ts,
+            "thread_ts": thread_ts,
+            "uploaded_at": datetime.now(timezone.utc).isoformat(),
             # Newly added for UI-friendly source cards.
-            "user_name":      user_name,
-            "timestamp":      timestamp,
-            "snippet":        snippet,
-            "permalink":      permalink,
-            "document_type":  document_type,
+            "user_name": user_name,
+            "timestamp": timestamp,
+            "snippet": snippet,
+            "permalink": permalink,
+            "document_type": document_type,
         }
 
     # ----- lookups for recall ----------------------------------------- #
@@ -217,9 +225,11 @@ class IngestionState:
         # We stash a top-level "_meta" dict via mark_uploaded.uploaded_at on
         # the newest entry, but explicit storage is cleaner for the admin
         # endpoint to read without scanning every entry.
-        value = self.channels.get("_meta", {}).get("last_ingested_at") if isinstance(
-            self.channels.get("_meta"), dict
-        ) else None
+        value = (
+            self.channels.get("_meta", {}).get("last_ingested_at")
+            if isinstance(self.channels.get("_meta"), dict)
+            else None
+        )
         return value if isinstance(value, str) else None
 
     def touch_last_ingested(self) -> None:
@@ -273,16 +283,14 @@ class IngestionState:
                     if ch_id == "_meta":
                         fresh.channels["_meta"] = ch_data
                     elif isinstance(ch_data, dict) and "last_synced_ts" in ch_data:
-                        existing_ts = (fresh.channels.get(ch_id) or {}).get(
-                            "last_synced_ts"
-                        )
+                        existing_ts = (fresh.channels.get(ch_id) or {}).get("last_synced_ts")
                         new_ts = ch_data["last_synced_ts"]
                         if not existing_ts or new_ts > existing_ts:
                             fresh.channels[ch_id] = {"last_synced_ts": new_ts}
                     else:
                         fresh.channels[ch_id] = ch_data
 
-                fresh.save()  # atomic write-temp-rename
+                fresh._save()  # atomic write-temp-rename
             finally:
                 if fcntl:
                     fcntl.flock(lf, fcntl.LOCK_UN)
@@ -315,9 +323,9 @@ class IngestionState:
                 fcntl.flock(lf, fcntl.LOCK_EX)
 
             try:
-                state = cls(path)   # fresh load while we hold the lock
+                state = cls(path)  # fresh load while we hold the lock
                 yield state
-                state.save()
+                state._save()
             finally:
                 if fcntl:
                     fcntl.flock(lf, fcntl.LOCK_UN)

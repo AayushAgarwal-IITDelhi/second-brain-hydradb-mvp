@@ -22,7 +22,6 @@ from auth_supabase import (
     require_user,
 )
 
-
 JWT_SECRET = "test-jwt-secret"  # must match conftest's env value
 
 

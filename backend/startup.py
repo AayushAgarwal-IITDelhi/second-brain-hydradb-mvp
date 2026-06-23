@@ -87,10 +87,7 @@ def _looks_like_placeholder(value: str) -> bool:
 
 def _validate_required_env() -> List[str]:
     """Return a list of missing/blank required env vars."""
-    return [
-        name for name in REQUIRED_ENV_VARS
-        if not (os.getenv(name) or "").strip()
-    ]
+    return [name for name in REQUIRED_ENV_VARS if not (os.getenv(name) or "").strip()]
 
 
 # Gmail Connect (Phase 8) is OPT-IN per deployment. Either you set the
@@ -119,9 +116,9 @@ def _validate_gmail_group() -> List[str]:
     """
     present = [n for n in _GMAIL_OAUTH_ENV_GROUP if (os.getenv(n) or "").strip()]
     if not present:
-        return []                       # all 4 unset -> Gmail off, fine.
+        return []  # all 4 unset -> Gmail off, fine.
     if len(present) == len(_GMAIL_OAUTH_ENV_GROUP):
-        return []                       # all 4 set -> Gmail on, fine.
+        return []  # all 4 set -> Gmail on, fine.
     # Partial: report the ones still missing.
     return [n for n in _GMAIL_OAUTH_ENV_GROUP if n not in present]
 
@@ -139,8 +136,7 @@ def _validate_production_env() -> List[str]:
     cors = (os.getenv("CORS_ORIGINS") or "").strip().lower()
     if cors and ("localhost" in cors or "127.0.0.1" in cors):
         issues.append(
-            "CORS_ORIGINS contains a localhost origin in production. "
-            "Set it to your deployed frontend URL only."
+            "CORS_ORIGINS contains a localhost origin in production. " "Set it to your deployed frontend URL only."
         )
 
     # FRONTEND_BASE_URL drives the Slack OAuth callback redirect.
@@ -158,10 +154,7 @@ def _validate_production_env() -> List[str]:
     # nicer error than the one Slack will give you.
     slack_redirect = (os.getenv("SLACK_REDIRECT_URI") or "").strip()
     if slack_redirect and not slack_redirect.lower().startswith("https://"):
-        issues.append(
-            "SLACK_REDIRECT_URI must be HTTPS in production "
-            f"(got: {slack_redirect})."
-        )
+        issues.append("SLACK_REDIRECT_URI must be HTTPS in production " f"(got: {slack_redirect}).")
 
     # Secrets that still look like .env.example placeholders.
     sensitive = (
@@ -177,8 +170,7 @@ def _validate_production_env() -> List[str]:
     for name in sensitive:
         if _looks_like_placeholder((os.getenv(name) or "").strip()):
             issues.append(
-                f"{name} still looks like a placeholder value. "
-                "Replace it with a real secret before deploying."
+                f"{name} still looks like a placeholder value. " "Replace it with a real secret before deploying."
             )
 
     return issues
@@ -240,19 +232,21 @@ def validate_required_env() -> None:
         ]
         for name in missing:
             lines.append(f"  - {name}")
-        lines.extend([
-            "",
-            "Fix:",
-            "  1. Copy backend/.env.example to backend/.env if you haven't.",
-            "  2. Fill in the values for the variables above.",
-            "  3. Restart the server.",
-            "",
-            "If you are using OpenRouter / Together / Groq / Azure-compatible,",
-            "set OPENAI_API_KEY to the provider's key and OPENAI_BASE_URL to",
-            "their endpoint.",
-            "=" * 64,
-            "",
-        ])
+        lines.extend(
+            [
+                "",
+                "Fix:",
+                "  1. Copy backend/.env.example to backend/.env if you haven't.",
+                "  2. Fill in the values for the variables above.",
+                "  3. Restart the server.",
+                "",
+                "If you are using OpenRouter / Together / Groq / Azure-compatible,",
+                "set OPENAI_API_KEY to the provider's key and OPENAI_BASE_URL to",
+                "their endpoint.",
+                "=" * 64,
+                "",
+            ]
+        )
         raise StartupConfigError("\n".join(lines))
 
     # Gmail is opt-in. If the user set SOME Gmail vars but not all,
@@ -274,12 +268,14 @@ def validate_required_env() -> None:
         ]
         for name in gmail_partial:
             lines.append(f"  - {name}")
-        lines.extend([
-            "",
-            "See backend/.env.example for descriptions of each var.",
-            "=" * 64,
-            "",
-        ])
+        lines.extend(
+            [
+                "",
+                "See backend/.env.example for descriptions of each var.",
+                "=" * 64,
+                "",
+            ]
+        )
         raise StartupConfigError("\n".join(lines))
 
     _audit_secrets()
@@ -296,12 +292,14 @@ def validate_required_env() -> None:
             ]
             for issue in prod_issues:
                 lines.append(f"  - {issue}")
-            lines.extend([
-                "",
-                "Set ENVIRONMENT=local or fix the issues above.",
-                "=" * 64,
-                "",
-            ])
+            lines.extend(
+                [
+                    "",
+                    "Set ENVIRONMENT=local or fix the issues above.",
+                    "=" * 64,
+                    "",
+                ]
+            )
             raise StartupConfigError("\n".join(lines))
         logger.info("startup_env_validated", extra={"mode": "production"})
     else:

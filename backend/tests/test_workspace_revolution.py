@@ -21,7 +21,6 @@ from auth_supabase import (
     require_workspace,
 )
 
-
 JWT_SECRET = "test-jwt-secret"
 WORKSPACE_ID = "11111111-1111-1111-1111-111111111111"
 
@@ -34,15 +33,15 @@ def _bearer(sub: str = "user-abc") -> str:
         "exp": int(time.time()) + 600,
     }
     return "Bearer " + jwt.encode(
-        payload, JWT_SECRET, algorithm=SUPABASE_JWT_ALGORITHM,
+        payload,
+        JWT_SECRET,
+        algorithm=SUPABASE_JWT_ALGORITHM,
     )
 
 
 class TestRequireWorkspaceSuccess:
     def test_member_returns_workspace_context(self):
-        with patch(
-            "auth_supabase.get_workspace_membership", return_value="member"
-        ):
+        with patch("auth_supabase.get_workspace_membership", return_value="member"):
             ctx = require_workspace(
                 authorization=_bearer(),
                 x_workspace_id=WORKSPACE_ID,
@@ -53,9 +52,7 @@ class TestRequireWorkspaceSuccess:
         assert ctx.user.id == "user-abc"
 
     def test_owner_role_propagates(self):
-        with patch(
-            "auth_supabase.get_workspace_membership", return_value="owner"
-        ):
+        with patch("auth_supabase.get_workspace_membership", return_value="owner"):
             ctx = require_workspace(
                 authorization=_bearer(),
                 x_workspace_id=WORKSPACE_ID,
@@ -75,9 +72,7 @@ class TestRequireWorkspaceFailures:
         assert exc.value.status_code == 400
 
     def test_non_member_returns_403(self):
-        with patch(
-            "auth_supabase.get_workspace_membership", return_value=None
-        ):
+        with patch("auth_supabase.get_workspace_membership", return_value=None):
             with pytest.raises(HTTPException) as exc:
                 require_workspace(
                     authorization=_bearer(),
@@ -98,7 +93,7 @@ class TestMyWorkspacesEndpoint:
     def test_returns_workspaces_list(self, client, jwt_auth_headers):
         fake_rows = [
             {"id": "ws-001", "name": "Alice's workspace", "slug": "alice", "role": "owner"},
-            {"id": "ws-002", "name": "Shared project",   "slug": "shared", "role": "member"},
+            {"id": "ws-002", "name": "Shared project", "slug": "shared", "role": "member"},
         ]
         with patch("main.list_user_workspaces", return_value=fake_rows):
             r = client.get("/api/me/workspaces", headers=jwt_auth_headers)

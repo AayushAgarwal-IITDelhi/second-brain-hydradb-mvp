@@ -35,10 +35,10 @@ import secrets
 import time
 from typing import Any, Dict, Optional
 
-
 # ---------------------------------------------------------------------- #
 # Encoding helpers
 # ---------------------------------------------------------------------- #
+
 
 def _b64url_encode(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
@@ -52,6 +52,7 @@ def _b64url_decode(s: str) -> bytes:
 # ---------------------------------------------------------------------- #
 # Core token operations
 # ---------------------------------------------------------------------- #
+
 
 def make_oauth_state(
     secret: str,
@@ -75,9 +76,9 @@ def make_oauth_state(
     """
     payload = {
         "workspace_id": workspace_id,
-        "user_id":      user_id,
-        "exp":          int(time.time()) + lifetime_seconds,
-        "nonce":        secrets.token_urlsafe(8),
+        "user_id": user_id,
+        "exp": int(time.time()) + lifetime_seconds,
+        "nonce": secrets.token_urlsafe(8),
     }
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     sig = hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).digest()

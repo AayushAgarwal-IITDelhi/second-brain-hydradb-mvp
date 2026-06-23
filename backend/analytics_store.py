@@ -73,8 +73,8 @@ def emit_event(
         return False
     row: Dict[str, Any] = {
         "workspace_id": workspace_id,
-        "kind":         kind,
-        "payload":      payload or {},
+        "kind": kind,
+        "payload": payload or {},
     }
     if source_kind is not None:
         row["source_kind"] = source_kind
@@ -93,8 +93,8 @@ def emit_event(
             "analytics_emit_failed",
             extra={
                 "workspace_id": workspace_id,
-                "kind":         kind,
-                "error":        type(e).__name__,
+                "kind": kind,
+                "error": type(e).__name__,
             },
         )
         return False
@@ -116,9 +116,7 @@ _DEFAULT_WINDOW_DAYS = 7
 def _window_start(days: int) -> str:
     """ISO 8601 cutoff for `created_at >= now() - days`."""
     safe = max(1, min(int(days or _DEFAULT_WINDOW_DAYS), _MAX_WINDOW_DAYS))
-    return (
-        datetime.now(timezone.utc) - timedelta(days=safe)
-    ).isoformat()
+    return (datetime.now(timezone.utc) - timedelta(days=safe)).isoformat()
 
 
 def _list_events(
@@ -144,10 +142,7 @@ def _list_events(
         client = get_supabase()
         q = (
             client.table("analytics_events")
-            .select(
-                "id, kind, source_kind, latency_ms, success, "
-                "payload, created_at"
-            )
+            .select("id, kind, source_kind, latency_ms, success, " "payload, created_at")
             .eq("workspace_id", workspace_id)
             .gte("created_at", cutoff)
         )
@@ -162,7 +157,7 @@ def _list_events(
             "analytics_list_failed",
             extra={
                 "workspace_id": workspace_id,
-                "error":        type(e).__name__,
+                "error": type(e).__name__,
             },
         )
         return []
@@ -170,7 +165,9 @@ def _list_events(
 
 
 def aggregate_query_stats(
-    *, workspace_id: str, days: int = _DEFAULT_WINDOW_DAYS,
+    *,
+    workspace_id: str,
+    days: int = _DEFAULT_WINDOW_DAYS,
 ) -> Dict[str, Any]:
     """
     Summary stats for `query_completed` events:
@@ -200,14 +197,17 @@ def aggregate_query_stats(
         days=days,
     )
     out: Dict[str, Any] = {
-        "count":               len(events),
-        "avg_latency_ms":      None,
-        "p50_latency_ms":      None,
-        "p95_latency_ms":      None,
-        "empty_result_count":  0,
-        "memory_hit_count":    0,
+        "count": len(events),
+        "avg_latency_ms": None,
+        "p50_latency_ms": None,
+        "p95_latency_ms": None,
+        "empty_result_count": 0,
+        "memory_hit_count": 0,
         "by_source": {
-            "slack": 0, "gmail": 0, "memory": 0, "mixed": 0,
+            "slack": 0,
+            "gmail": 0,
+            "memory": 0,
+            "mixed": 0,
         },
         "recency_rerank_count": 0,
     }
@@ -246,7 +246,9 @@ def aggregate_query_stats(
 
 
 def aggregate_ingest_stats(
-    *, workspace_id: str, days: int = _DEFAULT_WINDOW_DAYS,
+    *,
+    workspace_id: str,
+    days: int = _DEFAULT_WINDOW_DAYS,
 ) -> Dict[str, Any]:
     """
     Summary stats for `ingest_completed` events:
@@ -268,14 +270,14 @@ def aggregate_ingest_stats(
         days=days,
     )
     out: Dict[str, Any] = {
-        "runs":              len(events),
+        "runs": len(events),
         "messages_uploaded": 0,
-        "failed_runs":       0,
+        "failed_runs": 0,
         "by_source": {
             "slack": {"runs": 0, "uploaded": 0, "failed": 0},
             "gmail": {"runs": 0, "uploaded": 0, "failed": 0},
         },
-        "last_ingest_at":    None,
+        "last_ingest_at": None,
     }
     if not events:
         return out
@@ -298,7 +300,9 @@ def aggregate_ingest_stats(
 
 
 def aggregate_retrieval_failure_stats(
-    *, workspace_id: str, days: int = _DEFAULT_WINDOW_DAYS,
+    *,
+    workspace_id: str,
+    days: int = _DEFAULT_WINDOW_DAYS,
 ) -> Dict[str, Any]:
     """
     Lightweight surface for retrieval failures over the window.
@@ -314,15 +318,19 @@ def aggregate_retrieval_failure_stats(
     recent = []
     for ev in events[:10]:
         payload = ev.get("payload") or {}
-        recent.append({
-            "reason":     str(payload.get("reason") or "unknown")[:200],
-            "created_at": ev.get("created_at"),
-        })
+        recent.append(
+            {
+                "reason": str(payload.get("reason") or "unknown")[:200],
+                "created_at": ev.get("created_at"),
+            }
+        )
     return {"count": len(events), "recent": recent}
 
 
 def recent_activity(
-    *, workspace_id: str, days: int = _DEFAULT_WINDOW_DAYS,
+    *,
+    workspace_id: str,
+    days: int = _DEFAULT_WINDOW_DAYS,
     limit: int = 20,
 ) -> List[Dict[str, Any]]:
     """

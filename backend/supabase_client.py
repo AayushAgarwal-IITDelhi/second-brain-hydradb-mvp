@@ -23,9 +23,8 @@ import os
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
-from supabase import Client, create_client
-
 from logging_config import get_logger
+from supabase import Client, create_client
 
 logger = get_logger(__name__)
 
@@ -43,9 +42,7 @@ def get_supabase() -> Client:
     url = (os.getenv("SUPABASE_URL") or "").strip()
     key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
     if not url or not key:
-        raise RuntimeError(
-            "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set."
-        )
+        raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set.")
     return create_client(url, key)
 
 
@@ -54,9 +51,7 @@ def reset_supabase_cache() -> None:
     get_supabase.cache_clear()
 
 
-def get_workspace_membership(
-    *, user_id: str, workspace_id: str
-) -> Optional[str]:
+def get_workspace_membership(*, user_id: str, workspace_id: str) -> Optional[str]:
     """
     Return the role ('owner' | 'admin' | 'member') if the user is a
     member of the workspace, or None otherwise.
@@ -79,9 +74,9 @@ def get_workspace_membership(
         logger.warning(
             'supabase_membership_lookup_failed',
             extra={
-                'user_id':      user_id,
+                'user_id': user_id,
                 'workspace_id': workspace_id,
-                'error':        type(e).__name__,
+                'error': type(e).__name__,
             },
         )
         return None
@@ -134,12 +129,14 @@ def list_user_workspaces(*, user_id: str) -> List[Dict[str, Any]]:
         ws_id = ws.get("id")
         if not ws_id:
             continue
-        out.append({
-            "id":   ws_id,
-            "name": ws.get("name") or "",
-            "slug": ws.get("slug") or "",
-            "role": row.get("role") or "member",
-        })
+        out.append(
+            {
+                "id": ws_id,
+                "name": ws.get("name") or "",
+                "slug": ws.get("slug") or "",
+                "role": row.get("role") or "member",
+            }
+        )
     return out
 
 
@@ -156,8 +153,12 @@ def list_user_workspaces(*, user_id: str) -> List[Dict[str, Any]]:
 
 # ---------- chat_sessions --------------------------------------------- #
 
+
 def list_chat_sessions(
-    *, workspace_id: str, user_id: str, limit: int = 50,
+    *,
+    workspace_id: str,
+    user_id: str,
+    limit: int = 50,
 ) -> List[Dict[str, Any]]:
     """
     Return the caller's chat sessions in this workspace, newest first.
@@ -182,8 +183,8 @@ def list_chat_sessions(
             'supabase_list_sessions_failed',
             extra={
                 'workspace_id': workspace_id,
-                'user_id':      user_id,
-                'error':        type(e).__name__,
+                'user_id': user_id,
+                'error': type(e).__name__,
             },
         )
         return []
@@ -191,7 +192,10 @@ def list_chat_sessions(
 
 
 def create_chat_session(
-    *, workspace_id: str, user_id: str, title: str,
+    *,
+    workspace_id: str,
+    user_id: str,
+    title: str,
 ) -> Optional[Dict[str, Any]]:
     """
     Insert a new chat session row. Returns the inserted row or None on
@@ -204,11 +208,13 @@ def create_chat_session(
         client = get_supabase()
         resp = (
             client.table("chat_sessions")
-            .insert({
-                "workspace_id": workspace_id,
-                "user_id":      user_id,
-                "title":        safe_title,
-            })
+            .insert(
+                {
+                    "workspace_id": workspace_id,
+                    "user_id": user_id,
+                    "title": safe_title,
+                }
+            )
             .execute()
         )
     except Exception as e:  # noqa: BLE001
@@ -216,8 +222,8 @@ def create_chat_session(
             'supabase_create_session_failed',
             extra={
                 'workspace_id': workspace_id,
-                'user_id':      user_id,
-                'error':        type(e).__name__,
+                'user_id': user_id,
+                'error': type(e).__name__,
             },
         )
         return None
@@ -226,7 +232,10 @@ def create_chat_session(
 
 
 def get_chat_session(
-    *, session_id: str, workspace_id: str, user_id: str,
+    *,
+    session_id: str,
+    workspace_id: str,
+    user_id: str,
 ) -> Optional[Dict[str, Any]]:
     """
     Fetch a single session by id, scoped to (workspace_id, user_id) so
@@ -248,10 +257,10 @@ def get_chat_session(
         logger.warning(
             'supabase_get_session_failed',
             extra={
-                'session_id':   session_id,
+                'session_id': session_id,
                 'workspace_id': workspace_id,
-                'user_id':      user_id,
-                'error':        type(e).__name__,
+                'user_id': user_id,
+                'error': type(e).__name__,
             },
         )
         return None
@@ -265,7 +274,10 @@ _ALLOWED_MESSAGE_ROLES = ("user", "assistant")
 
 
 def list_chat_messages(
-    *, session_id: str, workspace_id: str, user_id: str,
+    *,
+    session_id: str,
+    workspace_id: str,
+    user_id: str,
     limit: int = 500,
 ) -> List[Dict[str, Any]]:
     """
@@ -276,7 +288,9 @@ def list_chat_messages(
     drain their chat. The call costs one extra round-trip but is cheap.
     """
     if not get_chat_session(
-        session_id=session_id, workspace_id=workspace_id, user_id=user_id,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        user_id=user_id,
     ):
         return []
     try:
@@ -293,10 +307,10 @@ def list_chat_messages(
         logger.warning(
             'supabase_list_messages_failed',
             extra={
-                'session_id':   session_id,
+                'session_id': session_id,
                 'workspace_id': workspace_id,
-                'user_id':      user_id,
-                'error':        type(e).__name__,
+                'user_id': user_id,
+                'error': type(e).__name__,
             },
         )
         return []
@@ -304,8 +318,13 @@ def list_chat_messages(
 
 
 def create_chat_message(
-    *, session_id: str, workspace_id: str, user_id: str,
-    role: str, content: str, sources: Optional[List[Dict[str, Any]]] = None,
+    *,
+    session_id: str,
+    workspace_id: str,
+    user_id: str,
+    role: str,
+    content: str,
+    sources: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Append a message to a session. The caller must own the session — we
@@ -320,35 +339,37 @@ def create_chat_message(
         )
         return None
     if not get_chat_session(
-        session_id=session_id, workspace_id=workspace_id, user_id=user_id,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        user_id=user_id,
     ):
         return None
     try:
         client = get_supabase()
         resp = (
             client.table("chat_messages")
-            .insert({
-                "session_id":   session_id,
-                "workspace_id": workspace_id,
-                "user_id":      user_id,
-                "role":         role,
-                "content":      content or "",
-                "sources":      sources if sources is not None else None,
-            })
+            .insert(
+                {
+                    "session_id": session_id,
+                    "workspace_id": workspace_id,
+                    "user_id": user_id,
+                    "role": role,
+                    "content": content or "",
+                    "sources": sources if sources is not None else None,
+                }
+            )
             .execute()
         )
         # Touch the session's updated_at so it floats to the top of the list.
-        client.table("chat_sessions").update(
-            {"updated_at": "now()"}
-        ).eq("id", session_id).execute()
+        client.table("chat_sessions").update({"updated_at": "now()"}).eq("id", session_id).execute()
     except Exception as e:  # noqa: BLE001
         logger.warning(
             'supabase_create_message_failed',
             extra={
-                'session_id':   session_id,
+                'session_id': session_id,
                 'workspace_id': workspace_id,
-                'user_id':      user_id,
-                'error':        type(e).__name__,
+                'user_id': user_id,
+                'error': type(e).__name__,
             },
         )
         return None
@@ -358,8 +379,12 @@ def create_chat_message(
 
 # ---------- saved_answers --------------------------------------------- #
 
+
 def list_saved_answers(
-    *, workspace_id: str, user_id: str, limit: int = 100,
+    *,
+    workspace_id: str,
+    user_id: str,
+    limit: int = 100,
 ) -> List[Dict[str, Any]]:
     """
     List saved answers in the workspace, newest first.
@@ -375,10 +400,7 @@ def list_saved_answers(
         client = get_supabase()
         resp = (
             client.table("saved_answers")
-            .select(
-                "id, question, answer, sources, mode, filters, debug, "
-                "created_at"
-            )
+            .select("id, question, answer, sources, mode, filters, debug, " "created_at")
             .eq("workspace_id", workspace_id)
             .eq("user_id", user_id)
             .order("created_at", desc=True)
@@ -390,8 +412,8 @@ def list_saved_answers(
             'supabase_list_saved_failed',
             extra={
                 'workspace_id': workspace_id,
-                'user_id':      user_id,
-                'error':        type(e).__name__,
+                'user_id': user_id,
+                'error': type(e).__name__,
             },
         )
         return []
@@ -415,26 +437,24 @@ def create_saved_answer(
     """
     row = {
         "workspace_id": workspace_id,
-        "user_id":      user_id,
-        "question":     (question or "")[:5000],
-        "answer":       answer or "",
-        "sources":      sources if sources is not None else None,
-        "mode":         (mode or None),
-        "filters":      filters if filters is not None else None,
-        "debug":        debug if debug is not None else None,
+        "user_id": user_id,
+        "question": (question or "")[:5000],
+        "answer": answer or "",
+        "sources": sources if sources is not None else None,
+        "mode": (mode or None),
+        "filters": filters if filters is not None else None,
+        "debug": debug if debug is not None else None,
     }
     try:
         client = get_supabase()
-        resp = (
-            client.table("saved_answers").insert(row).execute()
-        )
+        resp = client.table("saved_answers").insert(row).execute()
     except Exception as e:  # noqa: BLE001
         logger.warning(
             'supabase_create_saved_failed',
             extra={
                 'workspace_id': workspace_id,
-                'user_id':      user_id,
-                'error':        type(e).__name__,
+                'user_id': user_id,
+                'error': type(e).__name__,
             },
         )
         return None
@@ -443,7 +463,10 @@ def create_saved_answer(
 
 
 def delete_saved_answer(
-    *, saved_id: str, workspace_id: str, user_id: str,
+    *,
+    saved_id: str,
+    workspace_id: str,
+    user_id: str,
 ) -> bool:
     """
     Delete a saved answer the caller owns. Scoped by workspace_id +
@@ -465,10 +488,10 @@ def delete_saved_answer(
         logger.warning(
             'supabase_delete_saved_failed',
             extra={
-                'saved_id':     saved_id,
+                'saved_id': saved_id,
                 'workspace_id': workspace_id,
-                'user_id':      user_id,
-                'error':        type(e).__name__,
+                'user_id': user_id,
+                'error': type(e).__name__,
             },
         )
         return False
@@ -480,6 +503,7 @@ def delete_saved_answer(
 # answers. The `share_token` is an opaque random string minted by
 # secrets.token_urlsafe(32); see main.py for the routes.
 # =====================================================================
+
 
 def create_share_link(
     *,
@@ -499,10 +523,10 @@ def create_share_link(
     if not workspace_id or not saved_answer_id or not created_by or not share_token:
         return None
     row: Dict[str, Any] = {
-        "workspace_id":    workspace_id,
+        "workspace_id": workspace_id,
         "saved_answer_id": saved_answer_id,
-        "created_by":      created_by,
-        "share_token":     share_token,
+        "created_by": created_by,
+        "share_token": share_token,
     }
     if expires_at:
         row["expires_at"] = expires_at
@@ -514,7 +538,7 @@ def create_share_link(
             'supabase_create_share_link_failed',
             extra={
                 'workspace_id': workspace_id,
-                'error':        type(e).__name__,
+                'error': type(e).__name__,
             },
         )
         return None
@@ -538,13 +562,7 @@ def get_share_link_by_token(*, share_token: str) -> Optional[Dict[str, Any]]:
         return None
     try:
         client = get_supabase()
-        resp = (
-            client.table("shared_links")
-            .select("*")
-            .eq("share_token", share_token)
-            .limit(1)
-            .execute()
-        )
+        resp = client.table("shared_links").select("*").eq("share_token", share_token).limit(1).execute()
     except Exception as e:  # noqa: BLE001
         logger.warning(
             'supabase_get_share_link_failed',
@@ -565,9 +583,8 @@ def get_share_link_by_token(*, share_token: str) -> Optional[Dict[str, Any]]:
         # writes UTC ISO strings.
         try:
             from datetime import datetime, timezone
-            exp = datetime.fromisoformat(
-                expires_at.replace("Z", "+00:00")
-            )
+
+            exp = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
             if exp.tzinfo is None:
                 exp = exp.replace(tzinfo=timezone.utc)
             if datetime.now(timezone.utc) > exp:
@@ -579,7 +596,9 @@ def get_share_link_by_token(*, share_token: str) -> Optional[Dict[str, Any]]:
 
 
 def get_saved_answer(
-    *, saved_id: str, workspace_id: Optional[str] = None,
+    *,
+    saved_id: str,
+    workspace_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Fetch one saved answer by id. When workspace_id is supplied the
@@ -595,10 +614,7 @@ def get_saved_answer(
         client = get_supabase()
         q = (
             client.table("saved_answers")
-            .select(
-                "id, workspace_id, question, answer, sources, mode, "
-                "created_at"
-            )
+            .select("id, workspace_id, question, answer, sources, mode, " "created_at")
             .eq("id", saved_id)
         )
         if workspace_id:
@@ -615,7 +631,9 @@ def get_saved_answer(
 
 
 def list_share_links_for_workspace(
-    *, workspace_id: str, user_id: Optional[str] = None,
+    *,
+    workspace_id: str,
+    user_id: Optional[str] = None,
     saved_answer_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
@@ -630,10 +648,7 @@ def list_share_links_for_workspace(
         client = get_supabase()
         q = (
             client.table("shared_links")
-            .select(
-                "id, share_token, saved_answer_id, created_by, "
-                "expires_at, revoked_at, created_at"
-            )
+            .select("id, share_token, saved_answer_id, created_by, " "expires_at, revoked_at, created_at")
             .eq("workspace_id", workspace_id)
         )
         if user_id:
@@ -646,7 +661,7 @@ def list_share_links_for_workspace(
             'supabase_list_share_links_failed',
             extra={
                 'workspace_id': workspace_id,
-                'error':        type(e).__name__,
+                'error': type(e).__name__,
             },
         )
         return []
@@ -683,11 +698,12 @@ def revoke_share_link(
             'supabase_revoke_share_failed',
             extra={
                 'workspace_id': workspace_id,
-                'error':        type(e).__name__,
+                'error': type(e).__name__,
             },
         )
         return False
     return bool(getattr(resp, "data", []) or [])
+
 
 # =====================================================================
 # Phase 3: Slack installations + Slack channels.
@@ -699,6 +715,7 @@ def revoke_share_link(
 
 
 # ---------- slack_installations -------------------------------------- #
+
 
 def upsert_slack_installation(
     *,
@@ -737,15 +754,15 @@ def upsert_slack_installation(
     other token material; only column-shape metadata flows into logs.
     """
     payload: Dict[str, Any] = {
-        "workspace_id":    workspace_id,
-        "slack_team_id":   slack_team_id,
+        "workspace_id": workspace_id,
+        "slack_team_id": slack_team_id,
         "slack_team_name": slack_team_name,
-        "bot_user_id":     bot_user_id,
-        "bot_token":       bot_token,
+        "bot_user_id": bot_user_id,
+        "bot_token": bot_token,
         # Production column is `scope` (singular). Keep the public
         # Python kwarg name `scopes` for backwards compat with all
         # callers; only the persisted column name changes.
-        "scope":           scopes,
+        "scope": scopes,
     }
     if installed_by:
         payload["installed_by"] = installed_by
@@ -755,11 +772,7 @@ def upsert_slack_installation(
         # `upsert` with on_conflict=workspace_id matches the
         # `unique (workspace_id)` constraint, so re-running Connect
         # for the same workspace updates the existing row.
-        resp = (
-            client.table("slack_installations")
-            .upsert(payload, on_conflict="workspace_id")
-            .execute()
-        )
+        resp = client.table("slack_installations").upsert(payload, on_conflict="workspace_id").execute()
     except Exception as e:  # noqa: BLE001
         # Extract structured PostgREST fields when possible so the
         # cause is visible in production logs. .json() exists on
@@ -768,7 +781,7 @@ def upsert_slack_installation(
         # for instance).
         err_extra: Dict[str, Any] = {
             "workspace_id": workspace_id,
-            "error":        type(e).__name__,
+            "error": type(e).__name__,
         }
         body = None
         try:
@@ -792,7 +805,8 @@ def upsert_slack_installation(
 
 
 def get_slack_installation(
-    *, workspace_id: str,
+    *,
+    workspace_id: str,
 ) -> Optional[Dict[str, Any]]:
     """
     Return the installation row for a workspace, including bot_token.
@@ -801,13 +815,7 @@ def get_slack_installation(
     """
     try:
         client = get_supabase()
-        resp = (
-            client.table("slack_installations")
-            .select("*")
-            .eq("workspace_id", workspace_id)
-            .limit(1)
-            .execute()
-        )
+        resp = client.table("slack_installations").select("*").eq("workspace_id", workspace_id).limit(1).execute()
     except Exception as e:  # noqa: BLE001
         logger.warning(
             'supabase_get_installation_failed',
@@ -819,7 +827,8 @@ def get_slack_installation(
 
 
 def get_slack_installation_public(
-    *, workspace_id: str,
+    *,
+    workspace_id: str,
 ) -> Optional[Dict[str, Any]]:
     """
     Same as get_slack_installation but WITHOUT bot_token, suitable for
@@ -831,16 +840,17 @@ def get_slack_installation_public(
     if not row:
         return None
     return {
-        "slack_team_id":   row.get("slack_team_id"),
+        "slack_team_id": row.get("slack_team_id"),
         "slack_team_name": row.get("slack_team_name"),
-        "bot_user_id":     row.get("bot_user_id"),
-        "scopes":          row.get("scopes"),
-        "connected_at":    row.get("created_at"),
-        "updated_at":      row.get("updated_at"),
+        "bot_user_id": row.get("bot_user_id"),
+        "scopes": row.get("scopes"),
+        "connected_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
     }
 
 
 # ---------- slack_channels ------------------------------------------- #
+
 
 def upsert_slack_channels(
     *,
@@ -889,18 +899,18 @@ def upsert_slack_channels(
         if not cid:
             continue
         row: Dict[str, Any] = {
-            "workspace_id":     workspace_id,
+            "workspace_id": workspace_id,
             "slack_channel_id": cid,
-            "name":             (c.get("name") or "").strip(),
-            "is_archived":      bool(c.get("is_archived")),
-            "is_private":       bool(c.get("is_private")),
+            "name": (c.get("name") or "").strip(),
+            "is_archived": bool(c.get("is_archived")),
+            "is_private": bool(c.get("is_private")),
             # Slack omits num_members for archived or no-bot-member
             # private channels. Default to 0 so we never insert NULL
             # into a NOT NULL integer column.
             "member_count": int(c.get("member_count") or 0),
             "topic": (c.get("topic") or ""),
             "purpose": (c.get("purpose") or ""),
-            "last_seen_at":     now_iso,
+            "last_seen_at": now_iso,
         }
         # The installation_id FK is required by the production schema
         # and unused by the dev schema. Set it only when provided so
@@ -932,8 +942,8 @@ def upsert_slack_channels(
         # echoes back row values, so it's safe to log.
         err_extra: Dict[str, Any] = {
             "workspace_id": workspace_id,
-            "error":        type(e).__name__,
-            "count":        len(rows),
+            "error": type(e).__name__,
+            "count": len(rows),
         }
         body = None
         try:
@@ -954,11 +964,13 @@ def upsert_slack_channels(
 def _utc_iso_now() -> str:
     """Return current UTC time as ISO 8601 -- format Postgres accepts."""
     from datetime import datetime, timezone
+
     return datetime.now(timezone.utc).isoformat()
 
 
 def list_workspace_channels(
-    *, workspace_id: str,
+    *,
+    workspace_id: str,
 ) -> List[Dict[str, Any]]:
     """
     Return every known channel for a workspace, ordered by name.
@@ -968,8 +980,7 @@ def list_workspace_channels(
         client = get_supabase()
         resp = (
             client.table("slack_channels")
-            .select("slack_channel_id, name, is_selected, is_archived, "
-                    "updated_at")
+            .select("slack_channel_id, name, is_selected, is_archived, " "updated_at")
             .eq("workspace_id", workspace_id)
             .order("name", desc=False)
             .execute()
@@ -984,7 +995,8 @@ def list_workspace_channels(
 
 
 def list_selected_channel_ids(
-    *, workspace_id: str,
+    *,
+    workspace_id: str,
 ) -> List[str]:
     """
     Return just the channel IDs the workspace has marked for ingestion.
@@ -1014,7 +1026,9 @@ def list_selected_channel_ids(
 
 
 def set_selected_channels(
-    *, workspace_id: str, selected_ids: List[str],
+    *,
+    workspace_id: str,
+    selected_ids: List[str],
 ) -> bool:
     """
     Replace the selected set. Sets is_selected=true on every row whose
@@ -1034,30 +1048,26 @@ def set_selected_channels(
         # set / else value Z" expression. Each branch is constant-time
         # in row count so even hundreds of channels stay snappy.
         if selected_ids:
-            client.table("slack_channels").update(
-                {"is_selected": True}
-            ).eq("workspace_id", workspace_id).in_(
-                "slack_channel_id", selected_ids,
+            client.table("slack_channels").update({"is_selected": True}).eq("workspace_id", workspace_id).in_(
+                "slack_channel_id",
+                selected_ids,
             ).execute()
             # Unselect everything NOT in the set.
-            client.table("slack_channels").update(
-                {"is_selected": False}
-            ).eq("workspace_id", workspace_id).not_.in_(
-                "slack_channel_id", selected_ids,
+            client.table("slack_channels").update({"is_selected": False}).eq("workspace_id", workspace_id).not_.in_(
+                "slack_channel_id",
+                selected_ids,
             ).execute()
         else:
             # Empty selection — unselect everything.
-            client.table("slack_channels").update(
-                {"is_selected": False}
-            ).eq("workspace_id", workspace_id).execute()
+            client.table("slack_channels").update({"is_selected": False}).eq("workspace_id", workspace_id).execute()
     except Exception as e:  # noqa: BLE001
         logger.warning(
             'supabase_set_selected_channels_failed',
-            extra={'workspace_id': workspace_id, 'error': type(e).__name__,
-                   'selected_count': len(selected_ids)},
+            extra={'workspace_id': workspace_id, 'error': type(e).__name__, 'selected_count': len(selected_ids)},
         )
         return False
     return True
+
 
 # =====================================================================
 # Phase 4: per-workspace HydraDB sub-tenant isolation.
@@ -1093,13 +1103,7 @@ def get_workspace_sub_tenant_id(*, workspace_id: str) -> Optional[str]:
         return None
     try:
         client = get_supabase()
-        resp = (
-            client.table("workspaces")
-            .select("hydradb_sub_tenant_id")
-            .eq("id", workspace_id)
-            .limit(1)
-            .execute()
-        )
+        resp = client.table("workspaces").select("hydradb_sub_tenant_id").eq("id", workspace_id).limit(1).execute()
     except Exception as e:  # noqa: BLE001
         logger.warning(
             'supabase_get_sub_tenant_failed',
@@ -1137,14 +1141,11 @@ def ensure_workspace_sub_tenant(*, workspace_id: str) -> Optional[str]:
         return None
     try:
         client = get_supabase()
-        client.table("workspaces").update(
-            {"hydradb_sub_tenant_id": derived}
-        ).eq("id", workspace_id).execute()
+        client.table("workspaces").update({"hydradb_sub_tenant_id": derived}).eq("id", workspace_id).execute()
     except Exception as e:  # noqa: BLE001
         logger.warning(
             'supabase_ensure_sub_tenant_write_failed',
-            extra={'workspace_id': workspace_id, 'error': type(e).__name__,
-                   'derived': derived},
+            extra={'workspace_id': workspace_id, 'error': type(e).__name__, 'derived': derived},
         )
         return None
     logger.info(
@@ -1155,7 +1156,9 @@ def ensure_workspace_sub_tenant(*, workspace_id: str) -> Optional[str]:
 
 
 def mark_workspace_synced(
-    *, workspace_id: str, sync_at: Optional[str] = None,
+    *,
+    workspace_id: str,
+    sync_at: Optional[str] = None,
 ) -> bool:
     """
     Stamp the workspace's hydradb_last_sync_at to `sync_at` (ISO 8601
@@ -1173,7 +1176,8 @@ def mark_workspace_synced(
     try:
         client = get_supabase()
         client.table("workspaces").update(payload).eq(
-            "id", workspace_id,
+            "id",
+            workspace_id,
         ).execute()
     except Exception as e:  # noqa: BLE001
         logger.warning(
@@ -1227,11 +1231,7 @@ def list_active_workspaces_with_slack() -> List[Dict[str, Any]]:
         # We deliberately fetch ALL installations (not filtered to the
         # active workspace ids above) — the Slack installations table
         # is small and a single round-trip beats N queries.
-        inst_resp = (
-            client.table("slack_installations")
-            .select("workspace_id, bot_token")
-            .execute()
-        )
+        inst_resp = client.table("slack_installations").select("workspace_id, bot_token").execute()
         installations = {
             (row.get("workspace_id") or ""): (row.get("bot_token") or "")
             for row in (getattr(inst_resp, "data", None) or [])
@@ -1239,13 +1239,10 @@ def list_active_workspaces_with_slack() -> List[Dict[str, Any]]:
 
         # Same for the selected channels.
         chan_resp = (
-            client.table("slack_channels")
-            .select("workspace_id, slack_channel_id")
-            .eq("is_selected", True)
-            .execute()
+            client.table("slack_channels").select("workspace_id, slack_channel_id").eq("is_selected", True).execute()
         )
         channels_by_ws: Dict[str, List[str]] = {}
-        for row in (getattr(chan_resp, "data", None) or []):
+        for row in getattr(chan_resp, "data", None) or []:
             ws = row.get("workspace_id") or ""
             cid = (row.get("slack_channel_id") or "").strip()
             if not ws or not cid:
@@ -1268,12 +1265,14 @@ def list_active_workspaces_with_slack() -> List[Dict[str, Any]]:
             # materialized sub-tenant. The scheduler doesn't need to
             # know they exist.
             continue
-        out.append({
-            "workspace_id":          wid,
-            "hydradb_sub_tenant_id": sub_tenant,
-            "bot_token":             token,
-            "channel_ids":           channels_by_ws.get(wid, []),
-        })
+        out.append(
+            {
+                "workspace_id": wid,
+                "hydradb_sub_tenant_id": sub_tenant,
+                "bot_token": token,
+                "channel_ids": channels_by_ws.get(wid, []),
+            }
+        )
     return out
 
 
@@ -1286,6 +1285,7 @@ def list_active_workspaces_with_slack() -> List[Dict[str, Any]]:
 # connection) instead of one row per workspace -- the scheduler
 # iterates connections, not workspaces, so each connection's failures
 # stay isolated.
+
 
 def list_active_workspaces_with_gmail() -> List[Dict[str, Any]]:
     """
@@ -1343,24 +1343,17 @@ def list_active_workspaces_with_gmail() -> List[Dict[str, Any]]:
         # Step 2: all Gmail connections (tokens included -- this is
         # service-role-only code, never reachable from a user request).
         # Same shape get_gmail_connection returns.
-        conn_resp = (
-            client.table("gmail_connections")
-            .select("*")
-            .execute()
-        )
+        conn_resp = client.table("gmail_connections").select("*").execute()
         connections = getattr(conn_resp, "data", None) or []
         if not connections:
             return []
 
         # Step 3: selected labels per connection.
         label_resp = (
-            client.table("gmail_labels")
-            .select("gmail_connection_id, label_id")
-            .eq("is_selected", True)
-            .execute()
+            client.table("gmail_labels").select("gmail_connection_id, label_id").eq("is_selected", True).execute()
         )
         labels_by_conn: Dict[str, List[str]] = {}
-        for row in (getattr(label_resp, "data", None) or []):
+        for row in getattr(label_resp, "data", None) or []:
             cid = row.get("gmail_connection_id") or ""
             lid = (row.get("label_id") or "").strip()
             if cid and lid:
@@ -1386,17 +1379,21 @@ def list_active_workspaces_with_gmail() -> List[Dict[str, Any]]:
             # the scheduler doesn't log "skipped" for every fresh
             # Connect that hasn't picked any labels yet.
             continue
-        out.append({
-            "workspace_id":          wid,
-            "hydradb_sub_tenant_id": active_ws[wid],
-            "connection":            conn,
-            "selected_label_ids":    labels,
-        })
+        out.append(
+            {
+                "workspace_id": wid,
+                "hydradb_sub_tenant_id": active_ws[wid],
+                "connection": conn,
+                "selected_label_ids": labels,
+            }
+        )
     return out
 
 
 def get_gmail_ingestion_state_map(
-    *, workspace_id: str, gmail_connection_id: str,
+    *,
+    workspace_id: str,
+    gmail_connection_id: str,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Return the per-label sync watermark map for one (workspace,
@@ -1423,26 +1420,28 @@ def get_gmail_ingestion_state_map(
         logger.warning(
             'supabase_get_gmail_ingestion_state_failed',
             extra={
-                'workspace_id':  workspace_id,
+                'workspace_id': workspace_id,
                 'connection_id': gmail_connection_id,
-                'error':         type(e).__name__,
+                'error': type(e).__name__,
             },
         )
         return {}
     out: Dict[str, Dict[str, Any]] = {}
-    for row in (getattr(resp, "data", None) or []):
+    for row in getattr(resp, "data", None) or []:
         lid = (row.get("label_id") or "").strip()
         if not lid:
             continue
         out[lid] = {
             "last_history_id": row.get("last_history_id"),
-            "last_synced_at":  row.get("last_synced_at"),
+            "last_synced_at": row.get("last_synced_at"),
         }
     return out
 
 
 def get_gmail_connection_sync_summary(
-    *, workspace_id: str, gmail_connection_id: str,
+    *,
+    workspace_id: str,
+    gmail_connection_id: str,
 ) -> Dict[str, Any]:
     """
     Lightweight UI projection: for one connection, return
@@ -1484,7 +1483,8 @@ def get_gmail_connection_sync_summary(
 
 
 def get_slack_installation_by_team_id(
-    *, slack_team_id: str,
+    *,
+    slack_team_id: str,
 ) -> Optional[Dict[str, Any]]:
     """
     Return the installation row for a Slack team, including bot_token.
@@ -1499,18 +1499,11 @@ def get_slack_installation_by_team_id(
         return None
     try:
         client = get_supabase()
-        resp = (
-            client.table("slack_installations")
-            .select("*")
-            .eq("slack_team_id", slack_team_id)
-            .limit(1)
-            .execute()
-        )
+        resp = client.table("slack_installations").select("*").eq("slack_team_id", slack_team_id).limit(1).execute()
     except Exception as e:  # noqa: BLE001
         logger.warning(
             'supabase_get_installation_by_team_failed',
-            extra={'slack_team_id': slack_team_id,
-                   'error': type(e).__name__},
+            extra={'slack_team_id': slack_team_id, 'error': type(e).__name__},
         )
         return None
     rows = getattr(resp, "data", None) or []
@@ -1518,7 +1511,9 @@ def get_slack_installation_by_team_id(
 
 
 def is_channel_selected_for_workspace(
-    *, workspace_id: str, slack_channel_id: str,
+    *,
+    workspace_id: str,
+    slack_channel_id: str,
 ) -> bool:
     """
     True iff slack_channels has a row for (workspace_id, channel_id)
@@ -1545,15 +1540,14 @@ def is_channel_selected_for_workspace(
     except Exception as e:  # noqa: BLE001
         logger.warning(
             'supabase_is_channel_selected_failed',
-            extra={'workspace_id': workspace_id,
-                   'slack_channel_id': slack_channel_id,
-                   'error': type(e).__name__},
+            extra={'workspace_id': workspace_id, 'slack_channel_id': slack_channel_id, 'error': type(e).__name__},
         )
         return False
     rows = getattr(resp, "data", None) or []
     if not rows:
         return False
     return bool(rows[0].get("is_selected"))
+
 
 # =====================================================================
 # Phase 7: durable Slack event dedupe.
@@ -1569,7 +1563,9 @@ def is_channel_selected_for_workspace(
 
 
 def claim_slack_event_id(
-    *, event_id: str, workspace_id: Optional[str] = None,
+    *,
+    event_id: str,
+    workspace_id: Optional[str] = None,
 ) -> bool:
     """
     Atomically claim a Slack event_id for processing.
@@ -1595,8 +1591,7 @@ def claim_slack_event_id(
     try:
         client = get_supabase()
         resp = (
-            client.table("slack_event_seen")
-            .insert(payload, returning="representation")
+            client.table("slack_event_seen").insert(payload, returning="representation")
             # ignore_duplicates=True -> ON CONFLICT DO NOTHING.
             # When the row already exists, .data comes back as an
             # empty list and we treat that as "duplicate".
@@ -1640,7 +1635,8 @@ def cleanup_slack_event_seen(*, retain_hours: int = 24) -> int:
     try:
         client = get_supabase()
         resp = client.rpc(
-            "cleanup_slack_event_seen", {"retain_hours": int(retain_hours)},
+            "cleanup_slack_event_seen",
+            {"retain_hours": int(retain_hours)},
         ).execute()
     except Exception as e:  # noqa: BLE001
         logger.warning(
@@ -1653,6 +1649,7 @@ def cleanup_slack_event_seen(*, retain_hours: int = 24) -> int:
         return int(data) if data is not None else 0
     except (TypeError, ValueError):
         return 0
+
 
 # =====================================================================
 # Phase 8: Gmail connector helpers.
@@ -1669,8 +1666,15 @@ def cleanup_slack_event_seen(*, retain_hours: int = 24) -> int:
 
 
 _GMAIL_PUBLIC_FIELDS = (
-    "id", "workspace_id", "google_user_id", "email",
-    "scopes", "status", "created_at", "updated_at", "token_expiry",
+    "id",
+    "workspace_id",
+    "google_user_id",
+    "email",
+    "scopes",
+    "status",
+    "created_at",
+    "updated_at",
+    "token_expiry",
 )
 
 
@@ -1737,24 +1741,20 @@ def upsert_gmail_connection(
         effective_refresh = (existing.get("refresh_token") or "").strip()
 
     payload: Dict[str, Any] = {
-        "workspace_id":    workspace_id,
-        "google_user_id":  google_user_id,
-        "email":           email or "",
-        "access_token":    access_token or "",
-        "refresh_token":   effective_refresh,
-        "scopes":          scopes or "",
-        "status":          status,
+        "workspace_id": workspace_id,
+        "google_user_id": google_user_id,
+        "email": email or "",
+        "access_token": access_token or "",
+        "refresh_token": effective_refresh,
+        "scopes": scopes or "",
+        "status": status,
     }
     if token_expiry:
         payload["token_expiry"] = token_expiry
 
     try:
         client = get_supabase()
-        resp = (
-            client.table("gmail_connections")
-            .upsert(payload, on_conflict="workspace_id,google_user_id")
-            .execute()
-        )
+        resp = client.table("gmail_connections").upsert(payload, on_conflict="workspace_id,google_user_id").execute()
     except Exception as e:  # noqa: BLE001
         logger.warning(
             'supabase_upsert_gmail_connection_failed',
@@ -1767,7 +1767,9 @@ def upsert_gmail_connection(
 
 
 def get_gmail_connection(
-    *, connection_id: str, workspace_id: str,
+    *,
+    connection_id: str,
+    workspace_id: str,
 ) -> Optional[Dict[str, Any]]:
     """
     Return the full Gmail connection row, tokens included. Server-side
@@ -1796,14 +1798,17 @@ def get_gmail_connection(
 
 
 def get_gmail_connection_public(
-    *, connection_id: str, workspace_id: str,
+    *,
+    connection_id: str,
+    workspace_id: str,
 ) -> Optional[Dict[str, Any]]:
     """
     Public projection of a Gmail connection -- safe to return from
     API routes. Token fields are stripped.
     """
     row = get_gmail_connection(
-        connection_id=connection_id, workspace_id=workspace_id,
+        connection_id=connection_id,
+        workspace_id=workspace_id,
     )
     if not row:
         return None
@@ -1811,7 +1816,8 @@ def get_gmail_connection_public(
 
 
 def list_gmail_connections_public(
-    *, workspace_id: str,
+    *,
+    workspace_id: str,
 ) -> List[Dict[str, Any]]:
     """List public projections for every Gmail connection in a workspace."""
     if not workspace_id:
@@ -1819,11 +1825,7 @@ def list_gmail_connections_public(
     try:
         client = get_supabase()
         resp = (
-            client.table("gmail_connections")
-            .select("*")
-            .eq("workspace_id", workspace_id)
-            .order("created_at")
-            .execute()
+            client.table("gmail_connections").select("*").eq("workspace_id", workspace_id).order("created_at").execute()
         )
     except Exception as e:  # noqa: BLE001
         logger.warning(
@@ -1836,7 +1838,9 @@ def list_gmail_connections_public(
 
 
 def delete_gmail_connection(
-    *, connection_id: str, workspace_id: str,
+    *,
+    connection_id: str,
+    workspace_id: str,
 ) -> bool:
     """
     Delete a Gmail connection (cascades to labels + ingestion state via
@@ -1887,7 +1891,8 @@ def update_gmail_connection_tokens(
     try:
         client = get_supabase()
         client.table("gmail_connections").update(payload).eq(
-            "id", connection_id,
+            "id",
+            connection_id,
         ).eq("workspace_id", workspace_id).execute()
     except Exception as e:  # noqa: BLE001
         logger.warning(
@@ -1899,6 +1904,7 @@ def update_gmail_connection_tokens(
 
 
 # ---------- Gmail labels --------------------------------------------------
+
 
 def upsert_gmail_labels(
     *,
@@ -1922,20 +1928,23 @@ def upsert_gmail_labels(
         lid = (raw.get("label_id") or "").strip()
         if not lid:
             continue
-        rows.append({
-            "workspace_id":         workspace_id,
-            "gmail_connection_id":  gmail_connection_id,
-            "label_id":             lid,
-            "name":                 (raw.get("name") or "").strip(),
-            "type":                 (raw.get("type") or "user").strip(),
-        })
+        rows.append(
+            {
+                "workspace_id": workspace_id,
+                "gmail_connection_id": gmail_connection_id,
+                "label_id": lid,
+                "name": (raw.get("name") or "").strip(),
+                "type": (raw.get("type") or "user").strip(),
+            }
+        )
     if not rows:
         return 0
 
     try:
         client = get_supabase()
         client.table("gmail_labels").upsert(
-            rows, on_conflict="gmail_connection_id,label_id",
+            rows,
+            on_conflict="gmail_connection_id,label_id",
         ).execute()
     except Exception as e:  # noqa: BLE001
         logger.warning(
@@ -1947,7 +1956,9 @@ def upsert_gmail_labels(
 
 
 def list_gmail_labels(
-    *, workspace_id: str, gmail_connection_id: str,
+    *,
+    workspace_id: str,
+    gmail_connection_id: str,
 ) -> List[Dict[str, Any]]:
     """Return every label row for a connection, including is_selected."""
     if not workspace_id or not gmail_connection_id:
@@ -1994,18 +2005,21 @@ def set_selected_gmail_labels(
             client.table("gmail_labels").update(
                 {"is_selected": True},
             ).eq("workspace_id", workspace_id).eq(
-                "gmail_connection_id", gmail_connection_id,
+                "gmail_connection_id",
+                gmail_connection_id,
             ).in_("label_id", ids).execute()
             client.table("gmail_labels").update(
                 {"is_selected": False},
             ).eq("workspace_id", workspace_id).eq(
-                "gmail_connection_id", gmail_connection_id,
+                "gmail_connection_id",
+                gmail_connection_id,
             ).not_.in_("label_id", ids).execute()
         else:
             client.table("gmail_labels").update(
                 {"is_selected": False},
             ).eq("workspace_id", workspace_id).eq(
-                "gmail_connection_id", gmail_connection_id,
+                "gmail_connection_id",
+                gmail_connection_id,
             ).execute()
     except Exception as e:  # noqa: BLE001
         logger.warning(
@@ -2021,7 +2035,9 @@ def set_selected_gmail_labels(
 
 
 def list_selected_gmail_label_ids(
-    *, workspace_id: str, gmail_connection_id: str,
+    *,
+    workspace_id: str,
+    gmail_connection_id: str,
 ) -> List[str]:
     """Return the currently-selected label IDs for a Gmail connection."""
     if not workspace_id or not gmail_connection_id:
@@ -2048,6 +2064,7 @@ def list_selected_gmail_label_ids(
 
 # ---------- Gmail ingestion state ----------------------------------------
 
+
 def upsert_gmail_ingestion_state(
     *,
     workspace_id: str,
@@ -2063,17 +2080,18 @@ def upsert_gmail_ingestion_state(
     if not workspace_id or not gmail_connection_id or not label_id:
         return False
     payload: Dict[str, Any] = {
-        "workspace_id":        workspace_id,
+        "workspace_id": workspace_id,
         "gmail_connection_id": gmail_connection_id,
-        "label_id":            label_id,
-        "last_synced_at":      "now()",
+        "label_id": label_id,
+        "last_synced_at": "now()",
     }
     if last_history_id:
         payload["last_history_id"] = last_history_id
     try:
         client = get_supabase()
         client.table("gmail_ingestion_state").upsert(
-            payload, on_conflict="gmail_connection_id,label_id",
+            payload,
+            on_conflict="gmail_connection_id,label_id",
         ).execute()
     except Exception as e:  # noqa: BLE001
         logger.warning(
