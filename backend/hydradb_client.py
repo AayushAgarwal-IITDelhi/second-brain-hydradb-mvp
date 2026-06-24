@@ -310,7 +310,7 @@ class HydraDBClient:
         except ValueError:
             logger.warning("hydradb_delete_non_json", extra={"status": resp.status_code})
             return {}
-        deleted = ((data.get("data") or {}).get("deleted_count") or 0)
+        deleted = (data.get("data") or {}).get("deleted_count") or 0
         logger.info(
             "hydradb_delete_complete",
             extra={"deleted_count": deleted, "requested": len(ids)},

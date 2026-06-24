@@ -699,8 +699,13 @@ def _handle_message_changed(
         old_uploaded_at = (old_entry or {}).get("uploaded_at")
 
         _ingest_standalone(
-            slack, hydra, channel_id, channel_name, updated,
-            workspace_id=workspace_id, force_reupload=True,
+            slack,
+            hydra,
+            channel_id,
+            channel_name,
+            updated,
+            workspace_id=workspace_id,
+            force_reupload=True,
         )
 
         with _state_lock:
