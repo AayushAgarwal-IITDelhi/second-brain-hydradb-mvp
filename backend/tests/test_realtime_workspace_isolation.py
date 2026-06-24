@@ -327,17 +327,15 @@ class TestEventFiltering:
     @pytest.mark.parametrize(
         "subtype",
         [
-            "message_changed",
-            "message_deleted",
             "bot_message",
             "channel_join",
             "channel_leave",
         ],
     )
     def test_ignored_subtypes_short_circuit_before_lookup(self, subtype):
-        """We drop edits/deletes/joins/leaves/bot_message BEFORE we even
-        hit Supabase -- no point looking up an installation for an
-        event we're going to ignore."""
+        """We drop bot_message/joins/leaves BEFORE we even hit Supabase.
+        (message_changed/message_deleted are now routed through workspace
+        lookup so they can be handled with the workspace-specific clients.)"""
         from realtime_ingest import process_slack_event
 
         payload = {
