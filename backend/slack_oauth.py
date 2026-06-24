@@ -203,6 +203,33 @@ def installation_from_oauth_response(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def revoke_bot_token(bot_token: str) -> bool:
+    """
+    Call Slack auth.revoke to invalidate the bot token server-side.
+    Returns True if Slack confirmed revocation, False on any failure.
+    Fire-and-forget: callers should proceed with local cleanup regardless.
+    """
+    if not bot_token:
+        return False
+    try:
+        resp = requests.post(
+            "https://slack.com/api/auth.revoke",
+            headers={"Authorization": f"Bearer {bot_token}"},
+            timeout=10,
+        )
+        data = resp.json()
+        ok = bool((data or {}).get("ok"))
+        if not ok:
+            logger.warning(
+                "slack_revoke_not_ok",
+                extra={"error": (data or {}).get("error")},
+            )
+        return ok
+    except Exception as e:  # noqa: BLE001
+        logger.warning("slack_revoke_failed", extra={"error": type(e).__name__})
+        return False
+
+
 # ---------------------------------------------------------------------- #
 # Listing channels from Slack (after Connect, so the picker can populate)
 # ---------------------------------------------------------------------- #

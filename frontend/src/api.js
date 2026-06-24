@@ -616,6 +616,14 @@ export function runSlackIngest(signal) {
   return jsonFetch("/api/slack/ingest", { method: "POST", signal });
 }
 
+/**
+ * Revoke the Slack bot token and delete the workspace installation.
+ * On success the backend returns { disconnected: true }.
+ */
+export function disconnectSlack(signal) {
+  return jsonFetch("/api/slack/disconnect", { method: "DELETE", signal });
+}
+
 // ----- Gmail Connect (Phase 8, workspace-scoped) -----
 // Mirrors the Slack helpers above. Same workspace-bound auth (bearer +
 // X-Workspace-Id); the OAuth callback redirects back to the frontend
