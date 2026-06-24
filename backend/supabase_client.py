@@ -849,6 +849,30 @@ def get_slack_installation_public(
     }
 
 
+def delete_slack_installation(*, workspace_id: str) -> bool:
+    """
+    Hard-delete the Slack installation for a workspace.
+    Cascades to slack_channels via FK (on delete cascade).
+    Returns True if a row was deleted, False if not found or on error.
+    """
+    try:
+        client = get_supabase()
+        resp = (
+            client.table("slack_installations")
+            .delete()
+            .eq("workspace_id", workspace_id)
+            .execute()
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "supabase_delete_slack_installation_failed",
+            extra={"workspace_id": workspace_id, "error": type(e).__name__},
+        )
+        return False
+    rows = getattr(resp, "data", None) or []
+    return bool(rows)
+
+
 # ---------- slack_channels ------------------------------------------- #
 
 

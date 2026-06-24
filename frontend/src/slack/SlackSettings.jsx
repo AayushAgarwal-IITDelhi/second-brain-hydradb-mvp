@@ -24,6 +24,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
+  disconnectSlack,
   getSlackChannels,
   getSlackConnectUrl,
   runSlackIngest,
@@ -50,6 +51,8 @@ export default function SlackSettings() {
   const [saving, setSaving] = useState(false);
   const [ingesting, setIngesting] = useState(false);
   const [ingestResult, setIngestResult] = useState("");
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -123,6 +126,25 @@ export default function SlackSettings() {
       setError(e?.message || "Could not save channel selection.");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleDisconnect() {
+    setDisconnecting(true);
+    setError("");
+    try {
+      await disconnectSlack();
+      // Reset all local state to the unconnected view.
+      setConnected(false);
+      setTeamName("");
+      setChannels([]);
+      setSelectedIds(new Set());
+      setIngestResult("");
+      setConfirmDisconnect(false);
+    } catch (e) {
+      setError(e?.message || "Could not disconnect Slack.");
+    } finally {
+      setDisconnecting(false);
     }
   }
 
@@ -211,7 +233,7 @@ export default function SlackSettings() {
               type="button"
               className="btn btn--primary"
               onClick={handleSave}
-              disabled={saving || ingesting}
+              disabled={saving || ingesting || disconnecting || confirmDisconnect}
               title="Save the currently selected channels"
             >
               {saving ? "Saving…" : "Save channels"}
@@ -221,7 +243,8 @@ export default function SlackSettings() {
               className="btn btn--ghost"
               onClick={handleIngest}
               disabled={
-                saving || ingesting || selectedIds.size === 0
+                saving || ingesting || disconnecting || confirmDisconnect ||
+                selectedIds.size === 0
               }
               title={
                 selectedIds.size === 0
@@ -235,7 +258,7 @@ export default function SlackSettings() {
               type="button"
               className="btn btn--ghost"
               onClick={refresh}
-              disabled={saving || ingesting}
+              disabled={saving || ingesting || disconnecting || confirmDisconnect}
               title="Re-fetch channels from Slack"
             >
               Refresh
@@ -244,11 +267,44 @@ export default function SlackSettings() {
               type="button"
               className="btn btn--ghost"
               onClick={handleConnect}
-              disabled={saving || ingesting}
+              disabled={saving || ingesting || disconnecting}
               title="Re-run the OAuth flow (e.g. after rotating the Slack app)"
             >
               Reconnect
             </button>
+            {confirmDisconnect ? (
+              <>
+                <span className="slack-settings__muted">
+                  Remove this workspace?
+                </span>
+                <button
+                  type="button"
+                  className="btn btn--armed"
+                  onClick={handleDisconnect}
+                  disabled={disconnecting}
+                >
+                  {disconnecting ? "Disconnecting…" : "Yes, disconnect"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  onClick={() => setConfirmDisconnect(false)}
+                  disabled={disconnecting}
+                >
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                className="btn btn--ghost"
+                onClick={() => setConfirmDisconnect(true)}
+                disabled={saving || ingesting || disconnecting}
+                title="Revoke the Slack bot token and remove this workspace"
+              >
+                Disconnect
+              </button>
+            )}
           </div>
 
           {ingestResult && (

@@ -22,6 +22,7 @@ Endpoints:
     GET    /api/slack/channels                            -> {"connected", "channels"}     (Supabase JWT + Workspace)
     POST   /api/slack/channels                            -> {"selected_count"}            (Supabase JWT + Workspace)
     POST   /api/slack/ingest                              -> {"status": "started"}         (Supabase JWT + Workspace)
+    DELETE /api/slack/disconnect                          -> {"disconnected": true}         (Supabase JWT + Workspace)
     GET    /api/admin/status                              -> ingestion status snapshot     (X-API-Key, legacy)
     POST   /slack/events                                  -> Slack Events API webhook      (Slack signature)
 
@@ -121,6 +122,7 @@ from slack_oauth import (  # noqa: E402
     exchange_code,
     installation_from_oauth_response,
     list_slack_channels,
+    revoke_bot_token,
     run_workspace_ingest,
     slack_oauth_configured,
     verify_oauth_state,
@@ -134,6 +136,7 @@ from supabase_client import (  # noqa: E402
     create_share_link,
     delete_gmail_connection,
     delete_saved_answer,
+    delete_slack_installation,
     ensure_workspace_sub_tenant,
     get_gmail_connection,
     get_gmail_connection_public,
@@ -1986,6 +1989,37 @@ def slack_ingest(
         "status": "started",
         "channels_queued": len(channel_ids),
     }
+
+
+@app.delete("/api/slack/disconnect")
+def slack_disconnect(
+    workspace: WorkspaceContext = Depends(require_workspace),
+) -> Dict[str, bool]:
+    """
+    Disconnect the Slack workspace: revoke the bot token with Slack,
+    then delete the installation row (cascades to channel records).
+
+    Token revocation is fire-and-forget — local cleanup proceeds even
+    if Slack's auth.revoke returns an error (e.g. token already expired).
+    """
+    install = get_slack_installation(workspace_id=workspace.workspace_id)
+    if not install:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No Slack connection found for this workspace.",
+        )
+
+    # Revoke with Slack first so the token can't be reused after we
+    # delete our local record.  Failure here is non-fatal.
+    revoke_bot_token(install.get("bot_token") or "")
+
+    deleted = delete_slack_installation(workspace_id=workspace.workspace_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not remove the Slack installation.",
+        )
+    return {"disconnected": True}
 
 
 # =====================================================================
