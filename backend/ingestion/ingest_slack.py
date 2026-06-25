@@ -238,11 +238,15 @@ def build_thread_file(
         header_lines.append(f"Permalink: {permalink}")
 
     parent_attachment_lines = _collect_file_lines(parent_message.get("files") or [], slack)
-    lines = header_lines + [
-        "",
-        "Parent:",
-        f"[{thread_ts}] {parent_user_name}: {parent_text}",
-    ] + parent_attachment_lines
+    lines = (
+        header_lines
+        + [
+            "",
+            "Parent:",
+            f"[{thread_ts}] {parent_user_name}: {parent_text}",
+        ]
+        + parent_attachment_lines
+    )
     if real_replies:
         lines.append("")
         lines.append("Replies:")
