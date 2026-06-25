@@ -13,7 +13,7 @@ Routing:
         -> slack_installations row     (supabase_client.get_slack_installation_by_team_id)
         -> workspace_id + bot_token
         -> hydradb_sub_tenant_id       (supabase_client.ensure_workspace_sub_tenant)
-        -> is_channel_selected_for_workspace(...)
+        -> get_channel_ingest_settings(...)  # is_selected + include_bot_messages
         -> ingest using the workspace's bot_token + sub_tenant_id
 
 Events from a Slack team we don't have an installation for are silently
@@ -58,8 +58,8 @@ from ingestion.slack_client import SlackClientWrapper
 from logging_config import get_logger
 from supabase_client import (
     ensure_workspace_sub_tenant,
+    get_channel_ingest_settings,
     get_slack_installation_by_team_id,
-    is_channel_selected_for_workspace,
 )
 
 logger = get_logger(__name__)
@@ -342,9 +342,6 @@ def _process_slack_payload_inner(payload: Dict[str, Any]) -> None:
     # below because they need the same clients (slack, hydra) already
     # resolved. We defer to after that block — see the routing calls below.
 
-    if subtype in ("bot_message", "channel_join", "channel_leave"):
-        logger.debug('realtime_event_ignored', extra={'subtype': subtype})
-        return
     if is_noise(event):
         logger.debug(
             'realtime_event_ignored',
@@ -387,16 +384,19 @@ def _process_slack_payload_inner(payload: Dict[str, Any]) -> None:
     # ----- Channel-selection gate -----
     # The user must have explicitly opted this channel in via the Slack
     # settings panel. Unselected channels are dropped before we touch
-    # the Slack API.
-    if not is_channel_selected_for_workspace(
+    # the Slack API. We also read include_bot_messages here so the
+    # bot-loop guard below can allow opted-in bots through.
+    channel_settings = get_channel_ingest_settings(
         workspace_id=workspace_id,
         slack_channel_id=channel_id,
-    ):
+    )
+    if not channel_settings or not channel_settings["is_selected"]:
         logger.debug(
             'realtime_channel_not_selected',
             extra={'workspace_id': workspace_id, 'channel_id': channel_id},
         )
         return
+    include_bot_messages = channel_settings.get("include_bot_messages", False)
 
     # ----- Resolve workspace HydraDB sub-tenant -----
     sub_tenant = ensure_workspace_sub_tenant(workspace_id=workspace_id)
@@ -417,17 +417,13 @@ def _process_slack_payload_inner(payload: Dict[str, Any]) -> None:
 
     # ----- Bot-loop guard -----
     bot_user_id = _resolve_bot_user_id(slack, bot_token)
-    if event.get("bot_id"):
-        logger.debug(
-            'realtime_event_ignored',
-            extra={'reason': 'bot_id_set'},
-        )
+    is_bot_message = bool(event.get("bot_id")) or subtype == "bot_message"
+    if is_bot_message and not include_bot_messages:
+        logger.debug('realtime_event_ignored', extra={'reason': 'bot_message_not_opted_in'})
         return
+    # Always drop the workspace's own bot (loop prevention), even when opted in.
     if bot_user_id and event.get("user") == bot_user_id:
-        logger.debug(
-            'realtime_event_ignored',
-            extra={'reason': 'own_bot_user'},
-        )
+        logger.debug('realtime_event_ignored', extra={'reason': 'own_bot_user'})
         return
     # Edit/delete events carry no top-level text; exempt them before the
     # empty-text guard so they reach the handlers below.

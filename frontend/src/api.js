@@ -594,14 +594,18 @@ export function getSlackChannels(signal) {
 }
 
 /**
- * Replace the workspace's selected-channel set. `ids` is a string
- * array of slack_channel_id values; passing an empty array clears
- * the selection.
+ * Replace the workspace's selected-channel set and per-channel bot-message
+ * opt-in. `ids` is a string array of slack_channel_id values; passing an
+ * empty array clears the selection. `botIds` is the subset of channels for
+ * which include_bot_messages should be true.
  */
-export function saveSlackChannels(ids, signal) {
+export function saveSlackChannels(ids, botIds, signal) {
   return jsonFetch("/api/slack/channels", {
     method: "POST",
-    body: { selected_channel_ids: Array.isArray(ids) ? ids : [] },
+    body: {
+      selected_channel_ids: Array.isArray(ids) ? ids : [],
+      bot_message_channel_ids: Array.isArray(botIds) ? botIds : [],
+    },
     signal,
   });
 }

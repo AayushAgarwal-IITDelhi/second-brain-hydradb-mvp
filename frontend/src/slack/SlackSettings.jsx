@@ -14,7 +14,7 @@
 //           updated_at }
 //     ] }
 //
-//   POST /api/slack/channels  body { selected_channel_ids: string[] }
+//   POST /api/slack/channels  body { selected_channel_ids: string[], bot_message_channel_ids: string[] }
 //   POST /api/slack/ingest    -> { status: "started", channels_queued }
 //   GET  /api/slack/connect-url -> { url }
 //
@@ -48,6 +48,7 @@ export default function SlackSettings() {
   // We only POST on Save so accidental clicks are recoverable via
   // Cancel (i.e. close-and-reopen).
   const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [botMessageIds, setBotMessageIds] = useState(() => new Set());
   const [saving, setSaving] = useState(false);
   const [ingesting, setIngesting] = useState(false);
   const [ingestResult, setIngestResult] = useState("");
@@ -63,15 +64,20 @@ export default function SlackSettings() {
       setConnected(Boolean(data?.connected));
       setTeamName(data?.team_name || "");
       setChannels(list);
-      // Hydrate the local selected-set from server truth so the
-      // checkboxes start in the right state.
+      // Hydrate the local selected-set and bot-message-set from server
+      // truth so the checkboxes start in the right state.
       const next = new Set();
+      const botNext = new Set();
       for (const c of list) {
         if (c?.is_selected && c?.slack_channel_id) {
           next.add(c.slack_channel_id);
         }
+        if (c?.include_bot_messages && c?.slack_channel_id) {
+          botNext.add(c.slack_channel_id);
+        }
       }
       setSelectedIds(next);
+      setBotMessageIds(botNext);
     } catch (e) {
       // Authentication or workspace missing surfaces here too — we
       // show the message and let the user try again rather than
@@ -79,6 +85,7 @@ export default function SlackSettings() {
       setConnected(false);
       setChannels([]);
       setSelectedIds(new Set());
+      setBotMessageIds(new Set());
       setError(e?.message || "Could not load Slack settings.");
     } finally {
       setLoading(false);
@@ -91,6 +98,25 @@ export default function SlackSettings() {
 
   function toggleChannel(id) {
     setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+    // When deselecting a channel, clear its bot-message opt-in so the
+    // checkbox doesn't reappear stale if the channel is re-selected later.
+    if (selectedIds.has(id)) {
+      setBotMessageIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
+  }
+
+  function toggleBotMessages(id) {
+    setBotMessageIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
@@ -117,7 +143,8 @@ export default function SlackSettings() {
     setSaving(true);
     try {
       const ids = Array.from(selectedIds);
-      await saveSlackChannels(ids);
+      const botIds = Array.from(botMessageIds).filter((id) => selectedIds.has(id));
+      await saveSlackChannels(ids, botIds);
       // Re-read from the server so the checkbox state matches what
       // was just persisted (the round-trip also surfaces any
       // transient errors).
@@ -139,6 +166,7 @@ export default function SlackSettings() {
       setTeamName("");
       setChannels([]);
       setSelectedIds(new Set());
+      setBotMessageIds(new Set());
       setIngestResult("");
       setConfirmDisconnect(false);
     } catch (e) {
@@ -267,7 +295,7 @@ export default function SlackSettings() {
               type="button"
               className="btn btn--ghost"
               onClick={handleConnect}
-              disabled={saving || ingesting || disconnecting}
+              disabled={saving || ingesting || disconnecting || confirmDisconnect}
               title="Re-run the OAuth flow (e.g. after rotating the Slack app)"
             >
               Reconnect
@@ -332,7 +360,29 @@ export default function SlackSettings() {
                       <span className="slack-settings__name">
                         #{c.name || c.slack_channel_id}
                       </span>
+                      {c.bot_removed && (
+                        <span
+                          className="slack-settings__tag slack-settings__tag--warning"
+                          title="Bot removed — re-invite the app to this channel to resume ingestion"
+                        >
+                          bot removed
+                        </span>
+                      )}
                     </label>
+                    {selectedIds.has(c.slack_channel_id) && (
+                      <label
+                        className="slack-settings__bot-toggle"
+                        title="Also ingest messages from bots (CI, deployment alerts, etc.)"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={botMessageIds.has(c.slack_channel_id)}
+                          onChange={() => toggleBotMessages(c.slack_channel_id)}
+                          disabled={saving || ingesting}
+                        />
+                        <span className="slack-settings__muted">include bots</span>
+                      </label>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -359,6 +409,14 @@ export default function SlackSettings() {
                             #{c.name || c.slack_channel_id}
                           </span>
                           <span className="slack-settings__tag">archived</span>
+                          {c.bot_removed && (
+                            <span
+                              className="slack-settings__tag slack-settings__tag--warning"
+                              title="Bot removed — re-invite the app to this channel to resume ingestion"
+                            >
+                              bot removed
+                            </span>
+                          )}
                         </label>
                       </li>
                     ))}

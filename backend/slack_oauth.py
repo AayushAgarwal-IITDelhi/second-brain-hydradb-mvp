@@ -40,6 +40,7 @@ logger = get_logger(__name__)
 DEFAULT_SCOPES = (
     "channels:history",
     "channels:read",
+    "files:read",
     "groups:history",
     "groups:read",
     "users:read",
@@ -323,6 +324,7 @@ def run_workspace_ingest(
     workspace_id: str,
     bot_token: str,
     channel_ids: List[str],
+    channel_bot_messages: Optional[Dict[str, bool]] = None,
     hydradb_sub_tenant_id: Optional[str] = None,
     force: bool = False,
 ) -> Dict[str, Any]:
@@ -361,6 +363,7 @@ def run_workspace_ingest(
     )
     from ingestion.ingestion_state import IngestionState
     from ingestion.slack_client import SlackClientWrapper
+    from supabase_client import mark_channel_bot_removed
 
     slack = SlackClientWrapper(token=bot_token)
     # Phase 4: route uploads to the workspace's HydraDB sub-tenant.
@@ -393,7 +396,8 @@ def run_workspace_ingest(
     for channel_id in channel_ids:
 
         def _process_one() -> Dict[str, Any]:
-            return process_channel(slack, channel_id, state, force=force)
+            include_bot = (channel_bot_messages or {}).get(channel_id, False)
+            return process_channel(slack, channel_id, state, force=force, include_bot_messages=include_bot)
 
         def _on_giveup(err: BaseException, _channel_id: str = channel_id) -> None:
             emit_dead_letter(
@@ -426,7 +430,23 @@ def run_workspace_ingest(
                 },
             )
             total_failure += 1
+            # Only update bot_removed if we know the cause; leave the flag
+            # unchanged for generic network failures so a prior removal
+            # notice isn't silently cleared.
+            if channel_id in slack.bot_removed_channels:
+                mark_channel_bot_removed(
+                    workspace_id=workspace_id,
+                    channel_id=channel_id,
+                    removed=True,
+                )
             continue
+
+        # After every successful attempt: set or clear bot_removed.
+        mark_channel_bot_removed(
+            workspace_id=workspace_id,
+            channel_id=channel_id,
+            removed=(channel_id in slack.bot_removed_channels),
+        )
         processed += 1
         total_files += len(result.get("files") or [])
         total_skipped += result.get("skipped_count", 0)
