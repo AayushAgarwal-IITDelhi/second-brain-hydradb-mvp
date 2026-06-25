@@ -150,6 +150,7 @@ from supabase_client import (  # noqa: E402
     list_gmail_labels,
     list_saved_answers,
     list_selected_channel_ids,
+    list_selected_channel_settings,
     list_selected_gmail_label_ids,
     list_share_links_for_workspace,
     list_user_workspaces,
@@ -1065,6 +1066,7 @@ class SlackChannelSelection(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     selected_channel_ids: List[str] = Field(default_factory=list)
+    bot_message_channel_ids: List[str] = Field(default_factory=list)
 
 
 # ---------- Phase 8: Gmail request models ---------- #
@@ -1915,6 +1917,7 @@ def slack_channels_save(
     ok = set_selected_channels(
         workspace_id=workspace.workspace_id,
         selected_ids=req.selected_channel_ids,
+        bot_message_ids=req.bot_message_channel_ids,
     )
     if not ok:
         raise HTTPException(
@@ -1955,14 +1958,18 @@ def slack_ingest(
             detail="Stored Slack installation is missing a bot token.",
         )
 
-    channel_ids = list_selected_channel_ids(
+    channel_settings = list_selected_channel_settings(
         workspace_id=workspace.workspace_id,
     )
-    if not channel_ids:
+    if not channel_settings:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No channels selected for ingestion.",
         )
+    channel_ids = [c["slack_channel_id"] for c in channel_settings]
+    channel_bot_messages = {
+        c["slack_channel_id"]: c["include_bot_messages"] for c in channel_settings
+    }
 
     # Phase 4: resolve (or lazy-create) the workspace's HydraDB
     # sub-tenant before scheduling the background task. A blank value
@@ -1983,6 +1990,7 @@ def slack_ingest(
         workspace_id=workspace.workspace_id,
         bot_token=bot_token,
         channel_ids=channel_ids,
+        channel_bot_messages=channel_bot_messages,
         hydradb_sub_tenant_id=sub_tenant,
     )
     return {
