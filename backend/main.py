@@ -1967,9 +1967,7 @@ def slack_ingest(
             detail="No channels selected for ingestion.",
         )
     channel_ids = [c["slack_channel_id"] for c in channel_settings]
-    channel_bot_messages = {
-        c["slack_channel_id"]: c["include_bot_messages"] for c in channel_settings
-    }
+    channel_bot_messages = {c["slack_channel_id"]: c["include_bot_messages"] for c in channel_settings}
 
     # Phase 4: resolve (or lazy-create) the workspace's HydraDB
     # sub-tenant before scheduling the background task. A blank value

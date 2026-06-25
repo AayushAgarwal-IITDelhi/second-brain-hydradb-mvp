@@ -857,12 +857,7 @@ def delete_slack_installation(*, workspace_id: str) -> bool:
     """
     try:
         client = get_supabase()
-        resp = (
-            client.table("slack_installations")
-            .delete()
-            .eq("workspace_id", workspace_id)
-            .execute()
-        )
+        resp = client.table("slack_installations").delete().eq("workspace_id", workspace_id).execute()
     except Exception as e:  # noqa: BLE001
         logger.warning(
             "supabase_delete_slack_installation_failed",
@@ -1123,10 +1118,12 @@ def list_selected_channel_settings(
     for row in getattr(resp, "data", None) or []:
         cid = (row.get("slack_channel_id") or "").strip()
         if cid:
-            out.append({
-                "slack_channel_id": cid,
-                "include_bot_messages": bool(row.get("include_bot_messages")),
-            })
+            out.append(
+                {
+                    "slack_channel_id": cid,
+                    "include_bot_messages": bool(row.get("include_bot_messages")),
+                }
+            )
     return out
 
 

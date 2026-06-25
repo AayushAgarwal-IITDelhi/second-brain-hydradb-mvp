@@ -134,6 +134,7 @@ def topic_overview(
             (r.get("entity_type") or "").strip().lower(),
             (r.get("content") or "").strip().lower(),
         )
+
     counts: Counter = Counter()
     first_seen: Dict[Tuple[str, str], str] = {}
     last_seen: Dict[Tuple[str, str], str] = {}
